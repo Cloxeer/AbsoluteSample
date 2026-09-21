@@ -119,13 +119,9 @@ export function StemGroup({
               key={`${trackId}:${stem.key}`}
               stem={stem}
               wavUrl={wavUrls[stem.path] ?? null}
-              solo={t.solo}
-              mute={t.mute}
               volume={t.volume}
               isAuditioning={isAuditioning}
               currentTime={currentTime}
-              onToggleSolo={() => onUpsertTrack({ ...t, solo: !t.solo })}
-              onToggleMute={() => onUpsertTrack({ ...t, mute: !t.mute })}
               onVolumeChange={(v) => onUpsertTrack({ ...t, volume: v })}
               onDownload={() => handleDownload(stem)}
               extraAction={

@@ -7,14 +7,10 @@ const baseProps = {
   name: "Drums / Sub",
   band: "LP 130 Hz (LR4)",
   isAuditioning: false,
-  solo: false,
-  mute: false,
   volume: 1,
   peakDb: -2.5,
   rmsDb: -16,
   onAudition: vi.fn(),
-  onToggleSolo: vi.fn(),
-  onToggleMute: vi.fn(),
   onVolumeChange: vi.fn(),
   onDownload: vi.fn(),
 };
@@ -34,13 +30,14 @@ describe("TrackHeader", () => {
     expect(btn).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("shows a MUTED tag when muted", () => {
-    render(<TrackHeader {...baseProps} mute />);
-    expect(screen.getByText("MUTED")).toBeInTheDocument();
-  });
-
   it("renders as an accessible group", () => {
     render(<TrackHeader {...baseProps} />);
     expect(screen.getByRole("group", { name: "Drums / Sub track controls" })).toBeInTheDocument();
+  });
+
+  it("has no Solo or Mute buttons", () => {
+    render(<TrackHeader {...baseProps} />);
+    expect(screen.queryByLabelText("Solo")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Mute")).not.toBeInTheDocument();
   });
 });

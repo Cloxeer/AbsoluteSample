@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Download, Drum, Guitar, Mic2, Piano, Sparkles } from "lucide-react";
 import WaveSurfer from "wavesurfer.js";
 import { Button } from "@/components/neumorphic/Button";
+import { InfoTip } from "@/components/neumorphic/InfoTip";
 import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { Slider } from "@/components/neumorphic/Slider";
 import { Playhead } from "@/components/waveform/Playhead";
@@ -28,25 +29,17 @@ const GROUP_ICONS: Record<InstrumentGroup, typeof Mic2> = {
   other: Sparkles,
 };
 
-function soundsLikeCaption(stem: InstrumentStem): string | null {
-  if (!stem.soundsLike || !stem.tags || stem.tags.length === 0) return null;
-  const top = stem.tags[0];
-  return `sounds like ${stem.soundsLike} (${top.label.toLowerCase()} ${top.score.toFixed(2)})`;
-}
-
-function tagsTooltip(stem: InstrumentStem): string | undefined {
-  if (!stem.tags || stem.tags.length === 0) return undefined;
-  return stem.tags.slice(0, 5).map((t) => `${t.label} ${t.score.toFixed(2)}`).join("\n");
-}
-
 function dbToRatio(db: number): number {
   return Math.min(1, Math.max(0, (db + 60) / 60));
 }
 
-function Meter({ label, db, color }: { label: string; db: number; color: string }) {
+function Meter({ label, db, color, infoTip }: { label: string; db: number; color: string; infoTip?: React.ReactNode }) {
   return (
     <div className="flex items-center gap-1.5">
-      <span className="w-6 text-[9px] text-muted uppercase shrink-0">{label}</span>
+      <span className="flex items-center gap-1 w-6 text-[9px] text-muted uppercase shrink-0">
+        {label}
+        {infoTip}
+      </span>
       <div className="flex-1 h-1.5 rounded-full neu-surface-inset overflow-hidden">
         <div className="h-full rounded-full" style={{ width: `${dbToRatio(db) * 100}%`, backgroundColor: color }} />
       </div>
@@ -55,19 +48,51 @@ function Meter({ label, db, color }: { label: string; db: number; color: string 
   );
 }
 
+function detectionsLine(detections: { label: string; score: number }[], count: number): string {
+  return detections
+    .slice(0, count)
+    .map((d) => `${d.label} ${d.score.toFixed(2)}`)
+    .join(", ");
+}
+
+function DetectionsRow({ stem }: { stem: InstrumentStem }) {
+  const [expanded, setExpanded] = useState(false);
+  const detections = stem.detections;
+  if (!detections || detections.length === 0) return null;
+  const hasMore = detections.length > 3;
+  const shown = expanded ? detections.slice(0, 5) : detections.slice(0, 3);
+  return (
+    <div className="flex items-center gap-1 min-w-0">
+      <span className="text-[10px] text-muted truncate">{detectionsLine(shown, shown.length)}</span>
+      {hasMore && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="text-[9px] text-muted hover:text-text shrink-0"
+          aria-label={expanded ? "Show fewer detections" : "Show more detections"}
+        >
+          {expanded ? "-" : `+${Math.min(detections.length, 5) - 3}`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function confidenceDotColor(score: number): string {
+  if (score >= 0.7) return "#3DD68C";
+  if (score >= 0.4) return "#F2B33D";
+  return "#8A94A6";
+}
+
 export interface InstrumentTrackProps {
   stem: InstrumentStem;
   wavUrl: string | null;
-  solo: boolean;
-  mute: boolean;
   volume: number;
   isPlaying: boolean;
   currentTime?: number;
   /** True for kit/lead-backing child rows, which render smaller and indented. */
   indented?: boolean;
   onTogglePlay: () => void;
-  onToggleSolo: () => void;
-  onToggleMute: () => void;
   onVolumeChange: (v: number) => void;
   onDownload: () => void;
   /** Optional extra icon action rendered next to Download, e.g. a Save-as-sample button. */
@@ -81,15 +106,11 @@ export interface InstrumentTrackProps {
 export function InstrumentTrack({
   stem,
   wavUrl,
-  solo,
-  mute,
   volume,
   isPlaying,
   currentTime = 0,
   indented = false,
   onTogglePlay,
-  onToggleSolo,
-  onToggleMute,
   onVolumeChange,
   onDownload,
   extraAction,
@@ -139,21 +160,14 @@ export function InstrumentTrack({
       <div
         className={clsx(
           "shrink-0 flex flex-col gap-2 p-3 rounded-2xl bg-surface neu-surface-raised",
-          indented ? "w-[210px]" : "w-[240px]",
-          solo && "border-l-4",
-          mute && "opacity-70"
+          indented ? "w-[210px]" : "w-[240px]"
         )}
-        style={solo ? { borderLeftColor: color } : undefined}
       >
         <div className="flex items-start gap-2">
           <Icon size={14} color={color} className="mt-0.5 shrink-0" aria-hidden />
           <div className="min-w-0 flex-1" title={stem.model}>
-            <div className="text-sm font-semibold truncate">{stem.label}</div>
-            {soundsLikeCaption(stem) && (
-              <div className="text-[10px] text-muted truncate" title={tagsTooltip(stem)}>
-                {soundsLikeCaption(stem)}
-              </div>
-            )}
+            <div className="text-sm font-semibold truncate">{stem.displayLabel ?? stem.label}</div>
+            <DetectionsRow stem={stem} />
           </div>
           <PlayPauseButton
             playing={isPlaying}
@@ -164,19 +178,7 @@ export function InstrumentTrack({
           />
         </div>
 
-        {mute && (
-          <span className="self-start text-[9px] font-bold tracking-wide px-1.5 py-0.5 rounded bg-danger/20 text-danger">
-            MUTED
-          </span>
-        )}
-
         <div className="flex items-center gap-1">
-          <Button aria-label={`Solo ${stem.label}`} aria-pressed={solo} pressed={solo} tone="amber" onClick={onToggleSolo} className="!px-2 !py-1 text-xs font-bold flex-1">
-            S
-          </Button>
-          <Button aria-label={`Mute ${stem.label}`} aria-pressed={mute} pressed={mute} tone="red" onClick={onToggleMute} className="!px-2 !py-1 text-xs font-bold flex-1">
-            M
-          </Button>
           <Button aria-label={`Download ${stem.label} WAV`} onClick={onDownload} className="!px-2 !py-1 shrink-0">
             <Download size={14} />
           </Button>
@@ -192,12 +194,36 @@ export function InstrumentTrack({
 
         {!indented && (
           <div className="flex flex-col gap-1">
-            <Meter label="Pk" db={stem.peakDb} color={color} />
-            <Meter label="RMS" db={stem.rmsDb} color={color} />
+            <Meter
+              label="Pk"
+              db={stem.peakDb}
+              color={color}
+              infoTip={<InfoTip term="PK" text="The loudest single moment in this track." />}
+            />
+            <Meter
+              label="RMS"
+              db={stem.rmsDb}
+              color={color}
+              infoTip={<InfoTip term="RMS" text="How loud it feels on average." />}
+            />
+            {stem.confidence && (
+              <div className="flex items-center gap-1.5">
+                <span
+                  className="w-1.5 h-1.5 rounded-full shrink-0"
+                  style={{ backgroundColor: confidenceDotColor(stem.confidence.score) }}
+                  aria-hidden
+                />
+                <span className="text-[9px] text-muted">Confidence {stem.confidence.score.toFixed(2)}</span>
+                <InfoTip
+                  term="confidence"
+                  text={`How sure the models are about this track. ${stem.confidence.reasons.join(". ")}`}
+                />
+              </div>
+            )}
           </div>
         )}
       </div>
-      <div className={clsx("relative flex-1 min-w-0 rounded-2xl bg-surface neu-surface-raised p-2 transition-opacity duration-150", mute && "opacity-35")}>
+      <div className="relative flex-1 min-w-0 rounded-2xl bg-surface neu-surface-raised p-2 transition-opacity duration-150">
         <div className="min-w-0" ref={containerRef} data-testid={`waveform-${stem.key}`} />
         <Playhead currentTime={currentTime} duration={duration} />
       </div>

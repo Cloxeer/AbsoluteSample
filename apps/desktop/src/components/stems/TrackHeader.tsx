@@ -1,5 +1,6 @@
 import { Download } from "lucide-react";
 import { Button } from "@/components/neumorphic/Button";
+import { InfoTip } from "@/components/neumorphic/InfoTip";
 import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { Slider } from "@/components/neumorphic/Slider";
 import { formatDb } from "@/lib/format";
@@ -11,14 +12,10 @@ export interface TrackHeaderProps {
   band: string;
   /** True while this exact track is the audition target and actively playing. */
   isAuditioning: boolean;
-  solo: boolean;
-  mute: boolean;
   volume: number;
   peakDb: number;
   rmsDb: number;
   onAudition: () => void;
-  onToggleSolo: () => void;
-  onToggleMute: () => void;
   onVolumeChange: (v: number) => void;
   onDownload: () => void;
   /** Optional extra icon action rendered next to Download, e.g. a Save-as-sample button. */
@@ -31,10 +28,13 @@ function dbToRatio(db: number): number {
   return Math.min(1, Math.max(0, (db + 60) / 60));
 }
 
-function Meter({ label, db, color }: { label: string; db: number; color: string }) {
+function Meter({ label, db, color, infoTip }: { label: string; db: number; color: string; infoTip?: React.ReactNode }) {
   return (
     <div className="flex items-center gap-1.5">
-      <span className="w-6 text-[9px] text-muted uppercase shrink-0">{label}</span>
+      <span className="flex items-center gap-1 w-6 text-[9px] text-muted uppercase shrink-0">
+        {label}
+        {infoTip}
+      </span>
       <div className="flex-1 h-1.5 rounded-full neu-surface-inset overflow-hidden">
         <div
           className="h-full rounded-full transition-[width] duration-150"
@@ -46,20 +46,16 @@ function Meter({ label, db, color }: { label: string; db: number; color: string 
   );
 }
 
-/** Fixed-width (~240px) DAW-style track header: identity, transport, S/M, volume, meters, download. */
+/** Fixed-width (~240px) DAW-style track header: identity, transport, volume, meters, download. */
 export function TrackHeader({
   color,
   name,
   band,
   isAuditioning,
-  solo,
-  mute,
   volume,
   peakDb,
   rmsDb,
   onAudition,
-  onToggleSolo,
-  onToggleMute,
   onVolumeChange,
   onDownload,
   extraAction,
@@ -69,13 +65,7 @@ export function TrackHeader({
     <div
       role="group"
       aria-label={`${name} track controls`}
-      className={clsx(
-        "w-[240px] shrink-0 flex flex-col gap-2 p-3 rounded-2xl bg-surface neu-surface-raised",
-        solo && "border-l-4",
-        mute && "opacity-70",
-        className
-      )}
-      style={solo ? { borderLeftColor: color, boxShadow: `${`var(--shadow-raised)`}, 0 0 12px ${color}55` } : undefined}
+      className={clsx("w-[240px] shrink-0 flex flex-col gap-2 p-3 rounded-2xl bg-surface neu-surface-raised", className)}
     >
       <div className="flex items-start gap-2">
         <div className="w-1.5 self-stretch rounded-full shrink-0" style={{ backgroundColor: color }} aria-hidden />
@@ -92,33 +82,7 @@ export function TrackHeader({
         />
       </div>
 
-      {mute && (
-        <span className="self-start text-[9px] font-bold tracking-wide px-1.5 py-0.5 rounded bg-stem-drums/20 text-stem-drums">
-          MUTED
-        </span>
-      )}
-
       <div className="flex items-center gap-1">
-        <Button
-          aria-label="Solo"
-          aria-pressed={solo}
-          pressed={solo}
-          tone="amber"
-          onClick={onToggleSolo}
-          className="!px-2 !py-1 text-xs font-bold flex-1"
-        >
-          S
-        </Button>
-        <Button
-          aria-label="Mute"
-          aria-pressed={mute}
-          pressed={mute}
-          tone="red"
-          onClick={onToggleMute}
-          className="!px-2 !py-1 text-xs font-bold flex-1"
-        >
-          M
-        </Button>
         <Button aria-label={`Download ${name} WAV`} onClick={onDownload} className="!px-2 !py-1 shrink-0">
           <Download size={14} />
         </Button>
@@ -142,8 +106,8 @@ export function TrackHeader({
       </div>
 
       <div className="flex flex-col gap-1">
-        <Meter label="Pk" db={peakDb} color={color} />
-        <Meter label="RMS" db={rmsDb} color={color} />
+        <Meter label="Pk" db={peakDb} color={color} infoTip={<InfoTip term="PK" text="The loudest single moment in this track." />} />
+        <Meter label="RMS" db={rmsDb} color={color} infoTip={<InfoTip term="RMS" text="How loud it feels on average." />} />
       </div>
     </div>
   );

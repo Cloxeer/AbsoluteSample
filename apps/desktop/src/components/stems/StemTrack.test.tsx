@@ -32,55 +32,13 @@ const stem: StemInfo = {
 };
 
 describe("StemTrack", () => {
-  it("calls onToggleSolo when S is clicked", () => {
-    const onToggleSolo = vi.fn();
-    render(
-      <StemTrack
-        stem={stem}
-        wavUrl="blob:mock"
-        solo={false}
-        mute={false}
-        volume={1}
-        onToggleSolo={onToggleSolo}
-        onToggleMute={vi.fn()}
-        onVolumeChange={vi.fn()}
-        onDownload={vi.fn()}
-      />
-    );
-    fireEvent.click(screen.getByLabelText("Solo"));
-    expect(onToggleSolo).toHaveBeenCalledTimes(1);
-  });
-
-  it("calls onToggleMute when M is clicked", () => {
-    const onToggleMute = vi.fn();
-    render(
-      <StemTrack
-        stem={stem}
-        wavUrl="blob:mock"
-        solo={false}
-        mute={false}
-        volume={1}
-        onToggleSolo={vi.fn()}
-        onToggleMute={onToggleMute}
-        onVolumeChange={vi.fn()}
-        onDownload={vi.fn()}
-      />
-    );
-    fireEvent.click(screen.getByLabelText("Mute"));
-    expect(onToggleMute).toHaveBeenCalledTimes(1);
-  });
-
   it("calls onDownload when download button is clicked", () => {
     const onDownload = vi.fn();
     render(
       <StemTrack
         stem={stem}
         wavUrl="blob:mock"
-        solo={false}
-        mute={false}
         volume={1}
-        onToggleSolo={vi.fn()}
-        onToggleMute={vi.fn()}
         onVolumeChange={vi.fn()}
         onDownload={onDownload}
       />
@@ -95,12 +53,8 @@ describe("StemTrack", () => {
       <StemTrack
         stem={stem}
         wavUrl="blob:mock"
-        solo={false}
-        mute={false}
         volume={1}
         isAuditioning={false}
-        onToggleSolo={vi.fn()}
-        onToggleMute={vi.fn()}
         onVolumeChange={vi.fn()}
         onDownload={vi.fn()}
         onAudition={onAudition}
@@ -115,12 +69,8 @@ describe("StemTrack", () => {
       <StemTrack
         stem={stem}
         wavUrl="blob:mock"
-        solo={false}
-        mute={false}
         volume={1}
         isAuditioning
-        onToggleSolo={vi.fn()}
-        onToggleMute={vi.fn()}
         onVolumeChange={vi.fn()}
         onDownload={vi.fn()}
         onAudition={onAudition}
@@ -129,20 +79,11 @@ describe("StemTrack", () => {
     expect(screen.getByLabelText("Pause Drums / Sub only")).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("shows a MUTED tag and dims the lane when muted", () => {
+  it("has no Solo or Mute buttons", () => {
     render(
-      <StemTrack
-        stem={stem}
-        wavUrl="blob:mock"
-        solo={false}
-        mute
-        volume={1}
-        onToggleSolo={vi.fn()}
-        onToggleMute={vi.fn()}
-        onVolumeChange={vi.fn()}
-        onDownload={vi.fn()}
-      />
+      <StemTrack stem={stem} wavUrl="blob:mock" volume={1} onVolumeChange={vi.fn()} onDownload={vi.fn()} />
     );
-    expect(screen.getByText("MUTED")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Solo")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Mute")).not.toBeInTheDocument();
   });
 });

@@ -113,15 +113,11 @@ export function InstrumentTrackList({
         key={`${trackId}:${stem.key}`}
         stem={stem}
         wavUrl={wavUrls[stem.path] ?? null}
-        solo={t.solo}
-        mute={t.mute}
         volume={t.volume}
         isPlaying={isAuditioning}
         indented={indented}
         currentTime={currentTime}
         onTogglePlay={() => onAudition(stem.key)}
-        onToggleSolo={() => onUpsertTrack({ ...t, solo: !t.solo })}
-        onToggleMute={() => onUpsertTrack({ ...t, mute: !t.mute })}
         onVolumeChange={(v) => onUpsertTrack({ ...t, volume: v })}
         onDownload={() => handleDownload(stem)}
         extraAction={

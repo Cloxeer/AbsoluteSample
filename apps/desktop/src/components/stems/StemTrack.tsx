@@ -4,7 +4,6 @@ import { TrackHeader } from "./TrackHeader";
 import { Playhead } from "@/components/waveform/Playhead";
 import type { StemInfo } from "@/lib/types";
 import { peaksOptions } from "@/lib/wavePeaks";
-import clsx from "clsx";
 
 const STEM_COLORS: Record<string, string> = {
   drums_sub: "#FF6B6B",
@@ -16,14 +15,10 @@ const STEM_COLORS: Record<string, string> = {
 export interface StemTrackProps {
   stem: StemInfo;
   wavUrl: string | null;
-  solo: boolean;
-  mute: boolean;
   volume: number;
   /** True while this stem is the audition (solo-play) target and actively playing. */
   isAuditioning?: boolean;
   currentTime?: number;
-  onToggleSolo: () => void;
-  onToggleMute: () => void;
   onVolumeChange: (v: number) => void;
   onDownload: () => void;
   extraAction?: React.ReactNode;
@@ -37,13 +32,9 @@ export interface StemTrackProps {
 export function StemTrack({
   stem,
   wavUrl,
-  solo,
-  mute,
   volume,
   isAuditioning = false,
   currentTime = 0,
-  onToggleSolo,
-  onToggleMute,
   onVolumeChange,
   onDownload,
   extraAction,
@@ -97,24 +88,15 @@ export function StemTrack({
         name={stem.label}
         band={stem.band}
         isAuditioning={isAuditioning}
-        solo={solo}
-        mute={mute}
         volume={volume}
         peakDb={peakDb}
         rmsDb={rmsDb}
         onAudition={() => onAudition?.()}
-        onToggleSolo={onToggleSolo}
-        onToggleMute={onToggleMute}
         onVolumeChange={onVolumeChange}
         onDownload={onDownload}
         extraAction={extraAction}
       />
-      <div
-        className={clsx(
-          "relative flex-1 min-w-0 rounded-2xl bg-surface neu-surface-raised p-2 transition-opacity duration-150",
-          mute && "opacity-35"
-        )}
-      >
+      <div className="relative flex-1 min-w-0 rounded-2xl bg-surface neu-surface-raised p-2 transition-opacity duration-150">
         <div className="min-w-0" ref={containerRef} data-testid={`waveform-${stem.key}`} />
         <Playhead currentTime={currentTime} duration={duration} />
       </div>
