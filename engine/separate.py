@@ -135,7 +135,7 @@ def make_separator(model_dir: Path, out_dir: Path, pass_name: str, device_pref: 
         normalization_threshold=1.0,
         amplification_threshold=0.0,
         use_autocast=False,
-        demucs_params={"segment_size": "Default", "shifts": 4, "overlap": 0.5, "segments_enabled": True},
+        demucs_params={"segment_size": "Default", "shifts": 2, "overlap": 0.4, "segments_enabled": True},
         mdxc_params={"segment_size": 256, "override_model_segment_size": False, "batch_size": 1, "overlap": 8, "pitch_shift": 0},
     )
     sep.logger.addHandler(_ProgressHook(pass_name))

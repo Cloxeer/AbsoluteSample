@@ -116,6 +116,21 @@ pub struct InstrumentStem {
     pub tags: Option<Vec<InstrumentTag>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sounds_like: Option<String>,
+    /// v6: honest naming and confidence from the tag pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detections: Option<Vec<InstrumentTag>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<StemConfidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StemConfidence {
+    pub score: f64,
+    #[serde(default)]
+    pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,7 +161,7 @@ pub fn engine_dir() -> Result<PathBuf, String> {
     Ok(workspace::home_dir()?.join("engine"))
 }
 
-fn venv_python_path(engine: &Path) -> PathBuf {
+pub(crate) fn venv_python_path(engine: &Path) -> PathBuf {
     engine.join("venv").join("Scripts").join("python.exe")
 }
 
@@ -580,6 +595,12 @@ pub struct RawStem {
     pub tags: Option<Vec<InstrumentTag>>,
     #[serde(default, rename = "soundsLike")]
     pub sounds_like: Option<String>,
+    #[serde(default, rename = "displayLabel")]
+    pub display_label: Option<String>,
+    #[serde(default)]
+    pub detections: Option<Vec<InstrumentTag>>,
+    #[serde(default)]
+    pub confidence: Option<StemConfidence>,
 }
 
 /// Parses one JSON line from separate.py's stdout into a `SeparateEvent`.
@@ -848,6 +869,9 @@ pub fn separate(
             peaks: stem_peaks,
             tags: raw.tags,
             sounds_like: raw.sounds_like,
+            display_label: raw.display_label,
+            detections: raw.detections,
+            confidence: raw.confidence,
         });
     }
 
