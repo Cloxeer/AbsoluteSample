@@ -23,6 +23,8 @@ export interface StemGroupProps {
   onTimeUpdate: (id: string, time: number) => void;
   onFinish: (id: string) => void;
   onAudition: (id: string) => void;
+  /** Called with the clicked time (seconds) when the user clicks/drags on any lane's waveform. */
+  onSeek?: (time: number) => void;
   /** Called after a save/export completes (backend marks the track kept automatically). */
   onSaved?: () => void;
   /** Song title and loop range, for the "Save as sample" default name; samples list, to show already-saved state. */
@@ -47,6 +49,7 @@ export function StemGroup({
   onTimeUpdate,
   onFinish,
   onAudition,
+  onSeek,
   onSaved,
   songTitle,
   loopStartSec,
@@ -147,6 +150,7 @@ export function StemGroup({
               onTimeUpdate={(t) => onTimeUpdate(stem.key, t)}
               onFinish={() => onFinish(stem.key)}
               onDestroy={() => onUnregisterInstance(stem.key)}
+              onSeek={onSeek}
             />
           );
         })}

@@ -101,6 +101,7 @@ function LoopPreview({
       barGap: 1,
       barRadius: 2,
       normalize: true,
+      interact: true,
       ...peaksOptions(peaks, endSec - startSec),
     });
     ws.on("play", () => {
@@ -482,6 +483,7 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
             onTimeUpdate={sync.handleTimeUpdate}
             onFinish={sync.handleFinish}
             onAudition={sync.auditionTrack}
+            onSeek={sync.seek}
             onSaved={onLibraryChanged}
             songTitle={engine.track.title}
             loopStartSec={engine.loop?.startSec}
@@ -510,6 +512,7 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
             onTimeUpdate={sync.handleTimeUpdate}
             onFinish={sync.handleFinish}
             onAudition={sync.auditionTrack}
+            onSeek={sync.seek}
             onSaved={onLibraryChanged}
             songTitle={engine.track.title}
             loopStartSec={engine.loop?.startSec}

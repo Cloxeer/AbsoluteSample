@@ -1,6 +1,6 @@
 import { mixEngine } from "./mixEngine";
 
-export type NowPlayingKind = "mix" | "audition" | "sample" | "pad" | "source" | "loop" | null;
+export type NowPlayingKind = "mix" | "audition" | "sample" | "pad" | "source" | "loop" | "notes" | null;
 
 export interface NowPlayingState {
   kind: NowPlayingKind;

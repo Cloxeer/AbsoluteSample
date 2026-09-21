@@ -9,10 +9,11 @@ export interface PlayPauseButtonProps {
   label: string;
   tone?: ButtonTone;
   className?: string;
+  disabled?: boolean;
 }
 
 /** A single play/pause control used everywhere audio can be toggled. Never shows a stale label. */
-export function PlayPauseButton({ playing, onToggle, size = 16, label, tone = "accent", className }: PlayPauseButtonProps) {
+export function PlayPauseButton({ playing, onToggle, size = 16, label, tone = "accent", className, disabled }: PlayPauseButtonProps) {
   return (
     <Button
       type="button"
@@ -21,6 +22,7 @@ export function PlayPauseButton({ playing, onToggle, size = 16, label, tone = "a
       pressed={playing}
       tone={tone}
       onClick={onToggle}
+      disabled={disabled}
       className={className ?? "!p-0 h-9 w-9 flex items-center justify-center shrink-0"}
     >
       {playing ? <Pause size={size} /> : <Play size={size} />}

@@ -59,6 +59,8 @@ export function SampleRow({ sample, selected, onToggleSelect, onRename, onDelete
   const [confirmDelete, setConfirmDelete] = useState(false);
   const waveContainerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
+  /** Seconds into this sample where the next play() call should start, set by clicking the waveform. */
+  const startAtRef = useRef(0);
 
   useEffect(() => {
     let alive = true;
@@ -84,10 +86,13 @@ export function SampleRow({ sample, selected, onToggleSelect, onRename, onDelete
       cursorColor: "#4CC9F0",
       height: 36,
       normalize: true,
-      interact: false,
-      cursorWidth: 0,
+      interact: true,
+      cursorWidth: 1,
       url,
       ...peaksOptions(sample.peaks, sample.durationSec),
+    });
+    ws.on("interaction", (newTime) => {
+      startAtRef.current = newTime;
     });
     wsRef.current = ws;
     return () => {
@@ -115,7 +120,7 @@ export function SampleRow({ sample, selected, onToggleSelect, onRename, onDelete
     if (samplePlayer.isPlaying(sample.id)) {
       samplePlayer.stop();
     } else {
-      samplePlayer.play(sample, url);
+      samplePlayer.play(sample, url, { start: startAtRef.current });
     }
   };
 

@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
 import { InfoTip } from "@/components/neumorphic/InfoTip";
+import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { backend } from "@/lib/backend";
 import { groupInstruments } from "@/lib/instruments";
 import { camelotFor, explainKey } from "@/lib/notesTheory";
 import { computePianoRollLayout, isBlackKey } from "@/lib/pianoRoll";
-import { nowPlaying } from "@/lib/nowPlaying";
+import { notePlayer, type NotePlayerState } from "@/lib/notePlayer";
 import type { InstrumentStem, LoopAnalysis, LoopInfo, NoteEvent, NotesResult, Sample, TrackInfo } from "@/lib/types";
 
 export interface NotesTabProps {
@@ -83,7 +84,9 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
   const [loading, setLoading] = useState(false);
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
-  const [playingTime, setPlayingTime] = useState<{ time: number; isPlaying: boolean; label: string } | null>(null);
+  const [noteState, setNoteState] = useState<NotePlayerState>(() => notePlayer.getState());
+  /** Set by clicking the piano roll background; consumed (and cleared) by the next Play press. */
+  const [pendingStart, setPendingStart] = useState<number | null>(null);
   const tickRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -95,9 +98,14 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
   }, [sources]);
 
   useEffect(() => {
-    return nowPlaying.subscribe((state) => {
-      setPlayingTime({ time: state.time, isPlaying: state.isPlaying, label: state.label });
-    });
+    return notePlayer.subscribe(setNoteState);
+  }, []);
+
+  // Stop any note playback still going for a result that's no longer selected/loaded.
+  useEffect(() => {
+    return () => {
+      if (notePlayer.isPlaying) notePlayer.stop();
+    };
   }, []);
 
   useEffect(() => {
@@ -114,6 +122,8 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
 
   const handleReadNotes = async () => {
     if (!selectedSource) return;
+    if (notePlayer.isPlaying) notePlayer.stop();
+    setPendingStart(null);
     const start = Date.now();
     setStartedAt(start);
     setElapsedSec(0);
@@ -127,6 +137,30 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
     }
   };
 
+  const handleTogglePlay = () => {
+    if (!result) return;
+    if (noteState.isPlaying) {
+      notePlayer.pause();
+    } else {
+      const fromSec = pendingStart ?? noteState.currentTime;
+      notePlayer.play(result, fromSec, selectedSource?.label ?? "Notes");
+      setPendingStart(null);
+    }
+  };
+
+  /** Converts a click on the piano roll into a time (seconds) and stores it as the next play position. */
+  const handleRollClick = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!result) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left - 40;
+    const sec = Math.max(0, Math.min(layout.durationSec, x / layout.pxPerSec));
+    setPendingStart(sec);
+    if (noteState.isPlaying) {
+      notePlayer.play(result, sec, selectedSource?.label ?? "Notes");
+      setPendingStart(null);
+    }
+  };
+
   const handleExport = async () => {
     if (!result) return;
     await backend.exportMidi({ path: result.midPath });
@@ -137,9 +171,10 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
   const camelot = result?.key ? camelotFor(result.key.tonic, result.key.mode) : null;
   const explanation = result ? explainKey(result) : "";
 
-  const showPlayhead =
-    !!result && !!playingTime && playingTime.isPlaying && !!selectedSource && playingTime.label === selectedSource.label;
-  const currentChord = result?.chords.find((c) => playingTime && playingTime.time >= c.startSec && playingTime.time < c.endSec) ?? null;
+  const displayTime = noteState.isPlaying ? noteState.currentTime : pendingStart ?? noteState.currentTime;
+  const showPlayhead = !!result && (noteState.isPlaying || pendingStart !== null);
+  const currentChord =
+    result?.chords.find((c) => noteState.isPlaying && displayTime >= c.startSec && displayTime < c.endSec) ?? null;
 
   const rows: number[] = [];
   for (let m = layout.maxMidi; m >= layout.minMidi; m--) rows.push(m);
@@ -203,6 +238,7 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
           <Button variant="primary" onClick={handleReadNotes} disabled={!track || !selectedSource || loading} busy={loading}>
             Read notes
           </Button>
+          <PlayPauseButton playing={noteState.isPlaying} onToggle={handleTogglePlay} label="notes" tone="cyan" disabled={!result} />
           {loading && <span className="text-xs text-muted tabular-nums">{formatMmSs(elapsedSec)}</span>}
           {!loading && result && elapsedSec > 0 && (
             <span className="text-xs text-muted">Read in {elapsedSec.toFixed(1)} s</span>
@@ -220,6 +256,8 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
                 width={layout.width + 40}
                 height={layout.height}
                 viewBox={`0 0 ${layout.width + 40} ${layout.height}`}
+                onClick={handleRollClick}
+                className="cursor-pointer"
               >
                 {rows.map((midi) => (
                   <rect
@@ -253,15 +291,18 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
                     rx={2}
                     fill={velocityColor(n.velocity)}
                     className="cursor-pointer"
-                    onClick={() => playPitch(n.midi)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      playPitch(n.midi);
+                    }}
                   >
                     <title>{n.name}</title>
                   </rect>
                 ))}
                 {showPlayhead && (
                   <line
-                    x1={40 + layout.xForSec(playingTime!.time)}
-                    x2={40 + layout.xForSec(playingTime!.time)}
+                    x1={40 + layout.xForSec(displayTime)}
+                    x2={40 + layout.xForSec(displayTime)}
                     y1={0}
                     y2={layout.height}
                     stroke="#F2B33D"

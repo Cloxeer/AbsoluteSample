@@ -214,4 +214,28 @@ describe("useSyncPlayback mix playback (routed through mixEngine)", () => {
 
     expect(mixEngine.setLoop).toHaveBeenCalledWith(true);
   });
+
+  it("seeking while paused stores the position, and playMix then starts mix from that position", async () => {
+    const { mixEngine } = await import("@/lib/mixEngine");
+    (mixEngine.currentTime as ReturnType<typeof vi.fn>).mockReturnValue(0);
+    const { result } = renderHook(() => useSyncPlayback());
+    const ws = fakeWs();
+    act(() => result.current.registerInstance("a", ws, true, true, "a.wav"));
+
+    act(() => result.current.seek(12.5));
+
+    // Paused: mixEngine.seek() is called (which itself just stores the position when not playing),
+    // every registered lane's cursor is moved, and the master clock reflects the new position.
+    expect(mixEngine.seek).toHaveBeenCalledWith(12.5);
+    expect(ws.setTime).toHaveBeenCalledWith(12.5);
+    expect(result.current.currentTime).toBe(12.5);
+
+    // playMix should resume from the stored position, not from 0.
+    (mixEngine.currentTime as ReturnType<typeof vi.fn>).mockReturnValue(12.5);
+    await act(async () => {
+      await result.current.playMix();
+    });
+
+    expect(mixEngine.play).toHaveBeenCalledWith(12.5);
+  });
 });

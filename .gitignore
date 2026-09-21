@@ -5,3 +5,4 @@ test-output/
 apps/desktop/public/fixtures/*.wav
 *.log
 .DS_Store
+.claude/

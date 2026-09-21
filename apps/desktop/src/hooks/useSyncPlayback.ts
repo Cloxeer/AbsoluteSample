@@ -253,6 +253,21 @@ export function useSyncPlayback() {
     setTransport((prev) => nextTransportState(prev, { type: "PAUSE" }));
   }, []);
 
+  /**
+   * Seeks the transport to `time`: live if mix is currently playing (restarts every source at the
+   * new offset via mixEngine.seek), or just stores the position if paused/stopped. Either way,
+   * every registered lane's displayed cursor and the master clock (`currentTime`) are updated so
+   * playing afterwards (playMix/auditionTrack) resumes from here rather than from 0.
+   */
+  const seek = useCallback((time: number) => {
+    mixEngine.seek(time);
+    setCurrentTime(time);
+    nowPlaying.tick(time);
+    for (const [, ws] of instancesRef.current.entries()) {
+      ws.setTime(time);
+    }
+  }, []);
+
   const togglePlay = useCallback(() => {
     if (transportRef.current.isPlaying) pause();
     else void playMix();
@@ -300,12 +315,16 @@ export function useSyncPlayback() {
 
       const url = urlsRef.current.get(id);
       if (url) {
+        // mixEngine.load() never resets `this.position`, so the position captured here (before
+        // the load, which may take a while) is still the last known transport position once the
+        // load resolves — audition should resume from there, not always from 0.
+        const startPos = mixEngine.currentTime();
         const loadPromise = mixEngine.load([{ id, url }]);
         loadPromiseRef.current = loadPromise;
         void loadPromise.then(() => {
           const t = transportRef.current;
           if (t.mode === "audition" && t.auditionId === id) {
-            mixEngine.play(0);
+            mixEngine.play(startPos);
           }
         });
       }
@@ -331,6 +350,7 @@ export function useSyncPlayback() {
     // legacy aliases kept for compatibility with the mix-everything transport
     play: playMix,
     pause,
+    seek,
     stop: stopAll,
     togglePlay,
     isPlaying: transport.isPlaying,

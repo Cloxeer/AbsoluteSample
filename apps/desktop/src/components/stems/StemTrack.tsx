@@ -29,6 +29,8 @@ export interface StemTrackProps {
   onTimeUpdate?: (time: number) => void;
   onFinish?: () => void;
   onDestroy?: () => void;
+  /** Called with the clicked time (seconds) when the user clicks/drags on this lane's waveform. */
+  onSeek?: (time: number) => void;
   /** Track id, for lane-selection save/download/slice actions. */
   trackId?: string;
   songTitle?: string;
@@ -51,6 +53,7 @@ export function StemTrack({
   onTimeUpdate,
   onFinish,
   onDestroy,
+  onSeek,
   trackId,
   songTitle,
   samples = [],
@@ -89,6 +92,7 @@ export function StemTrack({
     });
     ws.on("timeupdate", (t) => onTimeUpdate?.(t));
     ws.on("finish", () => onFinish?.());
+    ws.on("interaction", (newTime) => onSeek?.(newTime));
     return () => {
       onDestroy?.();
       ws.destroy();

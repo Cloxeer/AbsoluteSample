@@ -62,4 +62,14 @@ describe("NotesTab", () => {
     expect(screen.getByTestId("piano-roll")).toBeInTheDocument();
     expect(screen.getByText(/in plain words/i)).toBeInTheDocument();
   });
+
+  it("disables the play button until a NotesResult exists, then enables it", async () => {
+    render(<NotesTab track={track} loop={null} instruments={instruments} analysis={null} samples={samples} />);
+
+    expect(screen.getByRole("button", { name: /play notes/i })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /read notes/i }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /play notes/i })).not.toBeDisabled());
+  });
 });
