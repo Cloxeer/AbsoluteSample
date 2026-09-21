@@ -59,7 +59,9 @@ class NowPlayingSingleton {
   }
 
   start(kind: NowPlayingKind, label: string, duration: number, controller: NowPlayingController): void {
-    if (this.controller && this.controller !== controller) {
+    // Only stop a *different* source. The mix/audition controllers are re-created per render,
+    // so compare by kind too: restarting the same engine must not reset its seek position.
+    if (this.controller && this.controller !== controller && this.state.kind !== kind) {
       this.controller.stop();
     }
     this.controller = controller;
