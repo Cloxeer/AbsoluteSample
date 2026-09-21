@@ -57,6 +57,20 @@ cargo run --release --no-default-features --bin absolutesample-cli -- run \
 The `tauri-app` cargo feature (default on) gates everything that needs the Tauri runtime. The CLI and
 unit tests build with `--no-default-features` so they only need ffmpeg and a linker.
 
+## Using the stem view
+
+The stem view is laid out like a DAW: track headers on the left, waveform lanes on the right, one shared
+playhead. There are two ways to listen, and the transport chip tells you which one is active:
+
+- **Play mix** (the big transport button, or Space) plays all four stems together with your Solo/Mute and
+  fader settings. Since the four bands are complementary crossovers, the unaltered mix sounds like the
+  original loop. That is expected.
+- **Play <stem> only** (the play button in a track header, or keys 1 to 4) auditions a single stem and
+  pauses everything else. Use this to hear what each band actually contains.
+
+Toggle buttons fill with colour when active: Solo is amber, Mute is red (the lane dims and shows MUTED),
+Loop is cyan. Esc stops, L toggles loop, ? in the transport lists the shortcuts.
+
 ## Pipeline
 
 1. **Fetch**: `yt-dlp -f bestaudio` saves `source.<ext>` untouched; ffprobe reads metadata; a `source.wav`
