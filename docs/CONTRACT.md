@@ -207,3 +207,44 @@ interface Sample { id: string; name: string; path: string; bytes: number; songId
 // reveal_sample({ id }) -> void  (open containing folder)
 ```
 CLI: `samples list|save <track> <stemKey> [--name]|delete <id>|export <dir> <ids...>`.
+
+---
+
+# v5 addendum: honesty, tags, peaks, per-song jobs, matrix, samples playback
+
+## Instrument tags (new pass "tag", runs last, never fatal)
+separate.py classifies every top-level stem (vocals, drums, bass, guitar, piano, other) with the free AudioSet AST model
+(`MIT/ast-finetuned-audioset-10-10-0.4593`, transformers) in 10 s windows, averaging sigmoid scores over non-silent windows.
+Each stem gets `tags: [{label, score}]` (top 5, score 0..1) and `soundsLike: string|null` = the best *instrument-family* label when it differs
+from the bucket (mapping table in separate.py: e.g. Violin/Viola/Cello/Bowed string instrument/String section -> "Strings"; Synthesizer -> "Synth";
+Organ/Electric piano/Harpsichord -> "Keys"; Acoustic guitar/Electric guitar/Banjo -> "Guitar"; Trumpet/Saxophone/Brass -> "Brass/Winds"; Choir -> "Choir").
+Protocol: `done.stems[].tags`, `done.stems[].soundsLike`. InstrumentStem gains `tags` and `soundsLike`. UI shows "Guitar" with a muted caption
+"sounds like Strings (violin 0.62)" when soundsLike is set; never renames the file.
+
+## Honest timing
+Every long command (fetch, trim, separate_stems, separate_instruments, analyze) reports `startedAt` (rfc3339) and `elapsedSec` in its progress
+payload (`pipeline://progress` gains `trackId`, `startedAt`, `elapsedSec`, and for separate `passSeconds: {pass: seconds}` as passes complete);
+results gain `elapsedSec` (InstrumentStem[] is wrapped: `separate_instruments -> { stems, elapsedSec, passSeconds, device, failedPasses }`;
+`instruments.json` stores the same). Frontend shows a live mm:ss timer from `startedAt` while running and the final real durations after.
+
+## Peaks (performance)
+Rust computes `peaks: number[]` (1000 points, max-abs per bucket, 0..1) for every wav it produces (source, loop, band stems, instrument stems, samples)
+using a fast PCM read (no ffmpeg). Fields: `TrackInfo.peaks`, `LoopInfo.peaks`, `StemInfo.peaks`, `InstrumentStem.peaks`, `Sample.peaks`, plus `durationSec`
+everywhere. The frontend passes `peaks` + `duration` to wavesurfer so it does not decode the wav until playback. `fetch_audio` no longer decodes `source.wav`;
+`TrackInfo.wavPath` now points at `source.<ext>` (WebView2 plays webm/opus and m4a natively). `loop.wav` is still produced for the DSP.
+`analyze_file({ path }) -> LoopAnalysis` analyzes any wav (used for per-stem onsets in the Beat Matrix, cached in `<workdir>/analysis/<stemKey>.json`).
+
+## Per-song jobs
+Progress payloads carry `trackId`. Frontend keeps `jobs: Record<trackId, {stage, percent, message, startedAt, elapsedSec}>`; switching songs while a job runs
+does not cancel it; the Songs panel shows a spinner + stage on that song's row and the transport shows a small "Processing <title>" chip when the running job
+belongs to another song. When a job finishes for a non-current song, refresh the library only.
+
+## Samples playback
+Exactly one sample plays at a time (a module-level singleton player); clicking another sample stops the current one. Each sample row shows a peaks waveform
+(wavesurfer with `peaks`, height 36) with a playhead; the row hover/highlight spans the full row; the delete confirm renders inline in place of the action buttons.
+
+## Beat Matrix (simple, honest)
+Rows = the current song's top-level instrument stems (kit children when expanded) plus any saved samples the user adds with "Add sample row".
+Each row's pads come from that row's own onset analysis (`analyze_file` on that wav), lit when an onset falls within a 16th-note window of the pad; pad brightness = onset strength.
+Columns = beats of the loop (bars x 4, 16th subdivision toggle). The top transport Play/Pause is the only loop transport: it plays the mix and a column highlight follows
+the playhead. Clicking a pad auditions that slice of that stem (stops any other audition; clicking again stops). Nothing loops automatically unless Loop is on.

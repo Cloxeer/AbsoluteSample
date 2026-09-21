@@ -12,6 +12,7 @@ Passes (run in this order when requested; "instruments" is always run first):
                                              stems still sum to the original mix
   lead         Mel-Band Roformer karaoke  -> lead_vocals + backing_vocals from the vocals stem
   drums        MDX23C DrumSep             -> kick, snare, toms, hihat, ride, crash from the drums stem
+  tag          AudioSet AST classifier    -> tags + soundsLike for every top-level stem (never fatal)
 
 Protocol (stdout, one JSON object per line):
   {"event":"device","device":"cuda|cpu","gpu":"..."}
@@ -202,11 +203,74 @@ def pass_drums(sep_factory, out: Path, sr: int, stems: dict[str, Path]) -> None:
         raise RuntimeError(f"drum model returned {sorted(res)}")
 
 
+# ---------------------------------------------------------------------------
+# Tag pass: what does each stem actually sound like?
+
+TAG_MODEL = "MIT/ast-finetuned-audioset-10-10-0.4593"
+
+# AudioSet label -> instrument family shown to the user.
+FAMILIES = {
+    "Strings": ["Violin, fiddle", "Cello", "Viola", "Bowed string instrument", "String section", "Orchestra", "Pizzicato", "Double bass"],
+    "Guitar": ["Guitar", "Acoustic guitar", "Electric guitar", "Bass guitar", "Steel guitar, slide guitar", "Banjo", "Ukulele", "Mandolin", "Strum"],
+    "Keys": ["Piano", "Electric piano", "Keyboard (musical)", "Organ", "Electronic organ", "Hammond organ", "Harpsichord", "Rhodes piano", "Clavinet"],
+    "Synth": ["Synthesizer", "Electronic music", "Techno", "House music", "Trance music", "Theremin", "Sampler"],
+    "Brass/Winds": ["Trumpet", "Trombone", "Brass instrument", "French horn", "Saxophone", "Clarinet", "Flute", "Harmonica", "Wind instrument, woodwind instrument", "Oboe", "Bagpipes"],
+    "Vocals": ["Singing", "Male singing", "Female singing", "Child singing", "Choir", "Rapping", "Humming", "Yodeling", "Chant", "A capella", "Speech", "Vocal music"],
+    "Drums": ["Drum", "Drum kit", "Snare drum", "Bass drum", "Hi-hat", "Cymbal", "Percussion", "Tabla", "Tambourine", "Drum machine", "Rimshot"],
+    "Accordion": ["Accordion"],
+    "Harp": ["Harp"],
+    "Bells": ["Glockenspiel", "Vibraphone", "Marimba, xylophone", "Bell", "Tubular bells", "Chime", "Steelpan"],
+}
+BUCKET_FAMILY = {"vocals": "Vocals", "drums": "Drums", "bass": "Guitar", "guitar": "Guitar", "piano": "Keys", "other": None}
+GENERIC = {"Music", "Musical instrument", "Silence", "Sound effect", "Effects unit", "Song", "Theme music", "Background music",
+           "Plucked string instrument", "Hum", "Throbbing", "Noise", "Inside, small room", "Mantra", "Narration, monologue"}
+
+
+def pass_tag(stems: dict[str, Path], device: str) -> dict[str, dict]:
+    import librosa
+    import torch
+    from transformers import ASTFeatureExtractor, ASTForAudioClassification
+
+    fe = ASTFeatureExtractor.from_pretrained(TAG_MODEL)
+    model = ASTForAudioClassification.from_pretrained(TAG_MODEL).eval().to(device)
+    label_of = model.config.id2label
+    out: dict[str, dict] = {}
+    keys = [k for k in ("vocals", "drums", "bass", "guitar", "piano", "other") if k in stems]
+    for n, key in enumerate(keys):
+        progress("tag", 100.0 * n / max(1, len(keys)), f"Listening to {key}")
+        y, sr = read_wav(stems[key])
+        y = librosa.resample(y.mean(axis=1), orig_sr=sr, target_sr=16000)
+        win = 160000
+        wins = [y[i:i + win] for i in range(0, len(y), win)]
+        wins = [w for w in wins if len(w) > 16000 and float(np.sqrt((w ** 2).mean())) > 1e-3]
+        if not wins:
+            out[key] = {"tags": [], "soundsLike": None}
+            continue
+        probs = []
+        for w in wins[:24]:
+            x = fe(w, sampling_rate=16000, return_tensors="pt")
+            with torch.no_grad():
+                logits = model(**{k: v.to(device) for k, v in x.items()}).logits[0]
+            probs.append(torch.sigmoid(logits).cpu())
+        p = torch.stack(probs).mean(0)
+        scored = sorted(((label_of[i], float(p[i])) for i in range(len(p))), key=lambda t: -t[1])
+        tags = [{"label": l, "score": round(s, 3)} for l, s in scored if l not in GENERIC][:5]
+        fam_scores = {fam: max(float(p[i]) for i in range(len(p)) if label_of[i] in labels) for fam, labels in FAMILIES.items()}
+        best_fam, best = max(fam_scores.items(), key=lambda t: t[1])
+        own = BUCKET_FAMILY.get(key)
+        own_score = fam_scores.get(own, 0.0) if own else 0.0
+        sounds_like = None
+        if best >= 0.06 and best_fam != own and best >= 1.3 * own_score:
+            sounds_like = best_fam
+        out[key] = {"tags": tags, "soundsLike": sounds_like}
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--passes", default="instruments,vocals,lead,drums")
+    ap.add_argument("--passes", default="instruments,vocals,lead,drums,tag")
     ap.add_argument("--models-dir", required=True)
     ap.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     args = ap.parse_args()
@@ -257,6 +321,15 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             emit({"event": "pass_failed", "pass": name, "error": str(e)[:400]})
 
+    tag_info: dict[str, dict] = {}
+    if "tag" in passes:
+        t0 = time.time()
+        try:
+            tag_info = pass_tag(stems, device)
+            emit({"event": "pass_done", "pass": "tag", "seconds": round(time.time() - t0, 1)})
+        except Exception as e:  # noqa: BLE001
+            emit({"event": "pass_failed", "pass": "tag", "error": str(e)[:400]})
+
     shutil.rmtree(work, ignore_errors=True)
 
     listing = []
@@ -270,6 +343,8 @@ def main() -> int:
             "path": str(path),
             "model": STEM_MODEL.get(key, MODELS["instruments"]),
             "order": order,
+            "tags": tag_info.get(key, {}).get("tags", []),
+            "soundsLike": tag_info.get(key, {}).get("soundsLike"),
         })
     listing.sort(key=lambda s: s["order"])
     emit({"event": "done", "stems": listing, "device": device})
