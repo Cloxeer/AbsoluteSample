@@ -4,7 +4,8 @@ import WaveSurfer from "wavesurfer.js";
 import { backend } from "@/lib/backend";
 import { samplePlayer } from "@/lib/samplePlayer";
 import { peaksOptions } from "@/lib/wavePeaks";
-import type { Sample } from "@/lib/types";
+import { isTauri } from "@/lib/mediaUrl";
+import type { Sample, SampleKind } from "@/lib/types";
 
 const GROUP_COLORS: Record<string, string> = {
   vocals: "#F25F5C",
@@ -28,6 +29,17 @@ function formatMinSec(totalSec: number): string {
 
 function formatMB(bytes: number): string {
   return `${(bytes / 1e6).toFixed(1)} MB`;
+}
+
+const KIND_LABELS: Record<SampleKind, string> = {
+  stem: "Stem",
+  region: "Region",
+  hit: "Hit",
+};
+
+function kindLabel(kind?: SampleKind): string | null {
+  if (!kind) return null;
+  return KIND_LABELS[kind] ?? null;
 }
 
 export interface SampleRowProps {
@@ -115,9 +127,26 @@ export function SampleRow({ sample, selected, onToggleSelect, onRename, onDelete
   };
 
   const color = colorForGroup(sample.group);
+  const kind = kindLabel(sample.kind);
+  const inTauri = isTauri();
+
+  const handleDragStart = async (e: React.DragEvent<HTMLDivElement>) => {
+    if (inTauri) {
+      e.preventDefault();
+      const { startDrag } = await import("@crabnebula/tauri-plugin-drag");
+      await startDrag({ item: [sample.path], icon: "" });
+      return;
+    }
+    e.dataTransfer.setData("text/plain", sample.name);
+  };
 
   return (
-    <div className="w-full flex items-center gap-2 rounded-xl px-3 py-2 hover:bg-white/[0.04]">
+    <div
+      className="w-full flex items-center gap-2 rounded-xl px-3 py-2 hover:bg-white/[0.04]"
+      draggable
+      onDragStart={handleDragStart}
+      data-testid={`sample-row-${sample.id}`}
+    >
       <input
         type="checkbox"
         checked={selected}
@@ -172,6 +201,19 @@ export function SampleRow({ sample, selected, onToggleSelect, onRename, onDelete
       >
         {sample.stemLabel}
       </span>
+      {kind && (
+        <span className="text-[10px] px-2 py-0.5 rounded-full border border-white/10 text-muted shrink-0">{kind}</span>
+      )}
+      {sample.bars != null && (
+        <span className="text-[10px] px-2 py-0.5 rounded-full border border-white/10 text-muted font-mono shrink-0">
+          {sample.bars} bar{sample.bars === 1 ? "" : "s"}
+        </span>
+      )}
+      {sample.keyShort && (
+        <span className="text-[10px] px-2 py-0.5 rounded-full border border-white/10 text-muted font-mono shrink-0">
+          {sample.keyShort}
+        </span>
+      )}
       <span className="text-[10px] text-muted font-mono shrink-0">{formatMinSec(sample.durationSec)}</span>
       {sample.bpm !== null && (
         <span className="text-[10px] px-2 py-0.5 rounded-full border border-accent/30 bg-accent/10 text-accent font-mono shrink-0">

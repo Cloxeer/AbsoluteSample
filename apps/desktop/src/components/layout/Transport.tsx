@@ -1,12 +1,16 @@
-import { useState } from "react";
-import { AudioWaveform, Bookmark, HelpCircle, ListMusic, Repeat, Square } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { AudioWaveform, Bookmark, HardDrive, HelpCircle, ListMusic, Repeat, Square, Zap } from "lucide-react";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
 import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { Slider } from "@/components/neumorphic/Slider";
-import { formatTime } from "@/lib/format";
+import { formatTime, formatBytes } from "@/lib/format";
+import { backend } from "@/lib/backend";
 import type { DependencyReport, Job } from "@/lib/types";
 import clsx from "clsx";
+
+const STORAGE_POLL_MS = 30000;
+const GPU_POLL_MS = 5000;
 
 function formatMmSs(totalSec: number): string {
   const s = Math.max(0, Math.round(totalSec));
@@ -44,6 +48,12 @@ export interface TransportProps {
   lastSplit?: { elapsedSec: number; passSeconds: Record<string, number> } | null;
   /** A running job that belongs to a different song than the one currently open. */
   otherSongJob?: (Job & { title: string }) | null;
+  /** The id of the currently open song, used to exclude it from "Clear scans". */
+  currentTrackId?: string | null;
+  /** True while any song has a job in flight; drives the GPU chip's poll cadence. */
+  anyJobRunning?: boolean;
+  /** Bumped by the caller whenever a track fetch/split/delete happens, to force an immediate storage refresh. */
+  storageRefreshSignal?: number;
   onPlayPause: () => void;
   onStop: () => void;
   onToggleLoop: () => void;
@@ -89,6 +99,9 @@ export function Transport({
   currentJob,
   lastSplit,
   otherSongJob,
+  currentTrackId,
+  anyJobRunning = false,
+  storageRefreshSignal,
   onPlayPause,
   onStop,
   onToggleLoop,
@@ -97,6 +110,54 @@ export function Transport({
   onToggleSamples,
 }: TransportProps) {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [storageBytes, setStorageBytes] = useState<number | null>(null);
+  const [storageMenuOpen, setStorageMenuOpen] = useState(false);
+  const [confirmingClearScans, setConfirmingClearScans] = useState(false);
+  const [engineBusy, setEngineBusy] = useState(false);
+  const [engineBusyTitle, setEngineBusyTitle] = useState<string | null>(null);
+
+  const refreshStorage = useCallback(async () => {
+    const size = await backend.librarySize();
+    setStorageBytes(size.bytes + size.samplesBytes + (size.trashBytes ?? 0));
+  }, []);
+
+  useEffect(() => {
+    refreshStorage();
+    const interval = setInterval(refreshStorage, STORAGE_POLL_MS);
+    return () => clearInterval(interval);
+  }, [refreshStorage]);
+
+  useEffect(() => {
+    if (storageRefreshSignal === undefined) return;
+    refreshStorage();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageRefreshSignal]);
+
+  const refreshEngineStatus = useCallback(async () => {
+    const status = await backend.engineStatus();
+    setEngineBusy(!!status.busy);
+    setEngineBusyTitle(status.busyTrackId ?? null);
+  }, []);
+
+  useEffect(() => {
+    refreshEngineStatus();
+    if (!anyJobRunning) return;
+    const interval = setInterval(refreshEngineStatus, GPU_POLL_MS);
+    return () => clearInterval(interval);
+  }, [anyJobRunning, refreshEngineStatus]);
+
+  const handleClearScans = async () => {
+    await backend.clearScans({ except: currentTrackId ?? undefined });
+    setConfirmingClearScans(false);
+    setStorageMenuOpen(false);
+    refreshStorage();
+  };
+
+  const handleEmptyTrash = async () => {
+    await backend.emptyTrash();
+    setStorageMenuOpen(false);
+    refreshStorage();
+  };
 
   return (
     <div className="sticky top-0 z-30 bg-bg/95 backdrop-blur-sm border-b border-white/[0.04]">
@@ -205,6 +266,59 @@ export function Transport({
           <Pill name="ffmpeg" ok={!!deps?.ffmpeg} />
           <Pill name="ffprobe" ok={!!deps?.ffprobe} />
           <Pill name="yt-dlp" ok={!!deps?.ytdlp} />
+          {engineBusy && (
+            <span
+              className="text-xs px-2 py-1 rounded-full border border-accent/30 bg-accent/5 text-accent flex items-center gap-1.5"
+              data-testid="gpu-busy-chip"
+            >
+              <Zap size={12} />
+              GPU busy: {engineBusyTitle ?? "unknown"}
+            </span>
+          )}
+          <div className="relative">
+            <button
+              type="button"
+              aria-label="Storage menu"
+              data-testid="storage-chip"
+              onClick={() => setStorageMenuOpen((v) => !v)}
+              className="text-xs px-2 py-1 rounded-full border border-white/10 text-muted hover:text-text flex items-center gap-1.5"
+            >
+              <HardDrive size={12} />
+              {storageBytes !== null ? formatBytes(storageBytes) : "..."}
+            </button>
+            {storageMenuOpen && (
+              <div className="absolute right-0 top-full mt-2 w-48 rounded-2xl bg-surface neu-surface-raised p-2 flex flex-col gap-1 z-40">
+                {confirmingClearScans ? (
+                  <div className="flex items-center justify-between gap-1 text-xs px-2 py-1">
+                    <span className="text-muted">Clear scans?</span>
+                    <div className="flex items-center gap-1">
+                      <button type="button" className="text-danger underline" onClick={handleClearScans}>
+                        Yes
+                      </button>
+                      <button type="button" className="text-muted underline" onClick={() => setConfirmingClearScans(false)}>
+                        No
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="text-left text-xs px-2 py-1.5 rounded-lg hover:bg-white/[0.06] text-text"
+                    onClick={() => setConfirmingClearScans(true)}
+                  >
+                    Clear scans
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="text-left text-xs px-2 py-1.5 rounded-lg hover:bg-white/[0.06] text-text"
+                  onClick={handleEmptyTrash}
+                >
+                  Empty trash
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 

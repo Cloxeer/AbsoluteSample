@@ -13,7 +13,7 @@ export interface StepperProps {
   onStepClick?: (id: string) => void;
 }
 
-/** Pipeline breadcrumb: 1 Source -> 2 Loop -> 3 Stems -> 4 Beat Matrix. */
+/** Pipeline breadcrumb: 1 Source -> 2 Loop -> 3 Stems -> 4 Notes. */
 export function Stepper({ steps, currentId, completedIds, onStepClick }: StepperProps) {
   return (
     <nav aria-label="Pipeline steps" className="flex items-center gap-2 px-6">

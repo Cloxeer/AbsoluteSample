@@ -16,10 +16,15 @@ export interface LibraryPanelProps {
   currentTrackId: string | null;
   sizeBytes: number;
   jobs?: Record<string, Job>;
+  /** Number of items currently in the trash, for the footer's trash line. */
+  trashCount?: number;
+  /** Total bytes of items currently in the trash. */
+  trashBytes?: number;
   onClose: () => void;
   onOpenTrack: (id: string) => void;
   onSetKept: (id: string, kept: boolean) => void;
   onDeleteTrack: (id: string) => void;
+  onEmptyTrash?: () => void;
 }
 
 export function LibraryPanel({
@@ -28,12 +33,16 @@ export function LibraryPanel({
   currentTrackId,
   sizeBytes,
   jobs = {},
+  trashCount = 0,
+  trashBytes = 0,
   onClose,
   onOpenTrack,
   onSetKept,
   onDeleteTrack,
+  onEmptyTrash,
 }: LibraryPanelProps) {
   const [confirmingDeleteAll, setConfirmingDeleteAll] = useState(false);
+  const [confirmingEmptyTrash, setConfirmingEmptyTrash] = useState(false);
 
   if (!open) return null;
 
@@ -107,6 +116,40 @@ export function LibraryPanel({
             Songs are scans by default. The 3 most recent scans stay; older unkept scans are removed when you fetch a
             new link. Press Keep to hold a song, or save the stems you want as samples.
           </p>
+          {onEmptyTrash && (
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] text-muted" data-testid="trash-summary">
+                Trash ({trashCount}, {formatGBorMB(trashBytes)})
+              </span>
+              {confirmingEmptyTrash ? (
+                <div className="flex items-center gap-1 text-xs shrink-0">
+                  <span className="text-muted">Empty trash?</span>
+                  <button
+                    type="button"
+                    className="text-danger underline"
+                    onClick={() => {
+                      onEmptyTrash();
+                      setConfirmingEmptyTrash(false);
+                    }}
+                  >
+                    Yes
+                  </button>
+                  <button type="button" className="text-muted underline" onClick={() => setConfirmingEmptyTrash(false)}>
+                    No
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmingEmptyTrash(true)}
+                  disabled={trashCount === 0}
+                  className="text-[11px] text-danger underline shrink-0 disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
+                >
+                  Empty trash
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </Surface>
     </div>

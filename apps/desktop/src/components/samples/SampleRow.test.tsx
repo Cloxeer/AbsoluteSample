@@ -58,4 +58,40 @@ describe("SampleRow", () => {
     fireEvent.click(screen.getByLabelText("Confirm delete My song - Drums 0:30-0:45"));
     expect(onDelete).toHaveBeenCalledTimes(1);
   });
+
+  it("renders kind, bars and key chips derived from the sample", () => {
+    render(
+      <SampleRow
+        sample={makeSample({ kind: "region", bars: 4, keyShort: "Am" })}
+        selected={false}
+        onToggleSelect={vi.fn()}
+        onRename={vi.fn()}
+        onDelete={vi.fn()}
+        onReveal={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Region")).toBeInTheDocument();
+    expect(screen.getByText("4 bars")).toBeInTheDocument();
+    expect(screen.getByText("Am")).toBeInTheDocument();
+  });
+
+  it("omits kind/bars/key chips when the sample doesn't have them", () => {
+    render(
+      <SampleRow sample={makeSample({ kind: undefined, bars: undefined, keyShort: undefined })} selected={false} onToggleSelect={vi.fn()} onRename={vi.fn()} onDelete={vi.fn()} onReveal={vi.fn()} />
+    );
+    expect(screen.queryByText("Stem")).not.toBeInTheDocument();
+    expect(screen.queryByText(/bars?$/)).not.toBeInTheDocument();
+  });
+
+  it("is draggable in the browser (non-Tauri) and sets text/plain data with the sample name on dragstart", () => {
+    const { container } = render(
+      <SampleRow sample={makeSample()} selected={false} onToggleSelect={vi.fn()} onRename={vi.fn()} onDelete={vi.fn()} onReveal={vi.fn()} />
+    );
+    const row = container.querySelector('[data-testid="sample-row-s1"]') as HTMLElement;
+    expect(row).toHaveAttribute("draggable", "true");
+
+    const setData = vi.fn();
+    fireEvent.dragStart(row, { dataTransfer: { setData } });
+    expect(setData).toHaveBeenCalledWith("text/plain", "My song - Drums 0:30-0:45");
+  });
 });

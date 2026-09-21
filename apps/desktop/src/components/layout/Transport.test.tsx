@@ -1,8 +1,37 @@
-import { describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { Transport } from "./Transport";
+import { backend } from "@/lib/backend";
+
+vi.mock("@/lib/backend", () => ({
+  backend: {
+    librarySize: vi.fn(),
+    engineStatus: vi.fn(),
+    clearScans: vi.fn(),
+    emptyTrash: vi.fn(),
+  },
+}));
 
 describe("Transport", () => {
+  beforeEach(() => {
+    vi.mocked(backend.librarySize).mockResolvedValue({ bytes: 0, tracks: 0, scans: 0, samplesBytes: 0, trashBytes: 0 });
+    vi.mocked(backend.engineStatus).mockResolvedValue({
+      installed: true,
+      pythonFound: true,
+      pythonPath: null,
+      venvPath: null,
+      torchVersion: null,
+      cuda: false,
+      gpuName: null,
+      modelsPresent: [],
+      enginePath: "",
+      busy: false,
+      busyTrackId: null,
+    });
+    vi.mocked(backend.clearScans).mockResolvedValue(undefined);
+    vi.mocked(backend.emptyTrash).mockResolvedValue(undefined);
+  });
+
   const baseProps = {
     deps: { ffmpeg: "ffmpeg", ffprobe: "ffprobe", ytdlp: "yt-dlp", ok: true },
     isPlaying: false,
@@ -60,5 +89,65 @@ describe("Transport", () => {
     render(<Transport {...baseProps} />);
     fireEvent.click(screen.getByLabelText("Keyboard shortcuts"));
     expect(screen.getByText("Play / pause mix")).toBeInTheDocument();
+  });
+
+  describe("storage and GPU chips", () => {
+    beforeEach(() => {
+      vi.mocked(backend.librarySize).mockReset().mockResolvedValue({
+        bytes: 1_500_000_000,
+        tracks: 1,
+        scans: 0,
+        samplesBytes: 500_000_000,
+        trashBytes: 0,
+      });
+      vi.mocked(backend.engineStatus).mockReset().mockResolvedValue({
+        installed: true,
+        pythonFound: true,
+        pythonPath: null,
+        venvPath: null,
+        torchVersion: null,
+        cuda: false,
+        gpuName: null,
+        modelsPresent: [],
+        enginePath: "",
+        busy: false,
+        busyTrackId: null,
+      });
+      vi.mocked(backend.clearScans).mockReset().mockResolvedValue(undefined);
+      vi.mocked(backend.emptyTrash).mockReset().mockResolvedValue(undefined);
+    });
+
+    it("formats the storage chip from librarySize's bytes + samplesBytes + trashBytes", async () => {
+      render(<Transport {...baseProps} />);
+      await waitFor(() => {
+        expect(screen.getByTestId("storage-chip")).toHaveTextContent("1.9 GB");
+      });
+    });
+
+    it("does not show the GPU chip when engineStatus.busy is false", async () => {
+      render(<Transport {...baseProps} />);
+      await waitFor(() => expect(backend.engineStatus).toHaveBeenCalled());
+      expect(screen.queryByTestId("gpu-busy-chip")).not.toBeInTheDocument();
+    });
+
+    it("shows 'GPU busy: <title>' when engineStatus.busy is true", async () => {
+      vi.mocked(backend.engineStatus).mockResolvedValue({
+        installed: true,
+        pythonFound: true,
+        pythonPath: null,
+        venvPath: null,
+        torchVersion: null,
+        cuda: false,
+        gpuName: null,
+        modelsPresent: [],
+        enginePath: "",
+        busy: true,
+        busyTrackId: "track-42",
+      });
+      render(<Transport {...baseProps} />);
+      await waitFor(() => {
+        expect(screen.getByTestId("gpu-busy-chip")).toHaveTextContent("GPU busy: track-42");
+      });
+    });
   });
 });

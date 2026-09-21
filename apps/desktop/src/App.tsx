@@ -3,9 +3,10 @@ import { Transport } from "@/components/layout/Transport";
 import { Stepper } from "@/components/layout/Stepper";
 import { Tabs } from "@/components/layout/Tabs";
 import { SlicerTab } from "@/views/SlicerTab";
-import { InspectorTab } from "@/views/InspectorTab";
+import { NotesTab } from "@/views/NotesTab";
 import { LibraryPanel } from "@/components/library/LibraryPanel";
 import { SamplesPanel } from "@/components/samples/SamplesPanel";
+import { Toast } from "@/components/neumorphic/Toast";
 import { useAudioEngine } from "@/hooks/useAudioEngine";
 import { useSyncPlayback } from "@/hooks/useSyncPlayback";
 import { useJobs } from "@/hooks/useJobs";
@@ -13,18 +14,19 @@ import { samplePlayer } from "@/lib/samplePlayer";
 import { mixEngine } from "@/lib/mixEngine";
 import { nowPlaying } from "@/lib/nowPlaying";
 import { backend } from "@/lib/backend";
-import type { DependencyReport, LibraryEntry, Sample } from "@/lib/types";
+import { toastStore } from "@/lib/toast";
+import type { DependencyReport, LibraryEntry, Sample, TrashEntry } from "@/lib/types";
 
 const TABS = [
   { id: "slicer", label: "Stem Slicer" },
-  { id: "inspector", label: "Loop & Beat Matrix" },
+  { id: "inspector", label: "Notes" },
 ];
 
 const PIPELINE_STEPS = [
   { id: "source", label: "Source" },
   { id: "loop", label: "Loop" },
   { id: "stems", label: "Stems" },
-  { id: "matrix", label: "Beat Matrix" },
+  { id: "matrix", label: "Notes" },
 ];
 
 export default function App() {
@@ -43,6 +45,7 @@ export default function App() {
 
   const [samplesOpen, setSamplesOpen] = useState(false);
   const [samples, setSamples] = useState<Sample[]>([]);
+  const [trashEntries, setTrashEntries] = useState<TrashEntry[]>([]);
 
   const refreshLibrary = useCallback(async () => {
     const [entries, size] = await Promise.all([backend.listLibrary(), backend.librarySize()]);
@@ -54,11 +57,23 @@ export default function App() {
     setSamples(await backend.listSamples());
   }, []);
 
+  const refreshTrash = useCallback(async () => {
+    const entries = await backend.listTrash();
+    setTrashEntries(entries);
+  }, []);
+
   useEffect(() => {
     backend.checkDependencies().then(setDeps);
     refreshLibrary();
     refreshSamples();
-  }, [refreshLibrary, refreshSamples]);
+    refreshTrash();
+  }, [refreshLibrary, refreshSamples, refreshTrash]);
+
+  const handleEmptyTrash = useCallback(async () => {
+    await backend.emptyTrash();
+    refreshTrash();
+    refreshLibrary();
+  }, [refreshTrash, refreshLibrary]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -83,11 +98,22 @@ export default function App() {
 
   const handleDeleteSample = useCallback(
     async (id: string) => {
+      const sample = samples.find((s) => s.id === id);
       await backend.deleteSample({ id });
       refreshSamples();
       refreshLibrary();
+      refreshTrash();
+      toastStore.publish(`Deleted ${sample?.name ?? "sample"}. Undo`, {
+        label: "Undo",
+        onAction: async () => {
+          await backend.restoreTrash({ id });
+          refreshSamples();
+          refreshLibrary();
+          refreshTrash();
+        },
+      });
     },
-    [refreshSamples, refreshLibrary]
+    [samples, refreshSamples, refreshLibrary, refreshTrash]
   );
 
   const handleRevealSample = useCallback(async (id: string) => {
@@ -117,10 +143,20 @@ export default function App() {
 
   const handleDeleteTrack = useCallback(
     async (id: string) => {
+      const entry = libraryEntries.find((e) => e.id === id);
       await backend.deleteTrack(id);
       refreshLibrary();
+      refreshTrash();
+      toastStore.publish(`Deleted ${entry?.title ?? "song"}. Undo`, {
+        label: "Undo",
+        onAction: async () => {
+          await backend.restoreTrash({ id });
+          refreshLibrary();
+          refreshTrash();
+        },
+      });
     },
-    [refreshLibrary]
+    [libraryEntries, refreshLibrary, refreshTrash]
   );
 
   const stemOrder = useMemo(() => (engine.stems ?? []).map((s) => s.key), [engine.stems]);
@@ -195,6 +231,10 @@ export default function App() {
     prevJobIdsRef.current = nowIds;
   }, [jobs, engine.track?.id, refreshLibrary]);
 
+  const anyJobRunning = Object.keys(jobs).length > 0;
+  // Bumped after track fetch/split/delete actions so Transport's storage chip refreshes immediately.
+  const storageRefreshSignal = librarySizeBytes + samples.length + trashEntries.length;
+
   const otherSongJob = useMemo(() => {
     const entries = Object.values(jobs);
     const other = entries.find((j) => j.trackId !== engine.track?.id);
@@ -231,6 +271,9 @@ export default function App() {
         currentJob={engine.track ? jobs[engine.track.id] ?? null : null}
         lastSplit={engine.instrumentsMeta ? { elapsedSec: engine.instrumentsMeta.elapsedSec, passSeconds: engine.instrumentsMeta.passSeconds ?? {} } : null}
         otherSongJob={otherSongJob}
+        currentTrackId={engine.track?.id ?? null}
+        anyJobRunning={anyJobRunning}
+        storageRefreshSignal={storageRefreshSignal}
         onPlayPause={handlePlayPause}
         onStop={() => {
           nowPlaying.stop();
@@ -253,10 +296,13 @@ export default function App() {
         currentTrackId={engine.track?.id ?? null}
         sizeBytes={librarySizeBytes}
         jobs={jobs}
+        trashCount={trashEntries.length}
+        trashBytes={trashEntries.reduce((sum, t) => sum + t.bytes, 0)}
         onClose={() => setLibraryOpen(false)}
         onOpenTrack={handleOpenTrack}
         onSetKept={handleSetKept}
         onDeleteTrack={handleDeleteTrack}
+        onEmptyTrash={handleEmptyTrash}
       />
       <SamplesPanel
         open={samplesOpen}
@@ -267,6 +313,7 @@ export default function App() {
         onReveal={handleRevealSample}
         onExport={handleExportSamples}
       />
+      <Toast />
       <main className="flex-1 pb-10">
         {activeTab === "slicer" ? (
           <SlicerTab
@@ -277,16 +324,13 @@ export default function App() {
             onSampleSaved={refreshSamples}
           />
         ) : (
-          <InspectorTab
+          <NotesTab
             track={engine.track}
             loop={engine.loop}
-            stems={engine.stems}
             instruments={engine.instruments}
             analysis={engine.analysis}
             onAnalyze={() => analyzeLoop(engine.track?.id ?? "")}
             samples={samples}
-            currentTime={sync.currentTime}
-            isPlaying={sync.isPlaying}
           />
         )}
       </main>
