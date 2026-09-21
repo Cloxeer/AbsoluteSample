@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { backend } from "@/lib/backend";
 import { onProgress } from "@/lib/events";
 import { markJobStarted } from "@/lib/localJobs";
+import { getLowPriority } from "@/lib/lowPriority";
 import type { InstrumentsResult, InstrumentStem, LoopAnalysis, LoopInfo, ProgressPayload, StemInfo, TrackInfo, TrackSession } from "@/lib/types";
 
 export type EngineState =
@@ -90,6 +91,18 @@ export function useAudioEngine() {
     }
   }, [engine.track?.id]);
 
+  const importLocal = useCallback(async (path: string) => {
+    setEngine((prev) => ({ ...prev, state: "fetching", error: null }));
+    try {
+      const track = await backend.importLocal({ path });
+      setEngine((prev) => ({ ...prev, state: "fetched", track }));
+      return track;
+    } catch (err) {
+      setEngine((prev) => ({ ...prev, state: "error", error: String(err) }));
+      throw err;
+    }
+  }, []);
+
   /** Opens a previously fetched song from the library, tearing down current playback first. */
   const openTrack = useCallback(async (id: string, teardown?: () => void) => {
     teardown?.();
@@ -146,11 +159,12 @@ export function useAudioEngine() {
     }
   }, []);
 
-  const separateInstruments = useCallback(async (trackId: string) => {
+  const separateInstruments = useCallback(async (trackId: string, options?: { lowPriority?: boolean }) => {
     markJobStarted(trackId);
     setEngine((prev) => ({ ...prev, state: "separating", error: null }));
     try {
-      const { stems, ...instrumentsMeta } = await backend.separateInstruments({ trackId });
+      const lowPriority = options?.lowPriority ?? getLowPriority();
+      const { stems, ...instrumentsMeta } = await backend.separateInstruments({ trackId, lowPriority });
       setEngine((prev) => ({ ...prev, state: "ready", instruments: stems, instrumentsMeta, progress: null }));
       return stems;
     } catch (err) {
@@ -185,5 +199,5 @@ export function useAudioEngine() {
     });
   }, []);
 
-  return { engine, fetchAudio, trimLoop, separateStems, separateInstruments, analyzeLoop, reset, openTrack, newLink };
+  return { engine, fetchAudio, importLocal, trimLoop, separateStems, separateInstruments, analyzeLoop, reset, openTrack, newLink };
 }

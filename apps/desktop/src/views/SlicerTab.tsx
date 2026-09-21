@@ -9,6 +9,7 @@ import { StemGroup } from "@/components/stems/StemGroup";
 import { InstrumentTrackList } from "@/components/stems/InstrumentTrackList";
 import { EngineStatusCard } from "@/components/stems/EngineStatusCard";
 import { SaveSampleButton } from "@/components/stems/SaveSampleButton";
+import { SourcePicker } from "@/components/layout/SourcePicker";
 import { useAudioEngine } from "@/hooks/useAudioEngine";
 import { useSyncPlayback } from "@/hooks/useSyncPlayback";
 import { backend } from "@/lib/backend";
@@ -169,32 +170,10 @@ function LoopPreview({
   );
 }
 
-function HeroEmpty({ url, onUrlChange, onFetch, busy }: { url: string; onUrlChange: (v: string) => void; onFetch: () => void; busy: boolean }) {
-  return (
-    <Surface variant="raised" className="p-10 flex flex-col items-center gap-6 text-center max-w-2xl mx-auto w-full">
-      <h1 className="text-2xl font-semibold leading-snug">Paste a YouTube link</h1>
-      <p className="text-sm text-muted max-w-sm">Fetch the audio, cut a loop, then split it into instrument stems.</p>
-      <div className="flex flex-col gap-2 w-full max-w-md items-stretch">
-        <label htmlFor="youtube-url" className="text-xs text-muted uppercase tracking-wide text-left">
-          YouTube URL
-        </label>
-        <div className="flex gap-2">
-          <input
-            id="youtube-url"
-            type="text"
-            value={url}
-            onChange={(e) => onUrlChange(e.target.value)}
-            placeholder="https://youtube.com/watch?v=..."
-            className="flex-1 bg-surface neu-surface-inset rounded-xl px-4 py-2 text-text text-sm outline-none"
-          />
-          <Button variant="primary" busy={busy} busyLabel="Fetching" onClick={onFetch} disabled={!url}>
-            Fetch
-          </Button>
-        </div>
-      </div>
-    </Surface>
-  );
-}
+const SOURCE_KIND_LABEL: Record<string, string> = {
+  local: "Local",
+  youtube: "YouTube",
+};
 
 export interface SlicerTabProps {
   engineApi?: ReturnType<typeof useAudioEngine>;
@@ -209,7 +188,7 @@ export interface SlicerTabProps {
 
 export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], onSampleSaved }: SlicerTabProps = {}) {
   const ownEngine = useAudioEngine();
-  const { engine, fetchAudio, trimLoop, separateStems, separateInstruments, newLink } = engineApi ?? ownEngine;
+  const { engine, fetchAudio, importLocal, trimLoop, separateStems, separateInstruments, newLink } = engineApi ?? ownEngine;
   const ownSync = useSyncPlayback();
   const sync = syncApi ?? ownSync;
   const [url, setUrl] = useState(SEED_URL);
@@ -292,6 +271,22 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
     await handleFetch();
   };
 
+  const handleImportLocal = async (path: string) => {
+    const track = await importLocal(path);
+    const wavUrl = await backend.resolveWavUrl(track.wavPath);
+    setSourceWavUrl(wavUrl);
+    setRange({ start: 0, end: track.durationSec });
+    setKept(false);
+    onLibraryChanged?.();
+  };
+
+  const handleNewLinkImportLocal = async (path: string) => {
+    newLink(sync.stopAll);
+    setSourceWavUrl(null);
+    setUseQuickEq(false);
+    await handleImportLocal(path);
+  };
+
   const handleToggleKept = async () => {
     if (!engine.track) return;
     const next = !kept;
@@ -343,7 +338,13 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
   if (!engine.track) {
     return (
       <div className="flex flex-col gap-6 px-6 py-16 w-full">
-        <HeroEmpty url={url} onUrlChange={setUrl} onFetch={handleFetch} busy={isFetching} />
+        <SourcePicker
+          onImportLocal={handleImportLocal}
+          url={url}
+          onUrlChange={setUrl}
+          onFetch={handleFetch}
+          busy={isFetching}
+        />
         {engine.progress && (
           <div className="max-w-2xl mx-auto w-full flex flex-col gap-1">
             <div className="h-2 rounded-full neu-surface-inset overflow-hidden">
@@ -360,21 +361,14 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
   return (
     <div className="flex flex-col gap-6 px-6 py-4 max-w-5xl mx-auto w-full">
       <Surface variant="raised" className="p-4 flex flex-col gap-3">
-        <label htmlFor="youtube-url-2" className="text-xs text-muted uppercase tracking-wide">
-          YouTube URL
-        </label>
-        <div className="flex gap-2">
-          <input
-            id="youtube-url-2"
-            type="text"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            className="flex-1 bg-surface neu-surface-inset rounded-xl px-4 py-2 text-text text-sm outline-none"
-          />
-          <Button variant="primary" busy={isFetching} busyLabel="Fetching" onClick={handleNewLinkFetch} disabled={isBusy || !url}>
-            Fetch
-          </Button>
-        </div>
+        <SourcePicker
+          onImportLocal={handleNewLinkImportLocal}
+          url={url}
+          onUrlChange={setUrl}
+          onFetch={handleNewLinkFetch}
+          busy={isFetching}
+          compact
+        />
         <p className="text-[11px] text-muted">
           This song is a scan. Press Keep to hold it, or save the tracks you want as samples. Older scans are removed as you fetch new links.
         </p>
@@ -391,6 +385,11 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
 
       <div className="flex items-center gap-2 -mt-2">
         <h3 className="text-sm font-medium truncate flex-1 min-w-0">{engine.track.title}</h3>
+        {engine.track.sourceKind && (
+          <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted bg-surface neu-surface-inset rounded-md px-1.5 py-0.5">
+            {SOURCE_KIND_LABEL[engine.track.sourceKind] ?? engine.track.sourceKind}
+          </span>
+        )}
         <button
           type="button"
           aria-pressed={kept}

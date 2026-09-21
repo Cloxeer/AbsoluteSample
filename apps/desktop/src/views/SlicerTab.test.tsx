@@ -41,7 +41,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 describe("SlicerTab", () => {
   it("renders with the seeded YouTube URL in the input", () => {
     render(<SlicerTab />);
-    const input = screen.getByLabelText("YouTube URL") as HTMLInputElement;
+    const input = screen.getByLabelText("or paste a YouTube link") as HTMLInputElement;
     expect(input.value).toBe("https://youtu.be/nRKgT3d6xoE");
   });
 
@@ -67,9 +67,27 @@ describe("SlicerTab", () => {
     expect(screen.queryByText("Split into 4 stems")).not.toBeInTheDocument();
   });
 
-  it("shows the hero when no track is loaded", () => {
+  it("shows the hero drop zone (primary) and YouTube row (secondary) when no track is loaded", () => {
     render(<SlicerTab />);
-    expect(screen.getByText("Paste a YouTube link")).toBeInTheDocument();
+    expect(screen.getByText("Drop a WAV, FLAC or MP3 here")).toBeInTheDocument();
+    expect(screen.getByText("Choose file")).toBeInTheDocument();
+    expect(screen.getByText("or paste a YouTube link")).toBeInTheDocument();
+  });
+
+  it("calls importLocal when a file is chosen via the browser file input", async () => {
+    const { result: engineResult } = renderHook(() => useAudioEngine());
+    const importLocalSpy = vi.spyOn(engineResult.current, "importLocal");
+
+    render(<SlicerTab engineApi={engineResult.current} />);
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(["dummy"], "my-song.wav", { type: "audio/wav" });
+
+    await act(async () => {
+      Object.defineProperty(fileInput, "files", { value: [file] });
+      fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(importLocalSpy).toHaveBeenCalledWith("my-song.wav");
   });
 
   it("shows the New link bar (not the hero) once a track is loaded", async () => {
