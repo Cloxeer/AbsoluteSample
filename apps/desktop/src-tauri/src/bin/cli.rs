@@ -86,7 +86,7 @@ enum Commands {
     Instruments {
         #[arg(long)]
         track: String,
-        /// Comma-separated pass list (default: instruments,vocals,lead,drums).
+        /// Comma-separated pass list (default: instruments,vocals,lead,drums,tag).
         #[arg(long)]
         passes: Option<String>,
     },

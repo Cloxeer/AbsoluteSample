@@ -77,6 +77,18 @@ pub struct Manifest {
     pub instruments: Option<Vec<InstrumentStem>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine: Option<EngineStatus>,
+    /// Measured wall time of the AI split and per-pass seconds (never estimated).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruments_meta: Option<InstrumentsMeta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstrumentsMeta {
+    pub elapsed_sec: f64,
+    pub pass_seconds: std::collections::HashMap<String, f64>,
+    pub device: String,
+    pub failed_passes: Vec<(String, String)>,
 }
 
 /// Finds `source.<ext>` in `dir` (v5: `fetch_audio` no longer decodes
@@ -320,7 +332,7 @@ pub fn run_full(
     let stems = run_stems(&track.id, Path::new(&loop_info.wav_path), progress)?;
     let analysis = run_analyze(&track.id, Path::new(&loop_info.wav_path), loop_info.duration_sec, progress)?;
 
-    let (instruments, engine_status) = if engine_choice == Engine::Ai {
+    let (instruments, engine_status, instruments_meta) = if engine_choice == Engine::Ai {
         let work_dir = workspace::work_dir(&track.id)?;
         let passes: Vec<String> = engine::DEFAULT_PASSES.iter().map(|s| s.to_string()).collect();
         let result = engine::separate(
@@ -329,9 +341,15 @@ pub fn run_full(
             &passes,
             |p| progress.report(&p.stage, p.percent, &p.message),
         )?;
-        (Some(result.stems), Some(engine::status()))
+        let meta = InstrumentsMeta {
+            elapsed_sec: result.elapsed_sec,
+            pass_seconds: result.pass_seconds,
+            device: result.device,
+            failed_passes: result.failed_passes,
+        };
+        (Some(result.stems), Some(engine::status()), Some(meta))
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     let manifest = Manifest {
@@ -341,6 +359,7 @@ pub fn run_full(
         analysis,
         instruments,
         engine: engine_status,
+        instruments_meta,
     };
 
     std::fs::create_dir_all(out_dir).map_err(|e| format!("failed to create out dir: {e}"))?;

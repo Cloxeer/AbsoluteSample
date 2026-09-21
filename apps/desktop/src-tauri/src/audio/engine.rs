@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 const SEPARATE_PY: &str = include_str!("../../../../../engine/separate.py");
 
 /// Canonical default pass list per the contract addendum.
-pub const DEFAULT_PASSES: &[&str] = &["instruments", "vocals", "lead", "drums"];
+pub const DEFAULT_PASSES: &[&str] = &["instruments", "vocals", "lead", "drums", "tag"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
