@@ -6,6 +6,7 @@ use crate::audio::progress::Progress;
 use crate::audio::{analysis, downloader, dsp_filters, engine, library, peaks, slicer, workspace};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Which separation engine `run_full` should use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,6 +14,22 @@ use std::path::{Path, PathBuf};
 pub enum Engine {
     Bands,
     Ai,
+}
+
+/// Whether a track came from a YouTube fetch or a local file import
+/// (contract v6 addendum "Local files first"). Old `track.json` files that
+/// predate this field deserialize as `Youtube` (the prior, only, behavior).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceKind {
+    Local,
+    Youtube,
+}
+
+impl Default for SourceKind {
+    fn default() -> Self {
+        SourceKind::Youtube
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +50,8 @@ pub struct TrackManifest {
     /// files predate this field).
     #[serde(default)]
     pub peaks: Vec<f32>,
+    #[serde(default)]
+    pub source_kind: SourceKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +214,7 @@ pub fn run_fetch(
         codec: probe.codec,
         work_dir: final_dir.to_string_lossy().to_string(),
         peaks: track_peaks,
+        source_kind: SourceKind::Youtube,
     };
 
     library::write_track(&track.id, &track)?;
@@ -209,6 +229,91 @@ pub fn run_fetch(
     state.last_opened_at = now;
     library::write_state(&track.id, &state)?;
 
+    Ok(track)
+}
+
+/// Extensions accepted by `run_import_local` (contract v6 addendum "Local
+/// files first").
+pub const IMPORT_EXTENSIONS: &[&str] = &["wav", "flac", "mp3", "m4a", "aiff", "aif", "ogg", "opus"];
+
+/// Derives a stable id for a local import: `"local-" + first 12 hex chars of
+/// sha1(path + size + mtime)`. Stable across repeated imports of the same
+/// unmodified file; changes if the file is replaced (different size/mtime).
+fn local_import_id(path: &Path, size: u64, mtime: SystemTime) -> String {
+    let mtime_secs = mtime.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let seed = format!("{}{}{}", path.to_string_lossy(), size, mtime_secs);
+    let hash = workspace::sha1_hex(seed.as_bytes());
+    format!("local-{}", &hash[..12])
+}
+
+/// import_local (contract v6 addendum "Local files first"): copies `path`
+/// untouched into `work/<id>/source.<ext>`, probes its metadata, and writes
+/// `track.json`/`state.json` like `run_fetch` does, with `sourceKind: "local"`.
+pub fn run_import_local(path: &Path, progress: &dyn Progress) -> Result<TrackManifest, String> {
+    if !path.is_file() {
+        return Err(format!("file not found: {}", path.display()));
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+        .ok_or_else(|| "file has no extension".to_string())?;
+    if !IMPORT_EXTENSIONS.contains(&ext.as_str()) {
+        return Err(format!(
+            "unsupported file type: .{ext} (expected one of {})",
+            IMPORT_EXTENSIONS.join(", ")
+        ));
+    }
+
+    let meta = std::fs::metadata(path).map_err(|e| format!("failed to stat file: {e}"))?;
+    let size = meta.len();
+    let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
+    let id = local_import_id(path, size, mtime);
+
+    let _ = library::prune_unkept(&[&id]);
+
+    progress.report("import", 10.0, "copying file");
+    let dir = workspace::work_dir(&id)?;
+    let dest = dir.join(format!("source.{ext}"));
+    if !dest.exists() {
+        std::fs::copy(path, &dest).map_err(|e| format!("failed to copy source file: {e}"))?;
+    }
+
+    progress.report("import", 60.0, "probing metadata");
+    let probe = downloader::probe(&dest)?;
+
+    progress.report("import", 85.0, "computing peaks");
+    let track_peaks = peaks::compute_peaks_for_path(&dest).unwrap_or_default();
+
+    let title = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Untitled")
+        .to_string();
+
+    let track = TrackManifest {
+        id: id.clone(),
+        title,
+        url: path.to_string_lossy().to_string(),
+        source_path: dest.to_string_lossy().to_string(),
+        wav_path: dest.to_string_lossy().to_string(),
+        duration_sec: probe.duration_sec,
+        sample_rate: probe.sample_rate,
+        channels: probe.channels,
+        codec: probe.codec,
+        work_dir: dir.to_string_lossy().to_string(),
+        peaks: track_peaks,
+        source_kind: SourceKind::Local,
+    };
+
+    library::write_track(&id, &track)?;
+    let mut state = library::load_state(&id);
+    let now = library::now_rfc3339();
+    state.fetched_at = now.clone();
+    state.last_opened_at = now;
+    library::write_state(&id, &state)?;
+
+    progress.report("import", 100.0, "import complete");
     Ok(track)
 }
 
@@ -334,12 +439,18 @@ fn ensure_source_wav(dir: &Path) -> Result<PathBuf, String> {
 pub fn run_instruments(
     track_id: &str,
     passes: &[String],
+    low_priority: bool,
     progress: impl FnMut(engine::EngineProgress),
 ) -> Result<engine::SeparateResult, String> {
     let dir = workspace::work_dir(track_id)?;
     let source_wav = ensure_source_wav(&dir)?;
 
-    let result = engine::separate(&source_wav, &dir, passes, progress)?;
+    let label = library::read_track(track_id)
+        .ok()
+        .flatten()
+        .map(|t| t.title)
+        .unwrap_or_else(|| track_id.to_string());
+    let result = engine::separate(&source_wav, &dir, passes, &label, low_priority, progress)?;
 
     let mut state = library::load_state(track_id);
     state.instruments_scope = Some("song".to_string());
@@ -381,6 +492,8 @@ pub fn run_full(
             Path::new(&loop_info.wav_path),
             &work_dir,
             &passes,
+            &track.title,
+            false,
             |p| progress.report(&p.stage, p.percent, &p.message),
         )?;
         let meta = InstrumentsMeta {
@@ -459,5 +572,34 @@ mod tests {
         assert_eq!(serde_json::to_string(&Engine::Ai).unwrap(), "\"ai\"");
         let parsed: Engine = serde_json::from_str("\"ai\"").unwrap();
         assert_eq!(parsed, Engine::Ai);
+    }
+
+    #[test]
+    fn source_kind_defaults_to_youtube_for_missing_field() {
+        let json = r#"{"id":"x","title":"t","url":"u","sourcePath":"","wavPath":"","durationSec":1.0,"sampleRate":44100,"channels":2,"codec":"opus","workDir":""}"#;
+        let track: TrackManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(track.source_kind, SourceKind::Youtube);
+    }
+
+    #[test]
+    fn local_import_id_is_stable_for_same_path_size_mtime() {
+        let path = Path::new("C:/Users/x/loop.wav");
+        let mtime = UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let id1 = local_import_id(path, 12345, mtime);
+        let id2 = local_import_id(path, 12345, mtime);
+        assert_eq!(id1, id2);
+        assert!(id1.starts_with("local-"));
+        assert_eq!(id1.len(), "local-".len() + 12);
+    }
+
+    #[test]
+    fn local_import_id_changes_with_size_or_mtime() {
+        let path = Path::new("C:/Users/x/loop.wav");
+        let mtime = UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let base = local_import_id(path, 12345, mtime);
+        let diff_size = local_import_id(path, 99999, mtime);
+        let diff_mtime = local_import_id(path, 12345, UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_001));
+        assert_ne!(base, diff_size);
+        assert_ne!(base, diff_mtime);
     }
 }

@@ -193,6 +193,8 @@ pub struct LibraryEntry {
     pub has_instruments: bool,
     pub instrument_count: u32,
     pub bytes: u64,
+    #[serde(default)]
+    pub source_kind: crate::pipeline::SourceKind,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -282,6 +284,7 @@ fn dir_entry_to_library_entry(id: &str, dir: &Path) -> Result<Option<LibraryEntr
         has_instruments,
         instrument_count,
         bytes,
+        source_kind: track.source_kind,
     }))
 }
 
@@ -735,6 +738,7 @@ mod tests {
                 codec: "opus".to_string(),
                 work_dir: dir.to_string_lossy().to_string(),
                 peaks: Vec::new(),
+                source_kind: Default::default(),
             },
         )
         .unwrap();

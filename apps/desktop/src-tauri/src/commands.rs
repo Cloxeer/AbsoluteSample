@@ -5,7 +5,7 @@
 use crate::audio::cuts;
 use crate::audio::engine::{self, EngineStatus, InstrumentStem};
 use crate::audio::progress::{Progress, ProgressPayload, Timer};
-use crate::audio::{analysis, downloader, library, samples, slicer, workspace};
+use crate::audio::{analysis, downloader, library, samples, slicer, trash, workspace};
 use crate::pipeline;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -104,6 +104,8 @@ pub struct TrackInfo {
     #[serde(rename = "workDir")]
     pub work_dir: String,
     pub peaks: Vec<f32>,
+    #[serde(rename = "sourceKind")]
+    pub source_kind: pipeline::SourceKind,
 }
 
 impl From<pipeline::TrackManifest> for TrackInfo {
@@ -120,8 +122,20 @@ impl From<pipeline::TrackManifest> for TrackInfo {
             codec: t.codec,
             work_dir: t.work_dir,
             peaks: t.peaks,
+            source_kind: t.source_kind,
         }
     }
+}
+
+#[tauri::command]
+pub async fn import_local(app: AppHandle, path: String) -> Result<TrackInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let progress = TauriProgress::new(app, String::new());
+        let track = pipeline::run_import_local(std::path::Path::new(&path), &progress)?;
+        Ok(track.into())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
 }
 
 #[tauri::command]
@@ -446,6 +460,8 @@ pub async fn engine_status() -> EngineStatus {
             gpu_name: None,
             models_present: Vec::new(),
             engine_path: String::new(),
+            busy: false,
+            busy_track_id: None,
         })
 }
 
@@ -493,13 +509,14 @@ pub async fn separate_instruments(
     app: AppHandle,
     track_id: String,
     passes: Option<Vec<String>>,
+    low_priority: Option<bool>,
 ) -> Result<SeparateInstrumentsOut, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let progress = TauriProgress::new(app, track_id.clone());
         let passes = passes.unwrap_or_else(|| {
             engine::DEFAULT_PASSES.iter().map(|s| s.to_string()).collect()
         });
-        let result = pipeline::run_instruments(&track_id, &passes, |p| {
+        let result = pipeline::run_instruments(&track_id, &passes, low_priority.unwrap_or(false), |p| {
             progress.report_pass(
                 &p.stage,
                 p.pass.as_deref().unwrap_or(""),
@@ -576,7 +593,7 @@ pub async fn set_kept(track_id: String, kept: bool) -> Result<library::LibraryEn
 
 #[tauri::command]
 pub async fn delete_track(track_id: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || library::delete(&track_id))
+    tauri::async_runtime::spawn_blocking(move || trash::delete_track(&track_id))
         .await
         .map_err(|e| format!("task join error: {e}"))?
 }
@@ -588,6 +605,7 @@ pub struct LibrarySize {
     pub tracks: usize,
     pub scans: usize,
     pub samples_bytes: u64,
+    pub trash_bytes: u64,
 }
 
 #[tauri::command]
@@ -595,10 +613,45 @@ pub async fn library_size() -> Result<LibrarySize, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let (bytes, tracks, scans) = library::size()?;
         let samples_bytes = samples::samples_dir_size()?;
-        Ok(LibrarySize { bytes, tracks, scans, samples_bytes })
+        let trash_bytes = trash::trash_bytes()?;
+        Ok(LibrarySize { bytes, tracks, scans, samples_bytes, trash_bytes })
     })
     .await
     .map_err(|e| format!("task join error: {e}"))?
+}
+
+/// Moves every unkept ("scan") track into trash, except `except` (if given).
+/// Returns the number of tracks moved.
+#[tauri::command]
+pub async fn clear_scans(except: Option<String>) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || trash::clear_scans(except.as_deref()))
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+// ---------------------------------------------------------------------
+// v6: Trash
+// ---------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_trash() -> Result<Vec<trash::TrashEntry>, String> {
+    tauri::async_runtime::spawn_blocking(trash::list_trash)
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn restore_trash(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || trash::restore_trash(&id))
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn empty_trash() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(trash::empty_trash)
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
 }
 
 // ---------------------------------------------------------------------
@@ -670,7 +723,7 @@ pub async fn rename_sample(id: String, name: String) -> Result<samples::Sample, 
 
 #[tauri::command]
 pub async fn delete_sample(id: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || samples::delete(&id))
+    tauri::async_runtime::spawn_blocking(move || trash::delete_sample(&id))
         .await
         .map_err(|e| format!("task join error: {e}"))?
 }

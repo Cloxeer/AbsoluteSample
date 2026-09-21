@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,54 @@ pub struct EngineStatus {
     pub gpu_name: Option<String>,
     pub models_present: Vec<String>,
     pub engine_path: String,
+    /// True while a `separate()` call is in flight (contract v6 "GPU busy
+    /// and low priority"); read live, never cached.
+    #[serde(default)]
+    pub busy: bool,
+    #[serde(default)]
+    pub busy_track_id: Option<String>,
+}
+
+// ---------------------------------------------------------------------
+// Busy state: only one `separate()` runs at a time.
+// ---------------------------------------------------------------------
+
+static BUSY: AtomicBool = AtomicBool::new(false);
+static BUSY_LABEL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn busy_label_mutex() -> &'static Mutex<Option<String>> {
+    BUSY_LABEL.get_or_init(|| Mutex::new(None))
+}
+
+fn busy_label() -> Option<String> {
+    busy_label_mutex().lock().ok().and_then(|g| g.clone())
+}
+
+/// Guards the `BUSY` flag for the duration of a `separate()` call; clears it
+/// (and the label) in every exit path, including a panic, via `Drop`.
+#[derive(Debug)]
+struct BusyGuard;
+
+impl BusyGuard {
+    fn acquire(label: &str) -> Result<Self, String> {
+        if BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            let current = busy_label().unwrap_or_else(|| "another track".to_string());
+            return Err(format!("engine busy: {current}"));
+        }
+        if let Ok(mut g) = busy_label_mutex().lock() {
+            *g = Some(label.to_string());
+        }
+        Ok(BusyGuard)
+    }
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        if let Ok(mut g) = busy_label_mutex().lock() {
+            *g = None;
+        }
+        BUSY.store(false, Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -280,6 +329,8 @@ fn compute_status() -> EngineStatus {
                 gpu_name: None,
                 models_present: Vec::new(),
                 engine_path: String::new(),
+                busy: false,
+                busy_track_id: None,
             };
         }
     };
@@ -316,11 +367,14 @@ fn compute_status() -> EngineStatus {
         gpu_name,
         models_present: list_models_present(&models_dir(&engine)),
         engine_path: engine.to_string_lossy().to_string(),
+        busy: false,
+        busy_track_id: None,
     }
 }
 
 /// Returns the current engine status. Never panics/errors; caches the
-/// result for 60 seconds to avoid re-spawning python on every poll.
+/// expensive-to-compute fields for 60 seconds, but `busy`/`busyTrackId` are
+/// always read live so a poller sees the split finish promptly.
 pub fn status() -> EngineStatus {
     let cache = status_cache();
     let mut guard = match cache.lock() {
@@ -329,11 +383,16 @@ pub fn status() -> EngineStatus {
     };
     if let Some((at, cached)) = guard.as_ref() {
         if at.elapsed() < Duration::from_secs(60) {
-            return cached.clone();
+            let mut s = cached.clone();
+            s.busy = BUSY.load(Ordering::SeqCst);
+            s.busy_track_id = busy_label();
+            return s;
         }
     }
-    let fresh = compute_status();
+    let mut fresh = compute_status();
     *guard = Some((Instant::now(), fresh.clone()));
+    fresh.busy = BUSY.load(Ordering::SeqCst);
+    fresh.busy_track_id = busy_label();
     fresh
 }
 
@@ -606,8 +665,14 @@ pub fn separate(
     loop_wav: &Path,
     work_dir: &Path,
     passes: &[String],
+    label: &str,
+    low_priority: bool,
     mut progress: impl FnMut(EngineProgress),
 ) -> Result<SeparateResult, String> {
+    // Only one split runs at a time; cleared on every exit path (including
+    // panics) via `Drop`.
+    let _busy_guard = BusyGuard::acquire(label)?;
+
     let timer = super::progress::Timer::start();
     let engine = engine_dir()?;
     std::fs::create_dir_all(&engine).map_err(|e| format!("failed to create engine dir: {e}"))?;
@@ -644,6 +709,19 @@ pub fn separate(
         .env("PYTHONUNBUFFERED", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    if low_priority {
+        cmd.arg("--low-priority");
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            // BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW. `silent_command`
+            // already set CREATE_NO_WINDOW alone; this call replaces those
+            // flags, so CREATE_NO_WINDOW is included explicitly here too.
+            const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+            cmd.creation_flags(BELOW_NORMAL_PRIORITY_CLASS | super::CREATE_NO_WINDOW);
+        }
+    }
 
     let mut child = cmd.spawn().map_err(|e| format!("failed to spawn separate.py: {e}"))?;
     let stdout = child.stdout.take();
@@ -908,6 +986,21 @@ mod tests {
             }
         }
         assert!(saw.iter().all(|&b| b));
+    }
+
+    #[test]
+    fn busy_guard_clears_on_drop() {
+        assert!(!BUSY.load(Ordering::SeqCst));
+        {
+            let _g = BusyGuard::acquire("track1").expect("first acquire should succeed");
+            assert!(BUSY.load(Ordering::SeqCst));
+            assert_eq!(busy_label().as_deref(), Some("track1"));
+            let err = BusyGuard::acquire("track2").unwrap_err();
+            assert!(err.contains("engine busy"));
+            assert!(err.contains("track1"));
+        }
+        assert!(!BUSY.load(Ordering::SeqCst));
+        assert_eq!(busy_label(), None);
     }
 
     #[test]

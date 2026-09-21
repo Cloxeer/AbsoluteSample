@@ -18,7 +18,8 @@
         "minWidth": 1100,
         "minHeight": 700,
         "theme": "Dark",
-        "decorations": true
+        "decorations": true,
+        "dragDropEnabled": true
       }
     ],
     "security": {

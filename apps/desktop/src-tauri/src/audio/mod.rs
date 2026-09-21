@@ -8,12 +8,13 @@ pub mod peaks;
 pub mod progress;
 pub mod samples;
 pub mod slicer;
+pub mod trash;
 pub mod workspace;
 
 use std::process::Command;
 
 #[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Builds a `Command` that, on Windows, is configured not to flash a console
 /// window when spawned from a GUI (Tauri) process.

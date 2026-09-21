@@ -1,7 +1,7 @@
 use absolutesample_lib::audio::cuts;
 use absolutesample_lib::audio::engine::{self, EngineProgress};
 use absolutesample_lib::audio::progress::Stdout;
-use absolutesample_lib::audio::{downloader, library, samples, workspace};
+use absolutesample_lib::audio::{downloader, library, samples, trash, workspace};
 use absolutesample_lib::pipeline::{self, Engine};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -29,6 +29,10 @@ struct Cli {
 enum Commands {
     /// Check ffmpeg/ffprobe/yt-dlp availability.
     Deps,
+    /// Import a local audio file (wav/flac/mp3/m4a/aiff/aif/ogg/opus).
+    Import {
+        path: PathBuf,
+    },
     /// Download bestaudio for a URL (any youtu.be/watch/shorts/embed form).
     Fetch {
         #[arg(long)]
@@ -90,6 +94,10 @@ enum Commands {
         /// Comma-separated pass list (default: instruments,vocals,lead,drums,tag).
         #[arg(long)]
         passes: Option<String>,
+        /// Spawn the Python child at BELOW_NORMAL_PRIORITY_CLASS and ask it
+        /// to use fewer CPU threads.
+        #[arg(long)]
+        low_priority: bool,
     },
     /// Song library management.
     Library {
@@ -100,6 +108,17 @@ enum Commands {
     Samples {
         #[command(subcommand)]
         action: SamplesAction,
+    },
+    /// Trash (deleted tracks/samples) management.
+    Trash {
+        #[command(subcommand)]
+        action: TrashAction,
+    },
+    /// Moves every unkept ("scan") song into trash.
+    ClearScans {
+        /// Never trashes this track id, even if unkept.
+        #[arg(long)]
+        except: Option<String>,
     },
     /// Cut a (optionally beat/bar-snapped) region out of a stem/instrument/
     /// loop/source wav.
@@ -174,6 +193,16 @@ enum LibraryAction {
 }
 
 #[derive(Subcommand)]
+enum TrashAction {
+    /// List every trash entry.
+    List,
+    /// Restore a trash entry by its id (from `trash list`).
+    Restore { id: String },
+    /// Permanently delete everything in trash.
+    Empty,
+}
+
+#[derive(Subcommand)]
 enum EngineAction {
     /// Report engine install status (never fails; prints JSON).
     Status,
@@ -195,10 +224,18 @@ fn print_err(context: &str, err: &str) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    trash::prune_trash(trash::DEFAULT_RETENTION_DAYS);
     let cli = Cli::parse();
     let progress = Stdout;
 
     match cli.command {
+        Commands::Import { path } => match pipeline::run_import_local(&path, &progress) {
+            Ok(track) => {
+                print_json(&track);
+                ExitCode::SUCCESS
+            }
+            Err(e) => print_err("import", &e),
+        },
         Commands::Deps => {
             let ffmpeg = absolutesample_lib::audio::version_string("ffmpeg", "-version");
             let ffprobe = absolutesample_lib::audio::version_string("ffprobe", "-version");
@@ -328,12 +365,12 @@ fn main() -> ExitCode {
                 Err(e) => print_err("engine install", &e),
             },
         },
-        Commands::Instruments { track, passes } => {
+        Commands::Instruments { track, passes, low_priority } => {
             let passes: Vec<String> = match passes {
                 Some(p) => p.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
                 None => engine::DEFAULT_PASSES.iter().map(|s| s.to_string()).collect(),
             };
-            match pipeline::run_instruments(&track, &passes, |p| eprint_engine_progress(&p)) {
+            match pipeline::run_instruments(&track, &passes, low_priority, |p| eprint_engine_progress(&p)) {
                 Ok(result) => {
                     print_json(&result.stems);
                     ExitCode::SUCCESS
@@ -363,7 +400,7 @@ fn main() -> ExitCode {
                 }
                 Err(e) => print_err("library keep", &e),
             },
-            LibraryAction::Delete { track_id } => match library::delete(&track_id) {
+            LibraryAction::Delete { track_id } => match trash::delete_track(&track_id) {
                 Ok(()) => {
                     print_json(&serde_json::json!({ "deleted": track_id }));
                     ExitCode::SUCCESS
@@ -373,11 +410,13 @@ fn main() -> ExitCode {
             LibraryAction::Size => match library::size() {
                 Ok((bytes, tracks, scans)) => {
                     let samples_bytes = samples::samples_dir_size().unwrap_or(0);
+                    let trash_bytes = trash::trash_bytes().unwrap_or(0);
                     print_json(&serde_json::json!({
                         "bytes": bytes,
                         "tracks": tracks,
                         "scans": scans,
                         "samplesBytes": samples_bytes,
+                        "trashBytes": trash_bytes,
                     }));
                     ExitCode::SUCCESS
                 }
@@ -401,7 +440,7 @@ fn main() -> ExitCode {
                     Err(e) => print_err("samples save", &e),
                 }
             }
-            SamplesAction::Delete { id } => match samples::delete(&id) {
+            SamplesAction::Delete { id } => match trash::delete_sample(&id) {
                 Ok(()) => {
                     print_json(&serde_json::json!({ "deleted": id }));
                     ExitCode::SUCCESS
@@ -415,6 +454,36 @@ fn main() -> ExitCode {
                 }
                 Err(e) => print_err("samples export", &e),
             },
+        },
+        Commands::Trash { action } => match action {
+            TrashAction::List => match trash::list_trash() {
+                Ok(entries) => {
+                    print_json(&entries);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("trash list", &e),
+            },
+            TrashAction::Restore { id } => match trash::restore_trash(&id) {
+                Ok(()) => {
+                    print_json(&serde_json::json!({ "restored": id }));
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("trash restore", &e),
+            },
+            TrashAction::Empty => match trash::empty_trash() {
+                Ok(()) => {
+                    print_json(&serde_json::json!({ "emptied": true }));
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("trash empty", &e),
+            },
+        },
+        Commands::ClearScans { except } => match trash::clear_scans(except.as_deref()) {
+            Ok(count) => {
+                print_json(&serde_json::json!({ "cleared": count }));
+                ExitCode::SUCCESS
+            }
+            Err(e) => print_err("clear-scans", &e),
         },
         Commands::Cut { track, stem, start, end, snap, fade_ms, trim_leading_silence } => {
             match cuts::cut_region(&track, &stem, start, end, &snap, fade_ms, trim_leading_silence) {

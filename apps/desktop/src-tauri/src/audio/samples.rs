@@ -515,6 +515,25 @@ pub fn delete(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Removes a sample's index entry without touching its wav file, returning
+/// the removed record. Used by `trash::delete_sample`, which handles moving
+/// the file itself.
+pub fn remove_index_entry(id: &str) -> Result<Sample, String> {
+    let mut index = load_index()?;
+    let pos = index.iter().position(|s| s.id == id).ok_or_else(|| format!("sample '{id}' not found"))?;
+    let sample = index.remove(pos);
+    save_index(&index)?;
+    Ok(sample)
+}
+
+/// Re-adds a sample record to the index (e.g. restoring from trash), without
+/// touching its wav file.
+pub fn reinsert(sample: Sample) -> Result<(), String> {
+    let mut index = load_index()?;
+    index.push(sample);
+    save_index(&index)
+}
+
 /// Copies the given sample ids' wav files into `dest_dir`, returning the
 /// resulting destination paths.
 pub fn export(ids: &[String], dest_dir: &Path) -> Result<Vec<String>, String> {

@@ -7,12 +7,14 @@ pub mod commands;
 #[cfg(feature = "tauri-app")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    audio::trash::prune_trash(audio::trash::DEFAULT_RETENTION_DAYS);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::check_dependencies,
             commands::fetch_audio,
+            commands::import_local,
             commands::trim_loop,
             commands::separate_stems,
             commands::analyze_loop,
@@ -37,6 +39,10 @@ pub fn run() {
             commands::analyze_file,
             commands::cut_region,
             commands::slice_hits,
+            commands::clear_scans,
+            commands::list_trash,
+            commands::restore_trash,
+            commands::empty_trash,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
