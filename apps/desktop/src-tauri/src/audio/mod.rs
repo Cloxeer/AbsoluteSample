@@ -3,6 +3,7 @@ pub mod dsp_filters;
 pub mod downloader;
 pub mod engine;
 pub mod library;
+pub mod peaks;
 pub mod progress;
 pub mod samples;
 pub mod slicer;

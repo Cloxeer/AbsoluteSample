@@ -25,6 +25,8 @@ pub struct Sample {
     pub duration_sec: f64,
     pub bpm: Option<f64>,
     pub created_at: String,
+    #[serde(default)]
+    pub peaks: Vec<f32>,
 }
 
 /// `~/.absolutesample/samples/`, created if missing.
@@ -182,6 +184,7 @@ pub fn save_sample(track_id: &str, stem_key: &str, name: Option<&str>) -> Result
 
     std::fs::copy(&source_path, &dest_path).map_err(|e| format!("failed to copy sample wav: {e}"))?;
     let bytes = std::fs::metadata(&dest_path).map(|m| m.len()).unwrap_or(0);
+    let sample_peaks = super::peaks::compute_peaks_for_path(&dest_path).unwrap_or_default();
 
     let sample = Sample {
         id: generate_id(&dest_path),
@@ -198,6 +201,7 @@ pub fn save_sample(track_id: &str, stem_key: &str, name: Option<&str>) -> Result
         duration_sec,
         bpm,
         created_at: library::now_rfc3339(),
+        peaks: sample_peaks,
     };
 
     let mut index = load_index()?;
@@ -207,9 +211,26 @@ pub fn save_sample(track_id: &str, stem_key: &str, name: Option<&str>) -> Result
     Ok(sample)
 }
 
-/// Lists every saved sample, most recently created first.
+/// Lists every saved sample, most recently created first. Lazily backfills
+/// `peaks` for samples saved before that field existed, re-saving the index
+/// if anything changed.
 pub fn list() -> Result<Vec<Sample>, String> {
     let mut index = load_index()?;
+    let mut dirty = false;
+    for sample in index.iter_mut() {
+        if sample.peaks.is_empty() {
+            let path = PathBuf::from(&sample.path);
+            if path.exists() {
+                if let Ok(p) = super::peaks::compute_peaks_for_path(&path) {
+                    sample.peaks = p;
+                    dirty = true;
+                }
+            }
+        }
+    }
+    if dirty {
+        save_index(&index)?;
+    }
     index.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(index)
 }
@@ -349,6 +370,7 @@ mod tests {
             duration_sec: 2.0,
             bpm: Some(120.0),
             created_at: library::now_rfc3339(),
+            peaks: vec![0.5, 1.0],
         };
         save_index(&[sample.clone()]).unwrap();
         let loaded = load_index().unwrap();

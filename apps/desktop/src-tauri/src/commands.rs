@@ -3,26 +3,23 @@
 //! progress is emitted on the `"pipeline://progress"` event.
 
 use crate::audio::engine::{self, EngineStatus, InstrumentStem};
-use crate::audio::progress::Progress;
+use crate::audio::progress::{Progress, ProgressPayload, Timer};
 use crate::audio::{analysis, downloader, library, samples, slicer, workspace};
 use crate::pipeline;
 use serde::Serialize;
+use std::collections::HashMap;
 use tauri::{AppHandle, Emitter};
 
 struct TauriProgress {
     app: AppHandle,
+    track_id: String,
+    timer: Timer,
 }
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct ProgressPayload {
-    stage: String,
-    percent: f32,
-    message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pass: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    failed: Option<bool>,
+impl TauriProgress {
+    fn new(app: AppHandle, track_id: impl Into<String>) -> Self {
+        TauriProgress { app, track_id: track_id.into(), timer: Timer::start() }
+    }
 }
 
 impl Progress for TauriProgress {
@@ -35,6 +32,10 @@ impl Progress for TauriProgress {
                 message: msg.to_string(),
                 pass: None,
                 failed: None,
+                track_id: Some(self.track_id.clone()),
+                started_at: Some(self.timer.started_at().to_string()),
+                elapsed_sec: Some(self.timer.elapsed_sec()),
+                pass_seconds: None,
             },
         );
     }
@@ -43,7 +44,7 @@ impl Progress for TauriProgress {
 impl TauriProgress {
     /// Emits a progress event carrying the separation `pass` name and
     /// whether that pass failed, for `separate_instruments`.
-    fn report_pass(&self, stage: &str, pass: &str, percent: f32, msg: &str, failed: bool) {
+    fn report_pass(&self, stage: &str, pass: &str, percent: f32, msg: &str, failed: bool, pass_seconds: &HashMap<String, f64>) {
         let _ = self.app.emit(
             "pipeline://progress",
             ProgressPayload {
@@ -52,6 +53,10 @@ impl TauriProgress {
                 message: msg.to_string(),
                 pass: Some(pass.to_string()),
                 failed: if failed { Some(true) } else { None },
+                track_id: Some(self.track_id.clone()),
+                started_at: Some(self.timer.started_at().to_string()),
+                elapsed_sec: Some(self.timer.elapsed_sec()),
+                pass_seconds: if pass_seconds.is_empty() { None } else { Some(pass_seconds.clone()) },
             },
         );
     }
@@ -97,6 +102,7 @@ pub struct TrackInfo {
     pub codec: String,
     #[serde(rename = "workDir")]
     pub work_dir: String,
+    pub peaks: Vec<f32>,
 }
 
 impl From<pipeline::TrackManifest> for TrackInfo {
@@ -112,6 +118,7 @@ impl From<pipeline::TrackManifest> for TrackInfo {
             channels: t.channels,
             codec: t.codec,
             work_dir: t.work_dir,
+            peaks: t.peaks,
         }
     }
 }
@@ -124,7 +131,7 @@ pub async fn fetch_audio(
     current_track_id: Option<String>,
 ) -> Result<TrackInfo, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let progress = TauriProgress { app };
+        let progress = TauriProgress::new(app, current_track_id.clone().unwrap_or_default());
         let track = pipeline::run_fetch(&url, force.unwrap_or(false), current_track_id.as_deref(), &progress)?;
         Ok(track.into())
     })
@@ -147,6 +154,7 @@ pub struct LoopInfo {
     pub loop_path: String,
     #[serde(rename = "wavPath")]
     pub wav_path: String,
+    pub peaks: Vec<f32>,
 }
 
 impl From<pipeline::LoopManifest> for LoopInfo {
@@ -158,6 +166,7 @@ impl From<pipeline::LoopManifest> for LoopInfo {
             duration_sec: l.duration_sec,
             loop_path: l.loop_path,
             wav_path: l.wav_path,
+            peaks: l.peaks,
         }
     }
 }
@@ -170,16 +179,23 @@ pub async fn trim_loop(
     end_sec: f64,
 ) -> Result<LoopInfo, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let progress = TauriProgress { app };
+        let progress = TauriProgress::new(app, track_id.clone());
         let dir = workspace::work_dir(&track_id)?;
-        // Find source.<ext> in the work dir.
-        let source_path = std::fs::read_dir(&dir)
+        // Find source.<ext> in the work dir; prefer the non-wav source
+        // (v5), falling back to source.wav for old work dirs that predate
+        // this change and never got a non-wav source.
+        let non_wav = std::fs::read_dir(&dir)
             .map_err(|e| format!("failed to read work dir: {e}"))?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .find(|p| {
                 p.file_stem().and_then(|s| s.to_str()) == Some("source")
                     && p.extension().and_then(|e| e.to_str()) != Some("wav")
+            });
+        let source_path = non_wav
+            .or_else(|| {
+                let wav = dir.join("source.wav");
+                if wav.exists() { Some(wav) } else { None }
             })
             .ok_or_else(|| "source file not found; call fetch_audio first".to_string())?;
 
@@ -203,6 +219,9 @@ pub struct StemInfo {
     pub peak_db: f64,
     #[serde(rename = "rmsDb")]
     pub rms_db: f64,
+    #[serde(rename = "durationSec")]
+    pub duration_sec: f64,
+    pub peaks: Vec<f32>,
 }
 
 impl From<pipeline::StemManifest> for StemInfo {
@@ -216,6 +235,8 @@ impl From<pipeline::StemManifest> for StemInfo {
             bytes: s.bytes,
             peak_db: s.peak_db,
             rms_db: s.rms_db,
+            duration_sec: s.duration_sec,
+            peaks: s.peaks,
         }
     }
 }
@@ -223,7 +244,7 @@ impl From<pipeline::StemManifest> for StemInfo {
 #[tauri::command]
 pub async fn separate_stems(app: AppHandle, track_id: String) -> Result<Vec<StemInfo>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let progress = TauriProgress { app };
+        let progress = TauriProgress::new(app, track_id.clone());
         let dir = workspace::work_dir(&track_id)?;
         let loop_wav = dir.join("loop.wav");
         if !loop_wav.exists() {
@@ -271,7 +292,7 @@ impl From<analysis::LoopAnalysis> for LoopAnalysisOut {
 #[tauri::command]
 pub async fn analyze_loop(app: AppHandle, track_id: String) -> Result<LoopAnalysisOut, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let progress = TauriProgress { app };
+        let progress = TauriProgress::new(app, track_id.clone());
         let dir = workspace::work_dir(&track_id)?;
         let loop_wav = dir.join("loop.wav");
         if !loop_wav.exists() {
@@ -352,7 +373,7 @@ pub async fn slice_beats(
     divisions: u32,
 ) -> Result<Vec<SliceInfoOut>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let progress = TauriProgress { app };
+        let progress = TauriProgress::new(app, track_id.clone());
         progress.report("slice", 0.0, "slicing beats");
 
         let dir = workspace::work_dir(&track_id)?;
@@ -427,6 +448,7 @@ pub async fn engine_status() -> EngineStatus {
 #[tauri::command]
 pub async fn engine_install(app: AppHandle) -> Result<EngineStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let timer = Timer::start();
         engine::install(|p| {
             let _ = app.emit(
                 "engine://progress",
@@ -436,6 +458,10 @@ pub async fn engine_install(app: AppHandle) -> Result<EngineStatus, String> {
                     message: p.message,
                     pass: None,
                     failed: None,
+                    track_id: None,
+                    started_at: Some(timer.started_at().to_string()),
+                    elapsed_sec: Some(timer.elapsed_sec()),
+                    pass_seconds: None,
                 },
             );
         })
@@ -444,14 +470,28 @@ pub async fn engine_install(app: AppHandle) -> Result<EngineStatus, String> {
     .map_err(|e| format!("task join error: {e}"))?
 }
 
+/// Result of `separate_instruments` (contract v5 addendum "Honest timing"):
+/// wraps the stems with honest total timing + per-pass timing, alongside the
+/// device used and any passes that failed (chain continues past failures).
+/// This is also what gets written to `instruments.json`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeparateInstrumentsOut {
+    pub stems: Vec<InstrumentStem>,
+    pub elapsed_sec: f64,
+    pub pass_seconds: HashMap<String, f64>,
+    pub device: String,
+    pub failed_passes: Vec<engine::FailedPass>,
+}
+
 #[tauri::command]
 pub async fn separate_instruments(
     app: AppHandle,
     track_id: String,
     passes: Option<Vec<String>>,
-) -> Result<Vec<InstrumentStem>, String> {
+) -> Result<SeparateInstrumentsOut, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let progress = TauriProgress { app };
+        let progress = TauriProgress::new(app, track_id.clone());
         let dir = workspace::work_dir(&track_id)?;
         let loop_wav = dir.join("loop.wav");
         if !loop_wav.exists() {
@@ -460,17 +500,27 @@ pub async fn separate_instruments(
         let passes = passes.unwrap_or_else(|| {
             engine::DEFAULT_PASSES.iter().map(|s| s.to_string()).collect()
         });
-        let (stems, _device, _failed_passes) =
-            engine::separate(&loop_wav, &dir, &passes, |p| {
-                progress.report_pass(
-                    &p.stage,
-                    p.pass.as_deref().unwrap_or(""),
-                    p.percent,
-                    &p.message,
-                    p.failed,
-                );
-            })?;
-        Ok(stems)
+        let result = engine::separate(&loop_wav, &dir, &passes, |p| {
+            progress.report_pass(
+                &p.stage,
+                p.pass.as_deref().unwrap_or(""),
+                p.percent,
+                &p.message,
+                p.failed,
+                &HashMap::new(),
+            );
+        })?;
+        Ok(SeparateInstrumentsOut {
+            stems: result.stems,
+            elapsed_sec: result.elapsed_sec,
+            pass_seconds: result.pass_seconds,
+            device: result.device,
+            failed_passes: result
+                .failed_passes
+                .into_iter()
+                .map(|(pass, error)| engine::FailedPass { pass, error })
+                .collect(),
+        })
     })
     .await
     .map_err(|e| format!("task join error: {e}"))?
@@ -488,6 +538,7 @@ pub struct TrackSessionOut {
     pub loop_info: Option<LoopInfo>,
     pub stems: Option<Vec<StemInfo>>,
     pub instruments: Option<Vec<InstrumentStem>>,
+    pub instruments_meta: Option<engine::InstrumentsMeta>,
     pub analysis: Option<LoopAnalysisOut>,
 }
 
@@ -509,6 +560,7 @@ pub async fn open_track(track_id: String) -> Result<TrackSessionOut, String> {
                 .stems
                 .map(|stems| stems.into_iter().map(StemInfo::from).collect()),
             instruments: session.instruments,
+            instruments_meta: session.instruments_meta,
             analysis: session.analysis.map(LoopAnalysisOut::from),
         })
     })
@@ -587,6 +639,20 @@ pub async fn export_samples(ids: Vec<String>, dest_dir: String) -> Result<Vec<St
     tauri::async_runtime::spawn_blocking(move || samples::export(&ids, std::path::Path::new(&dest_dir)))
         .await
         .map_err(|e| format!("task join error: {e}"))?
+}
+
+// ---------------------------------------------------------------------
+// v5: analyze_file, peaks
+// ---------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn analyze_file(path: String) -> Result<LoopAnalysisOut, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = analysis::analyze_file(std::path::Path::new(&path))?;
+        Ok(result.into())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
 }
 
 #[tauri::command]

@@ -58,6 +58,11 @@ enum Commands {
         #[arg(long)]
         track_id: String,
     },
+    /// Analyze any wav file (BPM/onsets/beat grid), caching the result under
+    /// `<workdir>/analysis/<stem>.json` when `path` is inside a work dir.
+    AnalyzeFile {
+        path: PathBuf,
+    },
     /// Full pipeline: fetch -> trim -> stems -> analyze (-> instruments with --engine ai).
     Run {
         #[arg(long)]
@@ -202,6 +207,10 @@ fn main() -> ExitCode {
                             p.file_stem().and_then(|s| s.to_str()) == Some("source")
                                 && p.extension().and_then(|e| e.to_str()) != Some("wav")
                         })
+                })
+                .or_else(|| {
+                    let wav = dir.join("source.wav");
+                    if wav.exists() { Some(wav) } else { None }
                 });
             let source_path = match source_path {
                 Some(p) => p,
@@ -253,6 +262,13 @@ fn main() -> ExitCode {
                 Err(e) => print_err("analyze", &e),
             }
         }
+        Commands::AnalyzeFile { path } => match absolutesample_lib::audio::analysis::analyze_file(&path) {
+            Ok(result) => {
+                print_json(&result);
+                ExitCode::SUCCESS
+            }
+            Err(e) => print_err("analyze-file", &e),
+        },
         Commands::Run { url, start, end, out, engine: engine_arg } => {
             let engine_choice = match engine_arg.as_str() {
                 "ai" => Engine::Ai,
@@ -295,8 +311,8 @@ fn main() -> ExitCode {
                 None => engine::DEFAULT_PASSES.iter().map(|s| s.to_string()).collect(),
             };
             match engine::separate(&loop_wav, &dir, &passes, |p| eprint_engine_progress(&p)) {
-                Ok((stems, _device, _failed)) => {
-                    print_json(&stems);
+                Ok(result) => {
+                    print_json(&result.stems);
                     ExitCode::SUCCESS
                 }
                 Err(e) => print_err("instruments", &e),

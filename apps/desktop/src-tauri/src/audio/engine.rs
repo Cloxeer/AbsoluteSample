@@ -38,6 +38,13 @@ pub struct EngineStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct InstrumentTag {
+    pub label: String,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct InstrumentStem {
     pub key: String,
     pub label: String,
@@ -49,6 +56,17 @@ pub struct InstrumentStem {
     pub rms_db: f64,
     pub model: String,
     pub order: u32,
+    #[serde(default)]
+    pub duration_sec: f64,
+    #[serde(default)]
+    pub peaks: Vec<f32>,
+    /// AST instrument-family tags (contract v5 addendum "Instrument tags"),
+    /// produced by the Python `tag` pass; absent (never-fatal) if that pass
+    /// didn't run or failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<InstrumentTag>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sounds_like: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +82,14 @@ pub struct InstrumentsManifest {
     pub stems: Vec<InstrumentStem>,
     pub device: String,
     pub failed_passes: Vec<FailedPass>,
+    /// Honest total wall-clock time (contract v5 addendum "Honest timing"),
+    /// measured independently of anything the Python script reports.
+    #[serde(default)]
+    pub elapsed_sec: f64,
+    /// Per-pass seconds, parsed from the script's `pass_done.seconds`
+    /// events.
+    #[serde(default)]
+    pub pass_seconds: std::collections::HashMap<String, f64>,
 }
 
 /// Returns the engine root dir: `<home>/engine`.
@@ -491,6 +517,10 @@ pub struct RawStem {
     pub path: String,
     pub model: String,
     pub order: u32,
+    #[serde(default)]
+    pub tags: Option<Vec<InstrumentTag>>,
+    #[serde(default, rename = "soundsLike")]
+    pub sounds_like: Option<String>,
 }
 
 /// Parses one JSON line from separate.py's stdout into a `SeparateEvent`.
@@ -536,16 +566,49 @@ pub fn parse_separate_line(line: &str) -> SeparateEvent {
     }
 }
 
+/// The non-stem portion of `InstrumentsManifest` (contract v5 addendum:
+/// `TrackSession` gains `instruments: InstrumentStem[]` plus this separate
+/// `instrumentsMeta` -- see the "TrackSession instruments shape" note
+/// appended to `docs/CONTRACT.md`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstrumentsMeta {
+    pub elapsed_sec: f64,
+    pub pass_seconds: std::collections::HashMap<String, f64>,
+    pub device: String,
+    pub failed_passes: Vec<FailedPass>,
+}
+
+impl From<&InstrumentsManifest> for InstrumentsMeta {
+    fn from(m: &InstrumentsManifest) -> Self {
+        InstrumentsMeta {
+            elapsed_sec: m.elapsed_sec,
+            pass_seconds: m.pass_seconds.clone(),
+            device: m.device.clone(),
+            failed_passes: m.failed_passes.clone(),
+        }
+    }
+}
+
 /// Writes the embedded `separate.py` to `<engine>/separate.py`, runs it
 /// against `loop_wav`, streams progress, and returns the resulting stems
 /// (with bytes/peakDb/rmsDb filled in), the device used, and any failed
 /// passes.
+pub struct SeparateResult {
+    pub stems: Vec<InstrumentStem>,
+    pub device: String,
+    pub failed_passes: Vec<(String, String)>,
+    pub elapsed_sec: f64,
+    pub pass_seconds: std::collections::HashMap<String, f64>,
+}
+
 pub fn separate(
     loop_wav: &Path,
     work_dir: &Path,
     passes: &[String],
     mut progress: impl FnMut(EngineProgress),
-) -> Result<(Vec<InstrumentStem>, String, Vec<(String, String)>), String> {
+) -> Result<SeparateResult, String> {
+    let timer = super::progress::Timer::start();
     let engine = engine_dir()?;
     std::fs::create_dir_all(&engine).map_err(|e| format!("failed to create engine dir: {e}"))?;
 
@@ -601,6 +664,7 @@ pub fn separate(
     let mut raw_stems: Vec<RawStem> = Vec::new();
     let mut failed_passes: Vec<(String, String)> = Vec::new();
     let mut fatal_error: Option<String> = None;
+    let mut pass_seconds: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
 
     if let Some(stdout) = stdout {
         let reader = BufReader::new(stdout);
@@ -619,6 +683,7 @@ pub fn separate(
                     });
                 }
                 SeparateEvent::PassDone { pass, seconds } => {
+                    pass_seconds.insert(pass.clone(), seconds);
                     progress(EngineProgress {
                         stage: "separate".to_string(),
                         percent: 100.0,
@@ -685,7 +750,11 @@ pub fn separate(
         let loudness = dsp_filters::measure_loudness(&path).unwrap_or(dsp_filters::StemLoudness {
             peak_db: 0.0,
             rms_db: 0.0,
+            duration_sec: 0.0,
+            peaks: Vec::new(),
         });
+        let stem_peaks = super::peaks::compute_peaks_for_path(&path).unwrap_or_default();
+        let duration_sec = super::downloader::probe(&path).map(|p| p.duration_sec).unwrap_or(0.0);
         stems.push(InstrumentStem {
             key: raw.key,
             label: raw.label,
@@ -697,8 +766,14 @@ pub fn separate(
             rms_db: loudness.rms_db,
             model: raw.model,
             order: raw.order,
+            duration_sec,
+            peaks: stem_peaks,
+            tags: raw.tags,
+            sounds_like: raw.sounds_like,
         });
     }
+
+    let elapsed_sec = timer.elapsed_sec();
 
     let manifest = InstrumentsManifest {
         stems: stems.clone(),
@@ -707,6 +782,8 @@ pub fn separate(
             .iter()
             .map(|(p, e)| FailedPass { pass: p.clone(), error: e.clone() })
             .collect(),
+        elapsed_sec,
+        pass_seconds: pass_seconds.clone(),
     };
     let manifest_path = work_dir.join("instruments.json");
     let manifest_json = serde_json::to_string_pretty(&manifest)
@@ -714,7 +791,7 @@ pub fn separate(
     std::fs::write(&manifest_path, manifest_json)
         .map_err(|e| format!("failed to write instruments.json: {e}"))?;
 
-    Ok((stems, device, failed_passes))
+    Ok(SeparateResult { stems, device, failed_passes, elapsed_sec, pass_seconds })
 }
 
 #[cfg(test)]

@@ -248,3 +248,28 @@ Rows = the current song's top-level instrument stems (kit children when expanded
 Each row's pads come from that row's own onset analysis (`analyze_file` on that wav), lit when an onset falls within a 16th-note window of the pad; pad brightness = onset strength.
 Columns = beats of the loop (bars x 4, 16th subdivision toggle). The top transport Play/Pause is the only loop transport: it plays the mix and a column highlight follows
 the playhead. Clicking a pad auditions that slice of that stem (stops any other audition; clicking again stops). Nothing loops automatically unless Loop is on.
+
+---
+
+# Implementation note: `TrackSession.instruments` shape (v5 backend)
+
+The v5 addendum leaves the `TrackSession.instruments` shape as an explicit either/or ("either `instruments` becomes
+the whole `{ stems, elapsedSec, passSeconds, device, failedPasses }` object, or keep `instruments: InstrumentStem[]`
+plus a separate `instrumentsMeta`"). This implementation picked the **second** option:
+
+```ts
+interface TrackSession {
+  // ...
+  instruments: InstrumentStem[] | null;
+  instrumentsMeta: { elapsedSec: number; passSeconds: Record<string, number>; device: string;
+    failedPasses: { pass: string; error: string }[] } | null;
+}
+```
+
+Rationale: `instruments` staying a plain array keeps every existing frontend consumer that maps/filters/renders
+`session.instruments` as a stem list working unchanged; the new timing/device/failure metadata is additive via the
+sibling `instrumentsMeta` field, which is `null` until a track has been AI-separated at least once. `instruments.json`
+on disk mirrors the same split: `{ stems, device, failedPasses, elapsedSec, passSeconds }` (all fields at the top
+level, since the file has no sibling "session" object to split across). The `separate_instruments` Tauri command
+itself returns `{ stems, elapsedSec, passSeconds, device, failedPasses }` (one flat object) since it's a single
+just-finished operation's result, not a persisted session snapshot.

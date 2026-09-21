@@ -3,7 +3,7 @@
 
 use crate::audio::engine::{EngineStatus, InstrumentStem};
 use crate::audio::progress::Progress;
-use crate::audio::{analysis, downloader, dsp_filters, engine, library, slicer, workspace};
+use crate::audio::{analysis, downloader, dsp_filters, engine, library, peaks, slicer, workspace};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -28,6 +28,11 @@ pub struct TrackManifest {
     pub channels: u32,
     pub codec: String,
     pub work_dir: String,
+    /// Waveform peaks (contract v5 addendum), computed at fetch time and
+    /// cached here; recomputed lazily on load if missing (old `track.json`
+    /// files predate this field).
+    #[serde(default)]
+    pub peaks: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +44,8 @@ pub struct LoopManifest {
     pub duration_sec: f64,
     pub loop_path: String,
     pub wav_path: String,
+    #[serde(default)]
+    pub peaks: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +59,10 @@ pub struct StemManifest {
     pub bytes: u64,
     pub peak_db: f64,
     pub rms_db: f64,
+    #[serde(default)]
+    pub duration_sec: f64,
+    #[serde(default)]
+    pub peaks: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,16 +79,22 @@ pub struct Manifest {
     pub engine: Option<EngineStatus>,
 }
 
-/// Looks for an existing `source.<ext>` (non-wav) + `source.wav` pair in
-/// `dir`, returning the non-wav source's path if both are present.
-fn existing_source_pair(dir: &Path) -> Option<PathBuf> {
-    let wav = dir.join("source.wav");
-    if !wav.exists() {
-        return None;
-    }
-    std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
+/// Finds `source.<ext>` in `dir` (v5: `fetch_audio` no longer decodes
+/// `source.wav`, so a source file alone is the cached-fetch signal). For
+/// backward compatibility with old work dirs, `source.wav` itself also
+/// counts as a valid (if suboptimal) source.
+fn existing_source(dir: &Path) -> Option<PathBuf> {
+    let non_wav = std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
         p.file_stem().and_then(|s| s.to_str()) == Some("source")
             && p.extension().and_then(|e| e.to_str()) != Some("wav")
+    });
+    non_wav.or_else(|| {
+        let wav = dir.join("source.wav");
+        if wav.exists() {
+            Some(wav)
+        } else {
+            None
+        }
     })
 }
 
@@ -106,8 +123,15 @@ pub fn run_fetch(
     if !force {
         if let Some(id) = &known_id {
             let dir = workspace::work_dir(id)?;
-            if existing_source_pair(&dir).is_some() {
-                if let Some(cached) = library::read_track(id)? {
+            if existing_source(&dir).is_some() {
+                if let Some(mut cached) = library::read_track(id)? {
+                    if cached.peaks.is_empty() {
+                        // Backfill (old track.json predates peaks) and re-save.
+                        if let Some(src) = existing_source(&dir) {
+                            cached.peaks = peaks::compute_peaks_for_path(&src).unwrap_or_default();
+                            let _ = library::write_track(id, &cached);
+                        }
+                    }
                     progress.report("download", 100.0, "using cached track");
                     progress.report("decode", 100.0, "fetch complete (cached)");
                     return Ok(cached);
@@ -139,9 +163,11 @@ pub fn run_fetch(
     progress.report("decode", 70.0, "probing metadata");
     let probe = downloader::probe(&final_source)?;
 
-    progress.report("decode", 80.0, "decoding source.wav");
-    let wav_path = final_dir.join("source.wav");
-    slicer::decode_to_wav(&final_source, &wav_path)?;
+    // v5: no longer decode source.wav; WebView2 plays webm/opus and m4a
+    // natively, and computing peaks straight off the source is much
+    // cheaper than a full PCM decode.
+    progress.report("decode", 85.0, "computing peaks");
+    let track_peaks = peaks::compute_peaks_for_path(&final_source).unwrap_or_default();
 
     progress.report("decode", 100.0, "fetch complete");
 
@@ -150,12 +176,13 @@ pub fn run_fetch(
         title: dl.title,
         url: fetch_url,
         source_path: final_source.to_string_lossy().to_string(),
-        wav_path: wav_path.to_string_lossy().to_string(),
+        wav_path: final_source.to_string_lossy().to_string(),
         duration_sec: probe.duration_sec,
         sample_rate: probe.sample_rate,
         channels: probe.channels,
         codec: probe.codec,
         work_dir: final_dir.to_string_lossy().to_string(),
+        peaks: track_peaks,
     };
 
     library::write_track(&track.id, &track)?;
@@ -194,6 +221,9 @@ pub fn run_trim(
     let wav_path = dir.join("loop.wav");
     slicer::decode_to_wav(&loop_path, &wav_path)?;
 
+    progress.report("trim", 90.0, "computing peaks");
+    let loop_peaks = peaks::compute_peaks_for_path(&wav_path).unwrap_or_default();
+
     progress.report("trim", 100.0, "trim complete");
 
     let loop_info = LoopManifest {
@@ -203,6 +233,7 @@ pub fn run_trim(
         duration_sec: end_sec - start_sec,
         loop_path: loop_path.to_string_lossy().to_string(),
         wav_path: wav_path.to_string_lossy().to_string(),
+        peaks: loop_peaks,
     };
 
     let mut state = library::load_state(track_id);
@@ -228,6 +259,8 @@ pub fn run_stems(
         progress.report("stems", pct, &format!("measuring loudness: {}", dsp_filters::STEM_KEYS[i]));
         let loudness = dsp_filters::measure_loudness(path)?;
         let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let stem_peaks = peaks::compute_peaks_for_path(path).unwrap_or_default();
+        let duration_sec = downloader::probe(path).map(|p| p.duration_sec).unwrap_or(0.0);
         result.push(StemManifest {
             index: (i + 1) as u32,
             key: dsp_filters::STEM_KEYS[i].to_string(),
@@ -237,6 +270,8 @@ pub fn run_stems(
             bytes,
             peak_db: loudness.peak_db,
             rms_db: loudness.rms_db,
+            duration_sec,
+            peaks: stem_peaks,
         });
     }
 
@@ -288,13 +323,13 @@ pub fn run_full(
     let (instruments, engine_status) = if engine_choice == Engine::Ai {
         let work_dir = workspace::work_dir(&track.id)?;
         let passes: Vec<String> = engine::DEFAULT_PASSES.iter().map(|s| s.to_string()).collect();
-        let (stems, _device, _failed) = engine::separate(
+        let result = engine::separate(
             Path::new(&loop_info.wav_path),
             &work_dir,
             &passes,
             |p| progress.report(&p.stage, p.percent, &p.message),
         )?;
-        (Some(stems), Some(engine::status()))
+        (Some(result.stems), Some(engine::status()))
     } else {
         (None, None)
     };

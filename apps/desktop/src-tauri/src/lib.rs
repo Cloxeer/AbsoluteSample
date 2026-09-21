@@ -34,6 +34,7 @@ pub fn run() {
             commands::delete_sample,
             commands::export_samples,
             commands::reveal_sample,
+            commands::analyze_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

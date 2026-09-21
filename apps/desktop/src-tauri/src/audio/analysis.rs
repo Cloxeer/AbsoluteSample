@@ -306,6 +306,45 @@ pub fn analyze(wav_path: &Path, duration_sec: f64) -> Result<LoopAnalysis, Strin
     })
 }
 
+/// Resolves the `<workdir>/analysis/<file stem>.json` cache path for `path`,
+/// if `path` is inside a work dir (contract v5 addendum: `analyze_file`).
+fn cache_path_for(path: &Path) -> Option<std::path::PathBuf> {
+    let track_id = super::library::track_id_from_path(path)?;
+    let dir = super::workspace::work_dir(&track_id).ok()?;
+    let stem = path.file_stem()?.to_str()?;
+    Some(dir.join("analysis").join(format!("{stem}.json")))
+}
+
+/// `analyze_file({ path }) -> LoopAnalysis` (contract v5 addendum): analyzes
+/// any wav (used for per-stem onsets in the Beat Matrix). When `path` is
+/// inside a work dir, caches the result at `<workdir>/analysis/<stem>.json`
+/// and reuses that cache on subsequent calls.
+pub fn analyze_file(path: &Path) -> Result<LoopAnalysis, String> {
+    let cache_path = cache_path_for(path);
+
+    if let Some(cp) = &cache_path {
+        if let Ok(text) = std::fs::read_to_string(cp) {
+            if let Ok(cached) = serde_json::from_str::<LoopAnalysis>(&text) {
+                return Ok(cached);
+            }
+        }
+    }
+
+    let probe = super::downloader::probe(path)?;
+    let result = analyze(path, probe.duration_sec)?;
+
+    if let Some(cp) = &cache_path {
+        if let Some(parent) = cp.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&result) {
+            let _ = std::fs::write(cp, json);
+        }
+    }
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

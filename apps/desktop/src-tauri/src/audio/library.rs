@@ -197,6 +197,9 @@ pub struct TrackSession {
     pub loop_info: Option<LoopManifest>,
     pub stems: Option<Vec<StemManifest>>,
     pub instruments: Option<Vec<InstrumentStem>>,
+    /// Separate from `instruments` per the v5 addendum's timing/device/
+    /// failed-passes metadata (see the note in `docs/CONTRACT.md`).
+    pub instruments_meta: Option<super::engine::InstrumentsMeta>,
     pub analysis: Option<analysis::LoopAnalysis>,
 }
 
@@ -211,10 +214,37 @@ fn has_band_stem_files(dir: &Path) -> bool {
     }
 }
 
+/// Reads `instruments.json`, lazily backfilling `peaks`/`durationSec` for
+/// any stem saved before those fields existed (and re-saving the manifest
+/// if anything changed).
 fn instruments_manifest_at(dir: &Path) -> Option<super::engine::InstrumentsManifest> {
     let path = dir.join("instruments.json");
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+    let text = std::fs::read_to_string(&path).ok()?;
+    let mut manifest: super::engine::InstrumentsManifest = serde_json::from_str(&text).ok()?;
+
+    let mut dirty = false;
+    for stem in manifest.stems.iter_mut() {
+        if stem.peaks.is_empty() {
+            let stem_path = PathBuf::from(&stem.path);
+            if stem_path.exists() {
+                if let Ok(p) = super::peaks::compute_peaks_for_path(&stem_path) {
+                    stem.peaks = p;
+                    dirty = true;
+                }
+                if stem.duration_sec <= 0.0 {
+                    stem.duration_sec = super::downloader::probe(&stem_path).map(|p| p.duration_sec).unwrap_or(0.0);
+                    dirty = true;
+                }
+            }
+        }
+    }
+    if dirty {
+        if let Ok(json) = serde_json::to_string_pretty(&manifest) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    Some(manifest)
 }
 
 fn dir_entry_to_library_entry(id: &str, dir: &Path) -> Result<Option<LibraryEntry>, String> {
@@ -306,14 +336,26 @@ fn rebuild_band_stems(track_id: &str, dir: &Path, state: &mut StateFile) -> Resu
 
     for (name, path) in files {
         let Some((index, key)) = parse_band_stem_filename(&name) else { continue };
-        let loudness = match cache.get(&name) {
-            Some(l) => l.clone(),
-            None => {
-                let l = dsp_filters::measure_loudness(&path)?;
-                cache.insert(name.clone(), l.clone());
-                dirty = true;
-                l
+        let cached = cache.get(&name).cloned();
+        let needs_recompute = cached.is_none() || cached.as_ref().is_some_and(|l| l.peaks.is_empty());
+        let loudness = if needs_recompute {
+            let mut l = cached.unwrap_or_else(|| {
+                dsp_filters::measure_loudness(&path).unwrap_or(dsp_filters::StemLoudness {
+                    peak_db: 0.0,
+                    rms_db: 0.0,
+                    duration_sec: 0.0,
+                    peaks: Vec::new(),
+                })
+            });
+            l.peaks = super::peaks::compute_peaks_for_path(&path).unwrap_or_default();
+            if l.duration_sec <= 0.0 {
+                l.duration_sec = super::downloader::probe(&path).map(|p| p.duration_sec).unwrap_or(0.0);
             }
+            cache.insert(name.clone(), l.clone());
+            dirty = true;
+            l
+        } else {
+            cached.unwrap()
         };
         let pos = dsp_filters::STEM_KEYS.iter().position(|k| *k == key.as_str());
         let (label, band) = match pos {
@@ -330,6 +372,8 @@ fn rebuild_band_stems(track_id: &str, dir: &Path, state: &mut StateFile) -> Resu
             bytes,
             peak_db: loudness.peak_db,
             rms_db: loudness.rms_db,
+            duration_sec: loudness.duration_sec,
+            peaks: loudness.peaks,
         });
     }
 
@@ -347,24 +391,56 @@ fn rebuild_band_stems(track_id: &str, dir: &Path, state: &mut StateFile) -> Resu
 /// an astats cache in `state.json`), and reads `instruments.json` if present.
 pub fn open(track_id: &str) -> Result<TrackSession, String> {
     let dir = workspace::work_dir(track_id)?;
-    let track = read_track_at(&dir)?
+    let mut track = read_track_at(&dir)?
         .ok_or_else(|| format!("track '{track_id}' not found; call fetch_audio first"))?;
+
+    // Lazily backfill peaks for track.json files that predate them.
+    if track.peaks.is_empty() {
+        let source = std::fs::read_dir(&dir)
+            .ok()
+            .and_then(|entries| {
+                entries.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
+                    p.file_stem().and_then(|s| s.to_str()) == Some("source")
+                })
+            });
+        if let Some(src) = source {
+            if let Ok(p) = super::peaks::compute_peaks_for_path(&src) {
+                track.peaks = p;
+                let _ = write_track(track_id, &track);
+            }
+        }
+    }
 
     let mut state = load_state_at(&dir)?;
     state.last_opened_at = now_rfc3339();
+
+    // Lazily backfill loop.wav peaks for state.json files that predate them.
+    if let Some(loop_info) = state.loop_info.as_mut() {
+        if loop_info.peaks.is_empty() {
+            let wav = std::path::PathBuf::from(&loop_info.wav_path);
+            if wav.exists() {
+                if let Ok(p) = super::peaks::compute_peaks_for_path(&wav) {
+                    loop_info.peaks = p;
+                }
+            }
+        }
+    }
 
     let stems = rebuild_band_stems(track_id, &dir, &mut state)?;
     // rebuild_band_stems already persisted state if it updated band_stats;
     // persist again unconditionally to record the touched lastOpenedAt.
     write_state(track_id, &state)?;
 
-    let instruments = instruments_manifest_at(&dir).map(|m| m.stems);
+    let manifest = instruments_manifest_at(&dir);
+    let instruments = manifest.as_ref().map(|m| m.stems.clone());
+    let instruments_meta = manifest.as_ref().map(super::engine::InstrumentsMeta::from);
 
     Ok(TrackSession {
         track,
         loop_info: state.loop_info.clone(),
         stems,
         instruments,
+        instruments_meta,
         analysis: state.analysis.clone(),
     })
 }
@@ -628,6 +704,7 @@ mod tests {
             duration_sec: 1.0,
             loop_path: "loop.webm".to_string(),
             wav_path: "loop.wav".to_string(),
+            peaks: Vec::new(),
         });
         let json = serde_json::to_string(&state).unwrap();
         let parsed: StateFile = serde_json::from_str(&json).unwrap();
@@ -651,6 +728,7 @@ mod tests {
                 channels: 2,
                 codec: "opus".to_string(),
                 work_dir: dir.to_string_lossy().to_string(),
+                peaks: Vec::new(),
             },
         )
         .unwrap();

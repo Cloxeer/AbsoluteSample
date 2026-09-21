@@ -47,6 +47,13 @@ pub fn build_filter_graph() -> String {
 pub struct StemLoudness {
     pub peak_db: f64,
     pub rms_db: f64,
+    /// Waveform peaks + duration (contract v5 addendum), cached alongside
+    /// loudness so re-opening a track doesn't recompute them. Old
+    /// `state.json` cache entries predate these fields.
+    #[serde(default)]
+    pub duration_sec: f64,
+    #[serde(default)]
+    pub peaks: Vec<f32>,
 }
 
 /// Runs the single ffmpeg pass, decoding `loop_wav` and writing 4 stem wavs
@@ -104,7 +111,9 @@ pub fn measure_loudness(wav_path: &Path) -> Result<StemLoudness, String> {
     let rms = parse_astats_value(&stderr, "RMS level dB");
 
     match (peak, rms) {
-        (Some(peak_db), Some(rms_db)) => Ok(StemLoudness { peak_db, rms_db }),
+        (Some(peak_db), Some(rms_db)) => {
+            Ok(StemLoudness { peak_db, rms_db, duration_sec: 0.0, peaks: Vec::new() })
+        }
         _ => Err(format!(
             "failed to parse astats output for {}",
             wav_path.display()
