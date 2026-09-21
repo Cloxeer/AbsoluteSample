@@ -225,10 +225,21 @@ export function useSyncPlayback() {
     return () => cancelAnimationFrame(raf);
   }, [transport.isPlaying]);
 
+  // Pause/resume/stop must also update the hook's transport state so the tick loop runs.
   const mixControllerRef = useRef<{ pause(): void; resume(): void; stop(): void }>({
-    pause: () => mixEngine.pause(),
-    resume: () => mixEngine.play(mixEngine.currentTime()),
-    stop: () => mixEngine.stop(),
+    pause: () => {
+      mixEngine.pause();
+      setTransport((prev) => nextTransportState(prev, { type: "PAUSE" }));
+    },
+    resume: () => {
+      mixEngine.play(mixEngine.currentTime());
+      nowPlaying.setPlaying(true);
+      setTransport((prev) => nextTransportState(prev, { type: "PLAY_MIX" }));
+    },
+    stop: () => {
+      mixEngine.stop();
+      setTransport((prev) => nextTransportState(prev, { type: "STOP" }));
+    },
   });
 
   /** Play the full mix through mixEngine, from its current position. Display wavesurfer instances follow along but never emit audio. */
@@ -307,9 +318,19 @@ export function useSyncPlayback() {
       }
 
       const auditionController = {
-        pause: () => mixEngine.pause(),
-        resume: () => mixEngine.play(mixEngine.currentTime()),
-        stop: () => mixEngine.stop(),
+        pause: () => {
+          mixEngine.pause();
+          setTransport((prev) => nextTransportState(prev, { type: "PAUSE" }));
+        },
+        resume: () => {
+          mixEngine.play(mixEngine.currentTime());
+          nowPlaying.setPlaying(true);
+          setTransport((prev) => nextTransportState(prev, { type: "AUDITION", id }));
+        },
+        stop: () => {
+          mixEngine.stop();
+          setTransport((prev) => nextTransportState(prev, { type: "STOP" }));
+        },
       };
       nowPlaying.start("audition", `Solo: ${id}`, 0, auditionController);
 
