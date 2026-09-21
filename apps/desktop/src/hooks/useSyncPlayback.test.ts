@@ -1,5 +1,33 @@
-import { describe, expect, it } from "vitest";
-import { computeGains, nextTransportState, type TrackGainState, type TransportState } from "./useSyncPlayback";
+import { act, renderHook } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import {
+  computeGains,
+  nextTransportState,
+  useSyncPlayback,
+  type TrackGainState,
+  type TransportState,
+  type WaveSurferLike,
+} from "./useSyncPlayback";
+
+vi.mock("@/lib/mixEngine", () => ({
+  mixEngine: {
+    load: vi.fn(() => Promise.resolve()),
+    play: vi.fn(),
+    pause: vi.fn(),
+    stop: vi.fn(),
+    seek: vi.fn(),
+    setGain: vi.fn(),
+    setMaster: vi.fn(),
+    setLoop: vi.fn(),
+    onEnded: vi.fn(),
+    currentTime: vi.fn(() => 0),
+    isPlaying: false,
+  },
+}));
+
+vi.mock("@/lib/samplePlayer", () => ({
+  samplePlayer: { stop: vi.fn() },
+}));
 
 describe("computeGains", () => {
   it("returns each track's own volume when nothing is soloed or muted", () => {
@@ -99,5 +127,91 @@ describe("nextTransportState", () => {
       auditionId: "drums_sub",
       isPlaying: true,
     });
+  });
+});
+
+function fakeWs(): WaveSurferLike {
+  return {
+    play: vi.fn(),
+    pause: vi.fn(),
+    setTime: vi.fn(),
+    getCurrentTime: vi.fn(() => 0),
+    setVolume: vi.fn(),
+    isPlaying: vi.fn(() => false),
+  };
+}
+
+describe("useSyncPlayback mix playback (routed through mixEngine)", () => {
+  it("playMix loads every registered mix track then starts mixEngine, without ever calling ws.play()", async () => {
+    const { mixEngine } = await import("@/lib/mixEngine");
+    const { samplePlayer } = await import("@/lib/samplePlayer");
+    const { result } = renderHook(() => useSyncPlayback());
+
+    const wsA = fakeWs();
+    const wsB = fakeWs();
+    act(() => {
+      result.current.registerInstance("a", wsA, true, true, "a.wav");
+      result.current.registerInstance("b", wsB, false, true, "b.wav");
+    });
+
+    await act(async () => {
+      await result.current.playMix();
+    });
+
+    expect(samplePlayer.stop).toHaveBeenCalled();
+    expect(mixEngine.load).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        { id: "a", url: "a.wav" },
+        { id: "b", url: "b.wav" },
+      ])
+    );
+    expect(mixEngine.play).toHaveBeenCalled();
+    expect(wsA.play).not.toHaveBeenCalled();
+    expect(wsB.play).not.toHaveBeenCalled();
+    expect(result.current.isPlaying).toBe(true);
+  });
+
+  it("pause routes through mixEngine.pause()", async () => {
+    const { mixEngine } = await import("@/lib/mixEngine");
+    const { result } = renderHook(() => useSyncPlayback());
+
+    act(() => result.current.pause());
+
+    expect(mixEngine.pause).toHaveBeenCalled();
+    expect(result.current.isPlaying).toBe(false);
+  });
+
+  it("stopAll stops mixEngine and resets every display instance's playhead to 0", async () => {
+    const { mixEngine } = await import("@/lib/mixEngine");
+    const { result } = renderHook(() => useSyncPlayback());
+    const ws = fakeWs();
+    act(() => result.current.registerInstance("a", ws, true, true, "a.wav"));
+
+    act(() => result.current.stopAll());
+
+    expect(mixEngine.stop).toHaveBeenCalled();
+    expect(ws.setTime).toHaveBeenCalledWith(0);
+  });
+
+  it("applyGains forwards computeGains' output to mixEngine.setGain per track", async () => {
+    const { mixEngine } = await import("@/lib/mixEngine");
+    const { result } = renderHook(() => useSyncPlayback());
+
+    act(() => {
+      result.current.upsertTrack({ id: "a", volume: 1, solo: true, mute: false });
+      result.current.upsertTrack({ id: "b", volume: 0.4, solo: false, mute: false });
+    });
+
+    expect(mixEngine.setGain).toHaveBeenCalledWith("a", 1);
+    expect(mixEngine.setGain).toHaveBeenCalledWith("b", 0);
+  });
+
+  it("toggleLoop forwards the new value to mixEngine.setLoop", async () => {
+    const { mixEngine } = await import("@/lib/mixEngine");
+    const { result } = renderHook(() => useSyncPlayback());
+
+    act(() => result.current.toggleLoop());
+
+    expect(mixEngine.setLoop).toHaveBeenCalledWith(true);
   });
 });

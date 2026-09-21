@@ -494,6 +494,23 @@ function synthesizeSessionForEntry(rec: LibraryRecord): TrackSession {
   };
 }
 
+/** Checks that a fixture actually exists as real WAV bytes, since a dev server's SPA history fallback can
+ *  answer an unmatched /fixtures/<x> path with a 200 OK index.html instead of a 404. */
+async function fixtureExists(url: string): Promise<boolean> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return false;
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("text/html")) return false;
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength < 12) return false;
+    const header = new TextDecoder("ascii").decode(new Uint8Array(buf, 0, 4));
+    return header === "RIFF";
+  } catch {
+    return false;
+  }
+}
+
 async function resolveWavUrl(path: string): Promise<string> {
   if (cachedWavUrls[path]) return cachedWavUrls[path];
   const manifest = await getManifest();
@@ -501,9 +518,15 @@ async function resolveWavUrl(path: string): Promise<string> {
   const basename = path.split(/[\\/]/).pop() ?? path;
 
   if (fromFixtures) {
-    const url = `/fixtures/${basename}`;
-    cachedWavUrls[path] = url;
-    return url;
+    // Instrument stems live under /fixtures/instruments/<key>.wav, everything else at the top level.
+    const candidates = [`/fixtures/${basename}`, `/fixtures/instruments/${basename}`];
+    for (const url of candidates) {
+      if (await fixtureExists(url)) {
+        cachedWavUrls[path] = url;
+        return url;
+      }
+    }
+    // Neither candidate exists on disk: fall through to synthesizing audio instead of returning a dead URL.
   }
 
   // synthesize
