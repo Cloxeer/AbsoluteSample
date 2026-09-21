@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Transport } from "@/components/layout/Transport";
 import { Stepper } from "@/components/layout/Stepper";
 import { Tabs } from "@/components/layout/Tabs";
@@ -8,6 +8,8 @@ import { LibraryPanel } from "@/components/library/LibraryPanel";
 import { SamplesPanel } from "@/components/samples/SamplesPanel";
 import { useAudioEngine } from "@/hooks/useAudioEngine";
 import { useSyncPlayback } from "@/hooks/useSyncPlayback";
+import { useJobs } from "@/hooks/useJobs";
+import { samplePlayer } from "@/lib/samplePlayer";
 import { backend } from "@/lib/backend";
 import type { DependencyReport, LibraryEntry, Sample } from "@/lib/types";
 
@@ -30,6 +32,7 @@ export default function App() {
   const sync = useSyncPlayback();
   const engineApi = useAudioEngine();
   const { engine, analyzeLoop } = engineApi;
+  const { jobs } = useJobs();
 
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [libraryEntries, setLibraryEntries] = useState<LibraryEntry[]>([]);
@@ -130,6 +133,15 @@ export default function App() {
 
   const currentStep = activeTab === "inspector" ? "matrix" : !engine.track ? "source" : !engine.loop ? "loop" : "stems";
 
+  const handlePlayPause = useCallback(() => {
+    if (sync.isPlaying) {
+      sync.stopAll();
+      samplePlayer.stop();
+    } else {
+      sync.togglePlay();
+    }
+  }, [sync]);
+
   const auditionLabel = useMemo(() => {
     if (sync.mode !== "audition" || !sync.auditionId) return null;
     return engine.stems?.find((s) => s.key === sync.auditionId)?.label ?? sync.auditionId;
@@ -163,6 +175,26 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [sync, stemOrder, engine.stems]);
 
+  // Per-song jobs: when a job for another song finishes, refresh only the library listing.
+  const prevJobIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const nowIds = new Set(Object.keys(jobs));
+    for (const id of prevJobIdsRef.current) {
+      if (!nowIds.has(id) && id !== engine.track?.id) {
+        refreshLibrary();
+      }
+    }
+    prevJobIdsRef.current = nowIds;
+  }, [jobs, engine.track?.id, refreshLibrary]);
+
+  const otherSongJob = useMemo(() => {
+    const entries = Object.values(jobs);
+    const other = entries.find((j) => j.trackId !== engine.track?.id);
+    if (!other) return null;
+    const title = libraryEntries.find((e) => e.id === other.trackId)?.title ?? other.trackId;
+    return { ...other, title };
+  }, [jobs, engine.track?.id, libraryEntries]);
+
   const handleStepClick = (id: string) => {
     if (id === "matrix") {
       setActiveTab("inspector");
@@ -188,8 +220,14 @@ export default function App() {
         progress={engine.progress ? { message: engine.progress.message, percent: engine.progress.percent } : null}
         librarySongCount={libraryEntries.length}
         sampleCount={samples.length}
-        onPlayPause={sync.togglePlay}
-        onStop={sync.stopAll}
+        currentJob={engine.track ? jobs[engine.track.id] ?? null : null}
+        lastSplit={engine.instrumentsMeta ? { elapsedSec: engine.instrumentsMeta.elapsedSec, passSeconds: engine.instrumentsMeta.passSeconds ?? {} } : null}
+        otherSongJob={otherSongJob}
+        onPlayPause={handlePlayPause}
+        onStop={() => {
+          sync.stopAll();
+          samplePlayer.stop();
+        }}
         onToggleLoop={sync.toggleLoop}
         onMasterVolumeChange={setMasterVolume}
         onToggleLibrary={() => setLibraryOpen((v) => !v)}
@@ -202,6 +240,7 @@ export default function App() {
         entries={libraryEntries}
         currentTrackId={engine.track?.id ?? null}
         sizeBytes={librarySizeBytes}
+        jobs={jobs}
         onClose={() => setLibraryOpen(false)}
         onOpenTrack={handleOpenTrack}
         onSetKept={handleSetKept}
@@ -233,6 +272,9 @@ export default function App() {
             instruments={engine.instruments}
             analysis={engine.analysis}
             onAnalyze={() => analyzeLoop(engine.track?.id ?? "")}
+            samples={samples}
+            currentTime={sync.currentTime}
+            isPlaying={sync.isPlaying}
           />
         )}
       </main>

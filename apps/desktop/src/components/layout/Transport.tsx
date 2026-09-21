@@ -5,8 +5,23 @@ import { Button } from "@/components/neumorphic/Button";
 import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { Slider } from "@/components/neumorphic/Slider";
 import { formatTime } from "@/lib/format";
-import type { DependencyReport } from "@/lib/types";
+import type { DependencyReport, Job } from "@/lib/types";
 import clsx from "clsx";
+
+function formatMmSs(totalSec: number): string {
+  const s = Math.max(0, Math.round(totalSec));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function labelizePassKey(key: string): string {
+  const known: Record<string, string> = {
+    instruments: "Instruments",
+    vocals: "Vocals",
+    lead: "Lead",
+    drums: "Drum kit",
+  };
+  return known[key] ?? key;
+}
 
 export interface TransportProps {
   deps: DependencyReport | null;
@@ -23,6 +38,12 @@ export interface TransportProps {
   librarySongCount?: number;
   /** Number of saved samples, shown on the "Samples (N)" toggle button. Omit to hide the button. */
   sampleCount?: number;
+  /** Live job for the currently open song, if one is running (drives the honest "elapsed" timer). */
+  currentJob?: Job | null;
+  /** Real measured durations from the last completed split, for the "Split took..." summary. */
+  lastSplit?: { elapsedSec: number; passSeconds: Record<string, number> } | null;
+  /** A running job that belongs to a different song than the one currently open. */
+  otherSongJob?: (Job & { title: string }) | null;
   onPlayPause: () => void;
   onStop: () => void;
   onToggleLoop: () => void;
@@ -65,6 +86,9 @@ export function Transport({
   progress,
   librarySongCount,
   sampleCount,
+  currentJob,
+  lastSplit,
+  otherSongJob,
   onPlayPause,
   onStop,
   onToggleLoop,
@@ -160,6 +184,12 @@ export function Transport({
         </Surface>
 
         <div className="flex items-center gap-2">
+          {otherSongJob && (
+            <span className="text-xs px-2 py-1 rounded-full border border-accent/30 bg-accent/10 text-accent flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full border border-accent border-t-transparent animate-spin" aria-hidden />
+              Processing {otherSongJob.title}
+            </span>
+          )}
           {onToggleLibrary && (
             <Button aria-label="Toggle song library" onClick={onToggleLibrary} className="!px-3 !py-2 flex items-center gap-1.5">
               <ListMusic size={16} />
@@ -196,6 +226,22 @@ export function Transport({
           <span className="text-[11px] text-muted">
             {progress.message} ({progress.percent}%)
           </span>
+        </div>
+      )}
+
+      {currentJob && (
+        <div className="px-6 pb-2 text-[11px] text-muted">
+          Splitting: {labelizePassKey(currentJob.pass ?? currentJob.stage)}, {formatMmSs(currentJob.elapsedSec)} elapsed
+        </div>
+      )}
+
+      {!currentJob && !progress && lastSplit && lastSplit.elapsedSec > 0 && (
+        <div className="px-6 pb-2 text-[11px] text-muted" data-testid="split-summary">
+          Split took {formatMmSs(lastSplit.elapsedSec)}
+          {Object.keys(lastSplit.passSeconds).length > 0 &&
+            ` (${Object.entries(lastSplit.passSeconds)
+              .map(([key, sec]) => `${labelizePassKey(key)} ${Math.round(sec)} s`)
+              .join(", ")})`}
         </div>
       )}
     </div>

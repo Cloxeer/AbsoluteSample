@@ -16,6 +16,7 @@ import { onProgress } from "@/lib/events";
 import { formatTime } from "@/lib/format";
 import type { EngineStatus, ProgressPayload, Sample } from "@/lib/types";
 import WaveSurfer from "wavesurfer.js";
+import { peaksOptions } from "@/lib/wavePeaks";
 import { useRef } from "react";
 
 const SEED_URL = "https://youtu.be/nRKgT3d6xoE";
@@ -54,6 +55,7 @@ function LoopPreview({
   wavPath,
   startSec,
   endSec,
+  peaks,
   onPlay,
   trackId,
   songTitle,
@@ -63,6 +65,7 @@ function LoopPreview({
   wavPath: string;
   startSec: number;
   endSec: number;
+  peaks?: number[];
   onPlay: () => void;
   trackId: string;
   songTitle: string;
@@ -95,6 +98,7 @@ function LoopPreview({
       barGap: 1,
       barRadius: 2,
       normalize: true,
+      ...peaksOptions(peaks, endSec - startSec),
     });
     ws.on("play", () => setPlaying(true));
     ws.on("pause", () => setPlaying(false));
@@ -387,6 +391,7 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
             initialStart={range.start}
             initialEnd={range.end}
             durationSec={engine.track.durationSec}
+            peaks={engine.track.peaks}
             bpm={engine.analysis?.bpm ?? null}
             onChange={(start, end) => setRange({ start, end })}
           />
@@ -406,6 +411,7 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
             wavPath={engine.loop.wavPath}
             startSec={engine.loop.startSec}
             endSec={engine.loop.endSec}
+            peaks={engine.loop.peaks}
             onPlay={sync.stopAll}
             trackId={engine.track.id}
             songTitle={engine.track.title}

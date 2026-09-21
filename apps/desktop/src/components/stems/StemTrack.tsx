@@ -3,6 +3,7 @@ import WaveSurfer from "wavesurfer.js";
 import { TrackHeader } from "./TrackHeader";
 import { Playhead } from "@/components/waveform/Playhead";
 import type { StemInfo } from "@/lib/types";
+import { peaksOptions } from "@/lib/wavePeaks";
 import clsx from "clsx";
 
 const STEM_COLORS: Record<string, string> = {
@@ -71,6 +72,7 @@ export function StemTrack({
       barWidth: 2,
       barGap: 1,
       url: wavUrl,
+      ...peaksOptions(stem.peaks, stem.durationSec),
     });
     wsRef.current = ws;
     ws.on("ready", () => {

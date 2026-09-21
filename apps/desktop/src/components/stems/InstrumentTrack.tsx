@@ -6,6 +6,7 @@ import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { Slider } from "@/components/neumorphic/Slider";
 import { Playhead } from "@/components/waveform/Playhead";
 import { formatDb } from "@/lib/format";
+import { peaksOptions } from "@/lib/wavePeaks";
 import type { InstrumentGroup, InstrumentStem } from "@/lib/types";
 import clsx from "clsx";
 
@@ -26,6 +27,17 @@ const GROUP_ICONS: Record<InstrumentGroup, typeof Mic2> = {
   keys: Piano,
   other: Sparkles,
 };
+
+function soundsLikeCaption(stem: InstrumentStem): string | null {
+  if (!stem.soundsLike || !stem.tags || stem.tags.length === 0) return null;
+  const top = stem.tags[0];
+  return `sounds like ${stem.soundsLike} (${top.label.toLowerCase()} ${top.score.toFixed(2)})`;
+}
+
+function tagsTooltip(stem: InstrumentStem): string | undefined {
+  if (!stem.tags || stem.tags.length === 0) return undefined;
+  return stem.tags.slice(0, 5).map((t) => `${t.label} ${t.score.toFixed(2)}`).join("\n");
+}
 
 function dbToRatio(db: number): number {
   return Math.min(1, Math.max(0, (db + 60) / 60));
@@ -104,6 +116,7 @@ export function InstrumentTrack({
       barWidth: 2,
       barGap: 1,
       url: wavUrl,
+      ...peaksOptions(stem.peaks, stem.durationSec),
     });
     wsRef.current = ws;
     ws.on("ready", () => {
@@ -135,6 +148,11 @@ export function InstrumentTrack({
           <Icon size={14} color={color} className="mt-0.5 shrink-0" aria-hidden />
           <div className="min-w-0 flex-1 group/label">
             <div className="text-sm font-semibold truncate">{stem.label}</div>
+            {soundsLikeCaption(stem) && (
+              <div className="text-[10px] text-muted truncate" title={tagsTooltip(stem)}>
+                {soundsLikeCaption(stem)}
+              </div>
+            )}
             <div className="text-[10px] text-muted truncate opacity-0 group-hover/label:opacity-100 transition-opacity" title={stem.model}>
               {stem.model}
             </div>

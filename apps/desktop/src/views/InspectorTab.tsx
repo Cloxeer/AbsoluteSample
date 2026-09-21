@@ -1,20 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
-import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { backend } from "@/lib/backend";
-import type { InstrumentStem, LoopAnalysis, SliceInfo, StemInfo, StemKey, TrackInfo, LoopInfo } from "@/lib/types";
-import { groupInstruments } from "@/lib/instruments";
-import clsx from "clsx";
-
-const ROW_COLORS: Record<string, string> = {
-  drums_sub: "#FF6B6B",
-  bass_lowmid: "#FFB84D",
-  mid_vocals: "#F25F5C",
-  highs_air: "#4CC9F0",
-  loop: "#8B8F9A",
-};
+import type { InstrumentStem, LoopAnalysis, Sample, SliceInfo, StemInfo, TrackInfo, LoopInfo } from "@/lib/types";
+import { BeatMatrix } from "@/components/stems/BeatMatrix";
+import { peaksOptions } from "@/lib/wavePeaks";
 
 export interface InspectorTabProps {
   track: TrackInfo | null;
@@ -23,25 +14,10 @@ export interface InspectorTabProps {
   instruments?: InstrumentStem[] | null;
   analysis: LoopAnalysis | null;
   onAnalyze: () => Promise<LoopAnalysis>;
+  samples?: Sample[];
+  currentTime?: number;
+  isPlaying?: boolean;
 }
-
-const INSTRUMENT_COLORS: Record<string, string> = {
-  vocals: "#F25F5C",
-  drums: "#F2B33D",
-  bass: "#4C8BF5",
-  guitar: "#3DD68C",
-  keys: "#B692F6",
-  other: "#8A94A6",
-};
-
-const ROW_KEYS: (StemKey | "loop")[] = ["drums_sub", "bass_lowmid", "mid_vocals", "highs_air", "loop"];
-const ROW_LABELS: Record<string, string> = {
-  drums_sub: "Drums / Sub",
-  bass_lowmid: "Bass / Low-Mid",
-  mid_vocals: "Mid / Vocals",
-  highs_air: "Highs / Air",
-  loop: "Full Loop",
-};
 
 function OnsetPlot({ analysis }: { analysis: LoopAnalysis }) {
   const width = 800;
@@ -77,15 +53,13 @@ function OnsetPlot({ analysis }: { analysis: LoopAnalysis }) {
   );
 }
 
-export function InspectorTab({ track, loop, stems, instruments, analysis, onAnalyze }: InspectorTabProps) {
+export function InspectorTab({ track, loop, stems: _stems, instruments, analysis, onAnalyze, samples = [], currentTime = 0, isPlaying = false }: InspectorTabProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
   const [loopWavUrl, setLoopWavUrl] = useState<string | null>(null);
   const [divisions, setDivisions] = useState(16);
   const [slices, setSlices] = useState<SliceInfo[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
-  const [activePad, setActivePad] = useState<string | null>(null);
-  const [activeRow, setActiveRow] = useState<string | null>(null);
 
   useEffect(() => {
     if (!track || !loop) return;
@@ -96,7 +70,7 @@ export function InspectorTab({ track, loop, stems, instruments, analysis, onAnal
   }, [track, loop]);
 
   useEffect(() => {
-    if (!containerRef.current || !loopWavUrl) return;
+    if (!containerRef.current || !loopWavUrl || !loop) return;
     const ws = WaveSurfer.create({
       container: containerRef.current,
       waveColor: "#F25F5C",
@@ -104,28 +78,15 @@ export function InspectorTab({ track, loop, stems, instruments, analysis, onAnal
       cursorColor: "#4CC9F0",
       height: 80,
       url: loopWavUrl,
+      ...peaksOptions(loop.peaks, loop.durationSec),
     });
     wsRef.current = ws;
     return () => {
       ws.destroy();
       wsRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loopWavUrl]);
-
-  const instrumentRows = useMemo(() => (instruments ? groupInstruments(instruments).map((n) => n.stem) : null), [instruments]);
-
-  const beatColumns = useMemo(() => {
-    if (!analysis) return [];
-    const bars = Math.max(1, analysis.bars);
-    const total = Math.max(16, bars * 4);
-    const step = analysis.beatGrid.length > 1 ? analysis.beatGrid[1] - analysis.beatGrid[0] : 60 / analysis.bpm;
-    return Array.from({ length: total }, (_, i) => i * (step * 4 / (total / bars)));
-  }, [analysis]);
-
-  const isLit = (beatTime: number): boolean => {
-    if (!analysis) return false;
-    return analysis.transients.some((t) => Math.abs(t - beatTime) <= 0.06);
-  };
 
   const handleAnalyze = async () => {
     setAnalyzing(true);
@@ -134,24 +95,6 @@ export function InspectorTab({ track, loop, stems, instruments, analysis, onAnal
     } finally {
       setAnalyzing(false);
     }
-  };
-
-  const handlePlayBeat = (start: number, end: number, rowKey?: string, padId?: string) => {
-    wsRef.current?.play(start, end);
-    if (rowKey) {
-      setActiveRow(rowKey);
-      setTimeout(() => setActiveRow((r) => (r === rowKey ? null : r)), (end - start) * 1000);
-    }
-    if (padId) {
-      setActivePad(padId);
-      setTimeout(() => setActivePad((p) => (p === padId ? null : p)), (end - start) * 1000);
-    }
-  };
-
-  const handleAuditionRow = (rowKey: string) => {
-    if (!analysis) return;
-    const duration = (analysis.bars * 4 * 60) / analysis.bpm;
-    handlePlayBeat(0, duration, rowKey);
   };
 
   const handleSliceBeats = async () => {
@@ -198,62 +141,7 @@ export function InspectorTab({ track, loop, stems, instruments, analysis, onAnal
 
       {analysis && (
         <Surface variant="raised" className="p-4 flex flex-col gap-2 overflow-x-auto">
-          <h2 className="text-sm font-semibold text-muted uppercase tracking-wide">Beat Matrix</h2>
-          <div className="flex flex-col gap-1 min-w-max">
-            {(instrumentRows
-              ? instrumentRows.map((s) => ({ key: s.key, label: s.label, color: INSTRUMENT_COLORS[s.group] }))
-              : ROW_KEYS.map((k) => ({ key: k, label: ROW_LABELS[k], color: ROW_COLORS[k] ?? "#F25F5C" }))
-            ).map(({ key: rowKey, label: rowLabel, color }) => {
-              if (!instrumentRows && rowKey !== "loop" && !stems?.find((s) => s.key === rowKey)) return null;
-              const rowPlaying = activeRow === rowKey;
-              return (
-                <div
-                  key={rowKey}
-                  role="group"
-                  aria-label={`${rowLabel} row`}
-                  className={clsx(
-                    "flex items-center gap-2 rounded-xl p-1",
-                    rowPlaying && "border-l-4"
-                  )}
-                  style={rowPlaying ? { borderLeftColor: color } : undefined}
-                >
-                  <PlayPauseButton
-                    playing={rowPlaying}
-                    onToggle={() => handleAuditionRow(rowKey)}
-                    label={rowLabel}
-                    size={10}
-                    className="!p-0 h-6 w-6 flex items-center justify-center shrink-0"
-                  />
-                  <span className="w-28 text-xs text-muted shrink-0">{rowLabel}</span>
-                  <div className="flex gap-1">
-                    {beatColumns.map((beatTime, i) => {
-                      const stepDur = beatColumns.length > 1 ? beatColumns[1] - beatColumns[0] : 0.25;
-                      const lit = isLit(beatTime);
-                      const padId = `${rowKey}-${i}`;
-                      const isActive = activePad === padId;
-                      return (
-                        <button
-                          key={i}
-                          onClick={() => handlePlayBeat(beatTime, beatTime + stepDur, rowKey, padId)}
-                          data-pressed={isActive || undefined}
-                          className={clsx(
-                            "w-6 h-6 rounded-md text-[9px] transition-[box-shadow,transform] duration-150 active:scale-90",
-                            isActive
-                              ? "neu-surface-pressed text-white"
-                              : lit
-                                ? "bg-accent/70 neu-surface-raised text-white"
-                                : "neu-surface-raised bg-surface text-muted"
-                          )}
-                          style={isActive ? { backgroundColor: color, boxShadow: `0 0 10px ${color}` } : undefined}
-                          aria-label={`Beat ${i + 1} ${rowKey}`}
-                        />
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          <BeatMatrix analysis={analysis} instruments={instruments ?? null} samples={samples} currentTime={currentTime} isPlaying={isPlaying} />
         </Surface>
       )}
 
@@ -285,7 +173,7 @@ export function InspectorTab({ track, loop, stems, instruments, analysis, onAnal
                   <div className="flex gap-2">
                     <Button
                       className="!px-2 !py-1 text-[10px]"
-                      onClick={() => handlePlayBeat(slice.startSec, slice.endSec)}
+                      onClick={() => wsRef.current?.play(slice.startSec, slice.endSec)}
                     >
                       Play
                     </Button>

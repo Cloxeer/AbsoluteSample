@@ -16,6 +16,7 @@ export interface TrackInfo {
   channels: number;
   codec: string;
   workDir: string;
+  peaks?: number[];
 }
 
 export interface LoopInfo {
@@ -25,6 +26,7 @@ export interface LoopInfo {
   durationSec: number;
   loopPath: string;
   wavPath: string;
+  peaks?: number[];
 }
 
 export type StemKey = "drums_sub" | "bass_lowmid" | "mid_vocals" | "highs_air";
@@ -38,6 +40,8 @@ export interface StemInfo {
   bytes: number;
   peakDb: number;
   rmsDb: number;
+  peaks?: number[];
+  durationSec?: number;
 }
 
 export interface LoopAnalysis {
@@ -66,6 +70,10 @@ export interface ProgressPayload {
   message: string;
   pass?: string;
   failed?: boolean;
+  trackId?: string;
+  startedAt?: string;
+  elapsedSec?: number;
+  passSeconds?: Record<string, number>;
 }
 
 // v2 addendum: AI instrument separation engine
@@ -95,6 +103,18 @@ export interface InstrumentStem {
   rmsDb: number;
   model: string;
   order: number;
+  peaks?: number[];
+  durationSec?: number;
+  tags?: { label: string; score: number }[];
+  soundsLike?: string | null;
+}
+
+export interface InstrumentsResult {
+  stems: InstrumentStem[];
+  elapsedSec: number;
+  passSeconds: Record<string, number>;
+  device: string;
+  failedPasses: string[];
 }
 
 export type EnginePassStage = "python" | "venv" | "torch" | "separator" | "verify";
@@ -130,6 +150,20 @@ export interface TrackSession {
   stems: StemInfo[] | null;
   instruments: InstrumentStem[] | null;
   analysis: LoopAnalysis | null;
+  instrumentsMeta?: Omit<InstrumentsResult, "stems"> | null;
+}
+
+// v5 addendum: per-song jobs
+
+export interface Job {
+  trackId: string;
+  stage: string;
+  pass?: string;
+  percent: number;
+  message: string;
+  startedAt: string;
+  elapsedSec: number;
+  passSeconds?: Record<string, number>;
 }
 
 // v4 addendum: scans vs kept songs, and samples
@@ -149,6 +183,7 @@ export interface Sample {
   durationSec: number;
   bpm: number | null;
   createdAt: string;
+  peaks?: number[];
 }
 
 export interface LibrarySize {

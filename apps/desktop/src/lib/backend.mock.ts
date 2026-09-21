@@ -47,6 +47,35 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Deterministic string hash -> seeded pseudo-random peaks array, so tests stay fast and repeatable. */
+function hashString(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h) || 1;
+}
+
+function seededRandom(seed: number): () => number {
+  let state = seed % 2147483647;
+  if (state <= 0) state += 2147483646;
+  return () => {
+    state = (state * 16807) % 2147483647;
+    return (state - 1) / 2147483646;
+  };
+}
+
+/** Synthesizes a plausible, deterministic 1000-point peaks array (0..1) seeded from a string key. */
+function synthesizePeaks(key: string, points = 1000): number[] {
+  const rand = seededRandom(hashString(key));
+  const peaks: number[] = [];
+  for (let i = 0; i < points; i++) {
+    const t = i / points;
+    const base = 0.35 + 0.25 * Math.sin(t * Math.PI * 8) + 0.15 * Math.sin(t * Math.PI * 37 + rand() * 6);
+    const noise = (rand() - 0.5) * 0.2;
+    peaks.push(Math.max(0, Math.min(1, base + noise)));
+  }
+  return peaks;
+}
+
 async function loadManifest(): Promise<Manifest | null> {
   try {
     const res = await fetch("/fixtures/manifest.json");
@@ -246,15 +275,54 @@ async function synthesizeManifest(): Promise<Manifest> {
     bytes: 1_200_000,
     peakDb: -2.5,
     rmsDb: -16.0,
+    peaks: synthesizePeaks(`mock/${trackId}/stems/0${def.index}_${def.key}.wav`),
+    durationSec,
   }));
   const analysis = synthesizeAnalysis(120, durationSec);
+  track.peaks = synthesizePeaks(track.wavPath);
+  loop.peaks = synthesizePeaks(loop.wavPath);
   return { track, loop, stems, analysis };
+}
+
+/** Fixture manifests predate peaks/tags: fill in synthesized peaks + durationSec where missing. */
+function withPeaks<T extends { peaks?: number[]; durationSec?: number }>(obj: T, key: string, durationSec: number): T {
+  const peaks = obj.peaks && obj.peaks.length > 0 ? obj.peaks : synthesizePeaks(key);
+  return { ...obj, peaks, durationSec: obj.durationSec && obj.durationSec > 0 ? obj.durationSec : durationSec };
+}
+
+const GUITAR_TAGS = [
+  { label: "Violin, fiddle", score: 0.62 },
+  { label: "Bowed string instrument", score: 0.55 },
+  { label: "Guitar", score: 0.21 },
+];
+
+function decorateInstruments(stems: InstrumentStem[], loopDurationSec: number): InstrumentStem[] {
+  return stems.map((s) => {
+    const out = withPeaks(s, s.path, loopDurationSec);
+    if (s.key === "guitar" || (s.group === "guitar" && s.parent === null)) {
+      return { ...out, soundsLike: out.soundsLike ?? "Strings", tags: out.tags && out.tags.length > 0 ? out.tags : GUITAR_TAGS };
+    }
+    return out;
+  });
+}
+
+type ManifestWithInstruments = Manifest & { instruments?: InstrumentStem[] };
+
+function normalizeManifest(m: ManifestWithInstruments): ManifestWithInstruments {
+  const loopDur = m.loop.durationSec > 0 ? m.loop.durationSec : m.loop.endSec - m.loop.startSec;
+  return {
+    ...m,
+    track: withPeaks(m.track, m.track.wavPath, m.track.durationSec),
+    loop: withPeaks({ ...m.loop, durationSec: loopDur }, m.loop.wavPath, loopDur),
+    stems: m.stems.map((s) => withPeaks(s, s.path, loopDur)),
+    instruments: m.instruments ? decorateInstruments(m.instruments, loopDur) : undefined,
+  };
 }
 
 async function getManifest(): Promise<Manifest> {
   if (cachedManifest) return cachedManifest;
   const loaded = await loadManifest();
-  cachedManifest = loaded ?? (await synthesizeManifest());
+  cachedManifest = normalizeManifest(loaded ?? (await synthesizeManifest()));
   return cachedManifest;
 }
 
@@ -416,11 +484,12 @@ function pruneUnkept(store: Map<string, LibraryRecord>, exceptIds: string[]): vo
 }
 
 function synthesizeSessionForEntry(rec: LibraryRecord): TrackSession {
+  const loopDur = rec.loop ? (rec.loop.durationSec > 0 ? rec.loop.durationSec : rec.loop.endSec - rec.loop.startSec) : 15;
   return {
-    track: rec.track,
-    loop: rec.loop,
-    stems: rec.stems,
-    instruments: rec.instruments,
+    track: withPeaks(rec.track, rec.track.wavPath, rec.track.durationSec),
+    loop: rec.loop ? withPeaks(rec.loop, rec.loop.wavPath, loopDur) : null,
+    stems: rec.stems ? rec.stems.map((s) => withPeaks(s, s.path, loopDur)) : null,
+    instruments: rec.instruments ? decorateInstruments(rec.instruments, loopDur) : null,
     analysis: rec.analysis,
   };
 }
@@ -498,9 +567,11 @@ export async function fetchAudio(args: { url: string; force?: boolean; currentTr
   const cached = store.get(id);
   if (cached && !args.force) {
     pruneUnkept(store, exceptIds);
-    return cached.track;
+    return withPeaks(cached.track, cached.track.wavPath, cached.track.durationSec);
   }
 
+  const startedAt = new Date().toISOString();
+  const startedMs = Date.now();
   const stages: [string, number, string][] = [
     ["download", 20, "Downloading best audio..."],
     ["download", 60, "Downloading best audio..."],
@@ -509,7 +580,14 @@ export async function fetchAudio(args: { url: string; force?: boolean; currentTr
   ];
   for (const [stage, percent, message] of stages) {
     await delay(180);
-    emitMockProgress({ stage: stage as any, percent, message });
+    emitMockProgress({
+      stage: stage as any,
+      percent,
+      message,
+      trackId: id,
+      startedAt,
+      elapsedSec: (Date.now() - startedMs) / 1000,
+    });
   }
 
   pruneUnkept(store, exceptIds);
@@ -518,7 +596,7 @@ export async function fetchAudio(args: { url: string; force?: boolean; currentTr
     // force re-fetch of an existing entry: reset its split state per fresh download semantics.
     const now = new Date().toISOString();
     cached.entry = { ...cached.entry, fetchedAt: now, lastOpenedAt: now };
-    return cached.track;
+    return withPeaks(cached.track, cached.track.wavPath, cached.track.durationSec);
   }
 
   const manifest = await getManifest();
@@ -534,6 +612,7 @@ export async function fetchAudio(args: { url: string; force?: boolean; currentTr
     channels: 2,
     codec: "opus",
     workDir: `mock/${id}`,
+    peaks: manifest.track.peaks,
   };
   store.set(id, {
     entry: {
@@ -781,7 +860,13 @@ function synthesizeInstruments(trackId: string): InstrumentStem[] {
   return stems;
 }
 
-export async function separateInstruments(args: { trackId: string }): Promise<InstrumentStem[]> {
+export async function analyzeFile(args: { path: string }): Promise<LoopAnalysis> {
+  await delay(120);
+  const bpm = 100 + (hashString(args.path) % 40);
+  return synthesizeAnalysis(bpm, 15);
+}
+
+export async function separateInstruments(args: { trackId: string }): Promise<{ stems: InstrumentStem[]; elapsedSec: number; passSeconds: Record<string, number>; device: string; failedPasses: string[] }> {
   const mockFail = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("mockfail") === "1";
   const passes: { pass: string; message: string }[] = [
     { pass: "instruments", message: "Separating instruments (Demucs)..." },
@@ -789,35 +874,44 @@ export async function separateInstruments(args: { trackId: string }): Promise<In
     { pass: "lead", message: "Splitting lead and backing vocals..." },
     { pass: "drums", message: "Splitting drum kit..." },
   ];
+  const startedAt = new Date().toISOString();
+  const startedMs = Date.now();
+  const passSeconds: Record<string, number> = {};
+  const failedPasses: string[] = [];
+  let lastPassMs = startedMs;
   for (let i = 0; i < passes.length; i++) {
     const { pass, message } = passes[i];
     await delay(260);
     const failThis = mockFail && pass === "drums";
+    if (failThis) failedPasses.push(pass);
+    const nowMs = Date.now();
+    passSeconds[pass] = (nowMs - lastPassMs) / 1000;
+    lastPassMs = nowMs;
     emitMockProgress({
       stage: "separate",
       pass,
       percent: Math.round(((i + 1) / passes.length) * 100),
       message: failThis ? "GPU out of memory" : message,
       failed: failThis,
+      trackId: args.trackId,
+      startedAt,
+      elapsedSec: (nowMs - startedMs) / 1000,
+      passSeconds: { ...passSeconds },
     });
   }
 
-  let stems: InstrumentStem[];
-  const fromFixtures = await loadManifest();
-  if (fromFixtures && (fromFixtures as any).instruments) {
-    stems = (fromFixtures as any).instruments as InstrumentStem[];
-  } else {
-    stems = synthesizeInstruments(args.trackId);
-  }
+  const manifest = (await getManifest()) as ManifestWithInstruments;
+  const stems = decorateInstruments(manifest.instruments ?? synthesizeInstruments(args.trackId), manifest.loop.durationSec);
   cachedInstruments = stems;
 
+  const elapsedSec = (Date.now() - startedMs) / 1000;
   const store = await getLibraryStore();
   const rec = store.get(args.trackId);
   if (rec) {
     rec.instruments = stems;
     rec.entry = { ...rec.entry, hasInstruments: true, instrumentCount: stems.length };
   }
-  return stems;
+  return { stems, elapsedSec, passSeconds, device: "cpu (mock)", failedPasses };
 }
 
 // v4 addendum: samples
@@ -872,6 +966,7 @@ export async function saveSample(args: { trackId: string; stemKey: string; name?
     durationSec: endSec - startSec,
     bpm: rec.analysis?.bpm ?? null,
     createdAt: new Date().toISOString(),
+    peaks: synthesizePeaks(source.path + "|sample|" + args.trackId + args.stemKey),
   };
   sampleStore = [sample, ...sampleStore];
   return sample;

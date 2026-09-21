@@ -3,7 +3,7 @@ import * as mock from "./backend.mock";
 import type {
   DependencyReport,
   EngineStatus,
-  InstrumentStem,
+  InstrumentsResult,
   LibraryEntry,
   LibrarySize,
   LoopAnalysis,
@@ -82,9 +82,14 @@ export const backend = {
     return mock.engineInstall();
   },
 
-  async separateInstruments(args: { trackId: string; passes?: string[] }): Promise<InstrumentStem[]> {
-    if (isTauri()) return invokeTauri<InstrumentStem[]>("separate_instruments", args);
+  async separateInstruments(args: { trackId: string; passes?: string[] }): Promise<InstrumentsResult> {
+    if (isTauri()) return invokeTauri<InstrumentsResult>("separate_instruments", args);
     return mock.separateInstruments(args);
+  },
+
+  async analyzeFile(args: { path: string }): Promise<LoopAnalysis> {
+    if (isTauri()) return invokeTauri<LoopAnalysis>("analyze_file", args);
+    return mock.analyzeFile(args);
   },
 
   async listLibrary(): Promise<LibraryEntry[]> {

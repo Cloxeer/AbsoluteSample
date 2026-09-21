@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { backend } from "@/lib/backend";
 import { onProgress } from "@/lib/events";
-import type { InstrumentStem, LoopAnalysis, LoopInfo, ProgressPayload, StemInfo, TrackInfo, TrackSession } from "@/lib/types";
+import type { InstrumentsResult, InstrumentStem, LoopAnalysis, LoopInfo, ProgressPayload, StemInfo, TrackInfo, TrackSession } from "@/lib/types";
 
 export type EngineState =
   | "idle"
@@ -20,6 +20,7 @@ export interface AudioEngineState {
   loop: LoopInfo | null;
   stems: StemInfo[] | null;
   instruments: InstrumentStem[] | null;
+  instrumentsMeta: Omit<InstrumentsResult, "stems"> | null;
   analysis: LoopAnalysis | null;
   progress: ProgressPayload | null;
   error: string | null;
@@ -30,7 +31,7 @@ export interface AudioEngineState {
  * Status becomes "ready" if instruments or stems exist, "trimmed" if only a loop exists,
  * otherwise "fetched" (source downloaded but not yet trimmed or split).
  */
-export function sessionToState(session: TrackSession): Pick<AudioEngineState, "state" | "track" | "loop" | "stems" | "instruments" | "analysis"> {
+export function sessionToState(session: TrackSession): Pick<AudioEngineState, "state" | "track" | "loop" | "stems" | "instruments" | "instrumentsMeta" | "analysis"> {
   const hasSplit = !!(session.instruments && session.instruments.length) || !!(session.stems && session.stems.length);
   const state: EngineState = hasSplit ? "ready" : session.loop ? "trimmed" : "fetched";
   return {
@@ -39,6 +40,7 @@ export function sessionToState(session: TrackSession): Pick<AudioEngineState, "s
     loop: session.loop,
     stems: session.stems,
     instruments: session.instruments,
+    instrumentsMeta: session.instrumentsMeta ?? null,
     analysis: session.analysis,
   };
 }
@@ -50,6 +52,7 @@ export function useAudioEngine() {
     loop: null,
     stems: null,
     instruments: null,
+    instrumentsMeta: null,
     analysis: null,
     progress: null,
     error: null,
@@ -108,6 +111,7 @@ export function useAudioEngine() {
       loop: null,
       stems: null,
       instruments: null,
+      instrumentsMeta: null,
       analysis: null,
       progress: null,
       error: null,
@@ -141,9 +145,9 @@ export function useAudioEngine() {
   const separateInstruments = useCallback(async (trackId: string) => {
     setEngine((prev) => ({ ...prev, state: "separating", error: null }));
     try {
-      const instruments = await backend.separateInstruments({ trackId });
-      setEngine((prev) => ({ ...prev, state: "ready", instruments }));
-      return instruments;
+      const { stems, ...instrumentsMeta } = await backend.separateInstruments({ trackId });
+      setEngine((prev) => ({ ...prev, state: "ready", instruments: stems, instrumentsMeta, progress: null }));
+      return stems;
     } catch (err) {
       setEngine((prev) => ({ ...prev, state: "error", error: String(err) }));
       throw err;
@@ -169,6 +173,7 @@ export function useAudioEngine() {
       loop: null,
       stems: null,
       instruments: null,
+      instrumentsMeta: null,
       analysis: null,
       progress: null,
       error: null,

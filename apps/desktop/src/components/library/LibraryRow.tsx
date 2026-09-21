@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Bookmark, Trash2 } from "lucide-react";
 import clsx from "clsx";
-import type { LibraryEntry } from "@/lib/types";
+import type { Job, LibraryEntry } from "@/lib/types";
 
 function formatMinSec(totalSec: number): string {
   const s = Math.max(0, Math.round(totalSec));
@@ -17,12 +17,14 @@ function formatMB(bytes: number): string {
 export interface LibraryRowProps {
   entry: LibraryEntry;
   isCurrent?: boolean;
+  /** The active job for this song, if any is currently running. */
+  job?: Job | null;
   onOpen: (id: string) => void;
   onSetKept: (id: string, kept: boolean) => void;
   onDelete: (id: string) => void;
 }
 
-export function LibraryRow({ entry, isCurrent = false, onOpen, onSetKept, onDelete }: LibraryRowProps) {
+export function LibraryRow({ entry, isCurrent = false, job = null, onOpen, onSetKept, onDelete }: LibraryRowProps) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   return (
@@ -48,6 +50,12 @@ export function LibraryRow({ entry, isCurrent = false, onOpen, onSetKept, onDele
             {entry.title}
           </div>
           <div className="text-xs text-muted font-mono">{formatMinSec(entry.durationSec)}</div>
+          {job && (
+            <div className="flex items-center gap-1.5 text-[10px] text-accent mt-0.5" aria-label={`Processing ${entry.title}`}>
+              <span className="w-2 h-2 rounded-full border border-accent border-t-transparent animate-spin shrink-0" aria-hidden />
+              {job.message}
+            </div>
+          )}
         </div>
         <button
           type="button"

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Square } from "lucide-react";
 import WaveSurfer from "wavesurfer.js";
+import { peaksOptions } from "@/lib/wavePeaks";
 import RegionsPlugin, { type Region } from "wavesurfer.js/dist/plugins/regions.esm.js";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
@@ -13,6 +14,8 @@ export interface RegionSelectorProps {
   initialEnd?: number;
   /** Total duration of the source, in seconds, used by "Select all" and range clamping. */
   durationSec?: number;
+  /** Precomputed peaks (0..1); with durationSec, lets wavesurfer render without decoding the source. */
+  peaks?: number[];
   bpm?: number | null;
   onChange: (start: number, end: number) => void;
   onReady?: (ws: WaveSurfer) => void;
@@ -73,6 +76,7 @@ export function RegionSelector({
   initialStart = 0,
   initialEnd,
   durationSec,
+  peaks,
   bpm,
   onChange,
   onReady,
@@ -102,6 +106,7 @@ export function RegionSelector({
       interact: true,
       dragToSeek: false,
       plugins: [regions],
+      ...peaksOptions(peaks, durationSec),
     });
     wsRef.current = ws;
     regionsRef.current = regions;

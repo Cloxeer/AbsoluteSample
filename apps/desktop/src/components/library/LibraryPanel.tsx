@@ -2,7 +2,7 @@ import { useState } from "react";
 import { X } from "lucide-react";
 import { Surface } from "@/components/neumorphic/Surface";
 import { LibraryRow } from "./LibraryRow";
-import type { LibraryEntry } from "@/lib/types";
+import type { Job, LibraryEntry } from "@/lib/types";
 
 function formatGBorMB(bytes: number): string {
   const gb = bytes / 1e9;
@@ -15,6 +15,7 @@ export interface LibraryPanelProps {
   entries: LibraryEntry[];
   currentTrackId: string | null;
   sizeBytes: number;
+  jobs?: Record<string, Job>;
   onClose: () => void;
   onOpenTrack: (id: string) => void;
   onSetKept: (id: string, kept: boolean) => void;
@@ -26,6 +27,7 @@ export function LibraryPanel({
   entries,
   currentTrackId,
   sizeBytes,
+  jobs = {},
   onClose,
   onOpenTrack,
   onSetKept,
@@ -65,6 +67,7 @@ export function LibraryPanel({
                 key={entry.id}
                 entry={entry}
                 isCurrent={entry.id === currentTrackId}
+                job={jobs[entry.id] ?? null}
                 onOpen={onOpenTrack}
                 onSetKept={onSetKept}
                 onDelete={onDeleteTrack}
