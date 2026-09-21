@@ -70,6 +70,11 @@ pub struct StateFile {
     /// every open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub band_stats: Option<HashMap<String, dsp_filters::StemLoudness>>,
+    /// `"song"` when the last `separate_instruments` ran over the whole
+    /// `source.wav` (contract v6 addendum "Split the whole song once"),
+    /// `"loop"` for older loop-scoped splits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruments_scope: Option<String>,
 }
 
 impl Default for StateFile {
@@ -82,6 +87,7 @@ impl Default for StateFile {
             loop_info: None,
             analysis: None,
             band_stats: None,
+            instruments_scope: None,
         }
     }
 }

@@ -2,6 +2,7 @@
 //! All blocking work runs via `tauri::async_runtime::spawn_blocking`;
 //! progress is emitted on the `"pipeline://progress"` event.
 
+use crate::audio::cuts;
 use crate::audio::engine::{self, EngineStatus, InstrumentStem};
 use crate::audio::progress::{Progress, ProgressPayload, Timer};
 use crate::audio::{analysis, downloader, library, samples, slicer, workspace};
@@ -495,15 +496,10 @@ pub async fn separate_instruments(
 ) -> Result<SeparateInstrumentsOut, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let progress = TauriProgress::new(app, track_id.clone());
-        let dir = workspace::work_dir(&track_id)?;
-        let loop_wav = dir.join("loop.wav");
-        if !loop_wav.exists() {
-            return Err("loop.wav not found; call trim_loop first".to_string());
-        }
         let passes = passes.unwrap_or_else(|| {
             engine::DEFAULT_PASSES.iter().map(|s| s.to_string()).collect()
         });
-        let result = engine::separate(&loop_wav, &dir, &passes, |p| {
+        let result = pipeline::run_instruments(&track_id, &passes, |p| {
             progress.report_pass(
                 &p.stage,
                 p.pass.as_deref().unwrap_or(""),
@@ -610,8 +606,50 @@ pub async fn library_size() -> Result<LibrarySize, String> {
 // ---------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn save_sample(track_id: String, stem_key: String, name: Option<String>) -> Result<samples::Sample, String> {
-    tauri::async_runtime::spawn_blocking(move || samples::save_sample(&track_id, &stem_key, name.as_deref()))
+pub async fn save_sample(
+    track_id: String,
+    stem_key: String,
+    name: Option<String>,
+    region: Option<samples::RegionParams>,
+) -> Result<samples::Sample, String> {
+    tauri::async_runtime::spawn_blocking(move || samples::save_sample(&track_id, &stem_key, name.as_deref(), region))
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn cut_region(
+    track_id: String,
+    stem_key: String,
+    start_sec: f64,
+    end_sec: f64,
+    snap: Option<String>,
+    fade_ms: Option<f64>,
+    trim_leading_silence: Option<bool>,
+) -> Result<cuts::CutResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cuts::cut_region(
+            &track_id,
+            &stem_key,
+            start_sec,
+            end_sec,
+            snap.as_deref().unwrap_or("none"),
+            fade_ms.unwrap_or(5.0),
+            trim_leading_silence.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn slice_hits(
+    track_id: String,
+    stem_key: String,
+    min_gap_ms: Option<f64>,
+    max_hits: Option<u32>,
+) -> Result<Vec<samples::Sample>, String> {
+    tauri::async_runtime::spawn_blocking(move || samples::slice_hits(&track_id, &stem_key, min_gap_ms, max_hits))
         .await
         .map_err(|e| format!("task join error: {e}"))?
 }

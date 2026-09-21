@@ -3,7 +3,7 @@
 //! `~/.absolutesample/samples/<sanitized song title>/<sanitized name>.wav`,
 //! indexed in `~/.absolutesample/samples/samples.json`.
 
-use super::{dsp_filters, library, workspace};
+use super::{analysis, cuts, dsp_filters, library, workspace};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,6 +27,36 @@ pub struct Sample {
     pub created_at: String,
     #[serde(default)]
     pub peaks: Vec<f32>,
+    /// `"stem"` (whole-stem copy), `"region"` (cut via `cut_region`), or
+    /// `"hit"` (one-shot slice via `slice_hits`) — contract v6 addendum.
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// Short key label like `"Gm"`/`"F"`, derived from the source analysis
+    /// key (contract v6 addendum "Key detection and naming").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_short: Option<String>,
+    /// Bar count, only set when the sample was grid-snapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bars: Option<u32>,
+}
+
+fn default_kind() -> String {
+    "stem".to_string()
+}
+
+/// Optional region-cut parameters for `save_sample` (contract v6 addendum
+/// "Region cut").
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegionParams {
+    pub start_sec: f64,
+    pub end_sec: f64,
+    #[serde(default)]
+    pub snap: Option<String>,
+    #[serde(default)]
+    pub fade_ms: Option<f64>,
+    #[serde(default)]
+    pub trim_leading_silence: Option<bool>,
 }
 
 /// `~/.absolutesample/samples/`, created if missing.
@@ -92,14 +122,20 @@ fn format_mmss(sec: f64) -> String {
 }
 
 /// Resolves the source wav path for `(track_id, stem_key)`: band stem keys
-/// live at `stems/0N_<key>.wav`, `"loop"` is `loop.wav`, and anything else
-/// is assumed to be an instrument key at `instruments/<key>.wav`.
-fn resolve_stem_path(track_id: &str, stem_key: &str) -> Result<(PathBuf, String, String), String> {
+/// live at `stems/0N_<key>.wav`, `"loop"` is `loop.wav`, `"source"` is
+/// `source.wav`, and anything else is assumed to be an instrument key at
+/// `instruments/<key>.wav`.
+pub fn resolve_stem_path(track_id: &str, stem_key: &str) -> Result<(PathBuf, String, String), String> {
     let dir = workspace::work_dir(track_id)?;
 
     if stem_key == "loop" {
         let path = dir.join("loop.wav");
         return Ok((path, "Loop".to_string(), "loop".to_string()));
+    }
+
+    if stem_key == "source" {
+        let path = dir.join("source.wav");
+        return Ok((path, "Source".to_string(), "source".to_string()));
     }
 
     if let Some(pos) = dsp_filters::STEM_KEYS.iter().position(|k| *k == stem_key) {
@@ -144,64 +180,174 @@ fn unique_filename(dir: &Path, base: &str, ext: &str) -> String {
     candidate
 }
 
-/// Saves a copy of `(track_id, stem_key)`'s wav as a named sample, using the
-/// track's loop range (if any) and cached analysis bpm from `state.json`.
-/// `name` defaults to `"<song title> - <stem label> <m:ss>-<m:ss>"`.
-pub fn save_sample(track_id: &str, stem_key: &str, name: Option<&str>) -> Result<Sample, String> {
+/// The short key label like `"Gm"` (minor) or `"F"` (major) — contract v6
+/// addendum "Key detection and naming".
+fn key_short(key: &analysis::KeyEstimate) -> String {
+    if key.mode == "minor" {
+        format!("{}m", key.tonic)
+    } else {
+        key.tonic.clone()
+    }
+}
+
+/// Best-effort song-level analysis for naming purposes: prefers the cached
+/// whole-song analysis (`analysis/source.json`), falling back to the loop
+/// analysis in `state.json` for tracks that predate the whole-song split.
+fn analysis_for_naming(track_id: &str) -> Option<analysis::LoopAnalysis> {
+    cuts::source_analysis(track_id).ok().or_else(|| library::load_state(track_id).analysis)
+}
+
+/// Assembles the default sample name: `"<song> - <stem label> - <bpm>bpm -
+/// <keyShort> - <n>bars"`, omitting any part that's unknown/unavailable
+/// (contract v6 addendum "Key detection and naming").
+fn build_default_name(song: &str, stem_label: &str, bpm: Option<f64>, key_short: Option<&str>, bars: Option<u32>) -> String {
+    let mut parts = vec![song.to_string(), stem_label.to_string()];
+    if let Some(b) = bpm.filter(|b| *b > 0.0) {
+        parts.push(format!("{}bpm", (b.round() as i64)));
+    }
+    if let Some(k) = key_short.filter(|k| !k.is_empty()) {
+        parts.push(k.to_string());
+    }
+    if let Some(n) = bars {
+        parts.push(format!("{n}bars"));
+    }
+    parts.join(" - ")
+}
+
+/// Copies `src` into the song's samples dir as a uniquely-named `sample_name`
+/// wav, returning `(dest_path, bytes, peaks)`.
+fn copy_into_samples_dir(track_title: &str, sample_name: &str, src: &Path) -> Result<(PathBuf, u64, Vec<f32>), String> {
+    let song_dir_name = sanitize_component(track_title, "song");
+    let song_dir = samples_root()?.join(&song_dir_name);
+    std::fs::create_dir_all(&song_dir).map_err(|e| format!("failed to create song samples dir: {e}"))?;
+
+    let file_base = sanitize_component(sample_name, "sample");
+    let filename = unique_filename(&song_dir, &file_base, "wav");
+    let dest_path = song_dir.join(&filename);
+
+    std::fs::copy(src, &dest_path).map_err(|e| format!("failed to copy sample wav: {e}"))?;
+    let bytes = std::fs::metadata(&dest_path).map(|m| m.len()).unwrap_or(0);
+    let sample_peaks = super::peaks::compute_peaks_for_path(&dest_path).unwrap_or_default();
+    Ok((dest_path, bytes, sample_peaks))
+}
+
+/// One resolved save: everything that differs between the whole-stem and
+/// region-cut paths of `save_sample`.
+struct ResolvedSave {
+    kind: String,
+    start_sec: f64,
+    end_sec: f64,
+    bars: Option<u32>,
+    dest_path: PathBuf,
+    bytes: u64,
+    peaks: Vec<f32>,
+    stem_label: String,
+    group: String,
+    name: String,
+}
+
+/// Saves a copy of `(track_id, stem_key)`'s wav as a named sample. With
+/// `region`, cuts that range via `cut_region` (`kind: "region"`); otherwise
+/// copies the whole stem using the track's loop range, if any (`kind:
+/// "stem"`). `name` defaults per the contract's naming rule, omitting any
+/// part (bpm/key/bars) that isn't known.
+pub fn save_sample(track_id: &str, stem_key: &str, name: Option<&str>, region: Option<RegionParams>) -> Result<Sample, String> {
     let track = library::read_track(track_id)?
         .ok_or_else(|| format!("track '{track_id}' not found; call fetch_audio first"))?;
     let state = library::load_state(track_id);
 
-    let (source_path, stem_label, group) = resolve_stem_path(track_id, stem_key)?;
-    if !source_path.exists() {
-        return Err(format!("sample source not found: {}", source_path.display()));
-    }
+    let naming_analysis = analysis_for_naming(track_id);
+    let bpm = naming_analysis.as_ref().map(|a| a.bpm);
+    let key_short_str = naming_analysis.as_ref().and_then(|a| a.key.as_ref()).map(key_short);
 
-    let (start_sec, end_sec) = match &state.loop_info {
-        Some(l) => (l.start_sec, l.end_sec),
-        // Never trimmed: the stem covers the whole song.
-        None => (0.0, track.duration_sec),
+    let resolved = if let Some(region) = region {
+        let snap = region.snap.as_deref().unwrap_or("none");
+        let fade_ms = region.fade_ms.unwrap_or(5.0);
+        let trim = region.trim_leading_silence.unwrap_or(false);
+        let cut = cuts::cut_region(track_id, stem_key, region.start_sec, region.end_sec, snap, fade_ms, trim)?;
+        let (_, stem_label, group) = resolve_stem_path(track_id, stem_key)?;
+
+        let sample_name = name
+            .filter(|n| !n.trim().is_empty())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| build_default_name(&track.title, &stem_label, bpm, key_short_str.as_deref(), cut.bars));
+
+        let (dest_path, bytes, peaks) = copy_into_samples_dir(&track.title, &sample_name, Path::new(&cut.path))?;
+        // Remove the intermediate cuts/ file now that it's copied into the samples dir.
+        let _ = std::fs::remove_file(&cut.path);
+
+        ResolvedSave {
+            kind: "region".to_string(),
+            start_sec: cut.start_sec,
+            end_sec: cut.end_sec,
+            bars: cut.bars,
+            dest_path,
+            bytes,
+            peaks,
+            stem_label,
+            group,
+            name: sample_name,
+        }
+    } else {
+        let (source_path, stem_label, group) = resolve_stem_path(track_id, stem_key)?;
+        if !source_path.exists() {
+            return Err(format!("sample source not found: {}", source_path.display()));
+        }
+
+        let (start_sec, end_sec) = match &state.loop_info {
+            Some(l) => (l.start_sec, l.end_sec),
+            // Never trimmed: the stem covers the whole song.
+            None => (0.0, track.duration_sec),
+        };
+
+        let sample_name = name
+            .filter(|n| !n.trim().is_empty())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| {
+                format!(
+                    "{} - {} {}-{}",
+                    track.title,
+                    stem_label,
+                    format_mmss(start_sec),
+                    format_mmss(end_sec)
+                )
+            });
+
+        let (dest_path, bytes, peaks) = copy_into_samples_dir(&track.title, &sample_name, &source_path)?;
+        ResolvedSave {
+            kind: "stem".to_string(),
+            start_sec,
+            end_sec,
+            bars: None,
+            dest_path,
+            bytes,
+            peaks,
+            stem_label,
+            group,
+            name: sample_name,
+        }
     };
-    let duration_sec = (end_sec - start_sec).max(0.0);
-    let bpm = state.analysis.as_ref().map(|a| a.bpm);
 
-    let default_name = format!(
-        "{} - {} {}-{}",
-        track.title,
-        stem_label,
-        format_mmss(start_sec),
-        format_mmss(end_sec)
-    );
-    let sample_name = name.filter(|n| !n.trim().is_empty()).unwrap_or(&default_name).trim().to_string();
-
-    let song_dir_name = sanitize_component(&track.title, "song");
-    let song_dir = samples_root()?.join(&song_dir_name);
-    std::fs::create_dir_all(&song_dir).map_err(|e| format!("failed to create song samples dir: {e}"))?;
-
-    let file_base = sanitize_component(&sample_name, "sample");
-    let filename = unique_filename(&song_dir, &file_base, "wav");
-    let dest_path = song_dir.join(&filename);
-
-    std::fs::copy(&source_path, &dest_path).map_err(|e| format!("failed to copy sample wav: {e}"))?;
-    let bytes = std::fs::metadata(&dest_path).map(|m| m.len()).unwrap_or(0);
-    let sample_peaks = super::peaks::compute_peaks_for_path(&dest_path).unwrap_or_default();
-
+    let duration_sec = (resolved.end_sec - resolved.start_sec).max(0.0);
     let sample = Sample {
-        id: generate_id(&dest_path),
-        name: sample_name,
-        path: dest_path.to_string_lossy().to_string(),
-        bytes,
+        id: generate_id(&resolved.dest_path),
+        name: resolved.name,
+        path: resolved.dest_path.to_string_lossy().to_string(),
+        bytes: resolved.bytes,
         song_id: track_id.to_string(),
         song_title: track.title,
         stem_key: stem_key.to_string(),
-        stem_label,
-        group,
-        start_sec,
-        end_sec,
+        stem_label: resolved.stem_label,
+        group: resolved.group,
+        start_sec: resolved.start_sec,
+        end_sec: resolved.end_sec,
         duration_sec,
         bpm,
         created_at: library::now_rfc3339(),
-        peaks: sample_peaks,
+        peaks: resolved.peaks,
+        kind: resolved.kind,
+        key_short: key_short_str,
+        bars: resolved.bars,
     };
 
     let mut index = load_index()?;
@@ -209,6 +355,96 @@ pub fn save_sample(track_id: &str, stem_key: &str, name: Option<&str>) -> Result
     save_index(&index)?;
 
     Ok(sample)
+}
+
+/// `slice_hits` (contract v6 addendum "One-shots"): writes one wav per onset
+/// of `(track_id, stem_key)`'s analysis (from onset to `min(next onset, onset
+/// + 1.0s)`, respecting `min_gap_ms` to merge/skip transients too close
+/// together, capped at `max_hits`), with 5ms fades and leading-silence trim,
+/// into `~/.absolutesample/samples/<song>/<stem label> hits/NN.wav`,
+/// registering each as a `kind: "hit"` Sample.
+pub fn slice_hits(track_id: &str, stem_key: &str, min_gap_ms: Option<f64>, max_hits: Option<u32>) -> Result<Vec<Sample>, String> {
+    let track = library::read_track(track_id)?
+        .ok_or_else(|| format!("track '{track_id}' not found; call fetch_audio first"))?;
+    let (stem_path, stem_label, group) = resolve_stem_path(track_id, stem_key)?;
+    if !stem_path.exists() {
+        return Err(format!("sample source not found: {}", stem_path.display()));
+    }
+
+    let stem_analysis = analysis::analyze_file(&stem_path)?;
+    let probe = super::downloader::probe(&stem_path)?;
+    let duration_sec = probe.duration_sec;
+
+    let min_gap_sec = min_gap_ms.unwrap_or(60.0) / 1000.0;
+    let max_hits = max_hits.unwrap_or(64).max(0) as usize;
+
+    // Merge/skip transients closer together than `min_gap_sec`.
+    let mut onsets: Vec<f64> = Vec::new();
+    for &t in &stem_analysis.transients {
+        if let Some(&last) = onsets.last() {
+            if t - last < min_gap_sec {
+                continue;
+            }
+        }
+        onsets.push(t);
+    }
+    onsets.truncate(max_hits);
+
+    if onsets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let song_dir_name = sanitize_component(&track.title, "song");
+    let hits_dir_name = sanitize_component(&format!("{stem_label} hits"), "hits");
+    let hits_dir = samples_root()?.join(&song_dir_name).join(&hits_dir_name);
+    std::fs::create_dir_all(&hits_dir).map_err(|e| format!("failed to create hits dir: {e}"))?;
+
+    let naming_analysis = analysis_for_naming(track_id);
+    let bpm = naming_analysis.as_ref().map(|a| a.bpm);
+    let key_short_str = naming_analysis.as_ref().and_then(|a| a.key.as_ref()).map(key_short);
+
+    let mut out = Vec::with_capacity(onsets.len());
+    let mut index = load_index()?;
+
+    for (i, &onset) in onsets.iter().enumerate() {
+        let next = onsets.get(i + 1).copied().unwrap_or(duration_sec);
+        let end = next.min(onset + 1.0).min(duration_sec);
+        if end <= onset {
+            continue;
+        }
+
+        let out_path = hits_dir.join(format!("{:02}.wav", i + 1));
+        cuts::ffmpeg_cut(&stem_path, &out_path, onset, end, 5.0, true)?;
+        let bytes = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+        let peaks = super::peaks::compute_peaks_for_path(&out_path).unwrap_or_default();
+
+        let sample = Sample {
+            id: generate_id(&out_path),
+            name: format!("{} - {} hit {:02}", track.title, stem_label, i + 1),
+            path: out_path.to_string_lossy().to_string(),
+            bytes,
+            song_id: track_id.to_string(),
+            song_title: track.title.clone(),
+            stem_key: stem_key.to_string(),
+            stem_label: stem_label.clone(),
+            group: group.clone(),
+            start_sec: onset,
+            end_sec: end,
+            duration_sec: end - onset,
+            bpm,
+            created_at: library::now_rfc3339(),
+            peaks,
+            kind: "hit".to_string(),
+            key_short: key_short_str.clone(),
+            bars: None,
+        };
+
+        index.push(sample.clone());
+        out.push(sample);
+    }
+
+    save_index(&index)?;
+    Ok(out)
 }
 
 /// Lists every saved sample, most recently created first. Lazily backfills
@@ -371,6 +607,9 @@ mod tests {
             bpm: Some(120.0),
             created_at: library::now_rfc3339(),
             peaks: vec![0.5, 1.0],
+            kind: "stem".to_string(),
+            key_short: Some("Gm".to_string()),
+            bars: Some(4),
         };
         save_index(&[sample.clone()]).unwrap();
         let loaded = load_index().unwrap();
@@ -387,5 +626,43 @@ mod tests {
         let id = generate_id(Path::new("/tmp/foo.wav"));
         assert_eq!(id.len(), 12);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn key_short_appends_m_for_minor_not_major() {
+        let minor = analysis::KeyEstimate { tonic: "G".to_string(), mode: "minor".to_string(), confidence: 1.0, camelot: "6A".to_string() };
+        let major = analysis::KeyEstimate { tonic: "F".to_string(), mode: "major".to_string(), confidence: 1.0, camelot: "7B".to_string() };
+        assert_eq!(key_short(&minor), "Gm");
+        assert_eq!(key_short(&major), "F");
+    }
+
+    #[test]
+    fn default_name_includes_all_known_parts() {
+        let name = build_default_name("Song", "Kick", Some(128.0), Some("Gm"), Some(8));
+        assert_eq!(name, "Song - Kick - 128bpm - Gm - 8bars");
+    }
+
+    #[test]
+    fn default_name_omits_bpm_when_unknown() {
+        let name = build_default_name("Song", "Kick", None, Some("Gm"), Some(8));
+        assert_eq!(name, "Song - Kick - Gm - 8bars");
+    }
+
+    #[test]
+    fn default_name_omits_key_when_unknown() {
+        let name = build_default_name("Song", "Kick", Some(128.0), None, Some(8));
+        assert_eq!(name, "Song - Kick - 128bpm - 8bars");
+    }
+
+    #[test]
+    fn default_name_omits_bars_when_not_grid_snapped() {
+        let name = build_default_name("Song", "Kick", Some(128.0), Some("Gm"), None);
+        assert_eq!(name, "Song - Kick - 128bpm - Gm");
+    }
+
+    #[test]
+    fn default_name_with_nothing_known_is_just_song_and_stem() {
+        let name = build_default_name("Song", "Kick", None, None, None);
+        assert_eq!(name, "Song - Kick");
     }
 }

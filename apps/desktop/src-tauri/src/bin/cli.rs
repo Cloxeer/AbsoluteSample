@@ -1,3 +1,4 @@
+use absolutesample_lib::audio::cuts;
 use absolutesample_lib::audio::engine::{self, EngineProgress};
 use absolutesample_lib::audio::progress::Stdout;
 use absolutesample_lib::audio::{downloader, library, samples, workspace};
@@ -99,6 +100,36 @@ enum Commands {
     Samples {
         #[command(subcommand)]
         action: SamplesAction,
+    },
+    /// Cut a (optionally beat/bar-snapped) region out of a stem/instrument/
+    /// loop/source wav.
+    Cut {
+        #[arg(long)]
+        track: String,
+        #[arg(long)]
+        stem: String,
+        #[arg(long)]
+        start: f64,
+        #[arg(long)]
+        end: f64,
+        /// "none" (default), "beat", or "bar".
+        #[arg(long, default_value = "none")]
+        snap: String,
+        #[arg(long, default_value_t = 5.0)]
+        fade_ms: f64,
+        #[arg(long)]
+        trim_leading_silence: bool,
+    },
+    /// Slice one-shot hits from a stem's onsets into the sample library.
+    Hits {
+        #[arg(long)]
+        track: String,
+        #[arg(long)]
+        stem: String,
+        #[arg(long, default_value_t = 60.0)]
+        min_gap_ms: f64,
+        #[arg(long, default_value_t = 64)]
+        max_hits: u32,
     },
 }
 
@@ -298,19 +329,11 @@ fn main() -> ExitCode {
             },
         },
         Commands::Instruments { track, passes } => {
-            let dir = match workspace::work_dir(&track) {
-                Ok(d) => d,
-                Err(e) => return print_err("instruments", &e),
-            };
-            let loop_wav = dir.join("loop.wav");
-            if !loop_wav.exists() {
-                return print_err("instruments", "loop.wav not found; run `trim` first");
-            }
             let passes: Vec<String> = match passes {
                 Some(p) => p.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
                 None => engine::DEFAULT_PASSES.iter().map(|s| s.to_string()).collect(),
             };
-            match engine::separate(&loop_wav, &dir, &passes, |p| eprint_engine_progress(&p)) {
+            match pipeline::run_instruments(&track, &passes, |p| eprint_engine_progress(&p)) {
                 Ok(result) => {
                     print_json(&result.stems);
                     ExitCode::SUCCESS
@@ -370,7 +393,7 @@ fn main() -> ExitCode {
                 Err(e) => print_err("samples list", &e),
             },
             SamplesAction::Save { track_id, stem_key, name } => {
-                match samples::save_sample(&track_id, &stem_key, name.as_deref()) {
+                match samples::save_sample(&track_id, &stem_key, name.as_deref(), None) {
                     Ok(sample) => {
                         print_json(&sample);
                         ExitCode::SUCCESS
@@ -393,5 +416,23 @@ fn main() -> ExitCode {
                 Err(e) => print_err("samples export", &e),
             },
         },
+        Commands::Cut { track, stem, start, end, snap, fade_ms, trim_leading_silence } => {
+            match cuts::cut_region(&track, &stem, start, end, &snap, fade_ms, trim_leading_silence) {
+                Ok(result) => {
+                    print_json(&result);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("cut", &e),
+            }
+        }
+        Commands::Hits { track, stem, min_gap_ms, max_hits } => {
+            match samples::slice_hits(&track, &stem, Some(min_gap_ms), Some(max_hits)) {
+                Ok(hits) => {
+                    print_json(&hits);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("hits", &e),
+            }
+        }
     }
 }

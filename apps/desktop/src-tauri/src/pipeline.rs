@@ -310,6 +310,48 @@ pub fn run_analyze(
     Ok(result)
 }
 
+/// Ensures `<workdir>/source.wav` exists, decoding it lazily from
+/// `source.<ext>` via ffmpeg (soxr, 24-bit) if missing.
+fn ensure_source_wav(dir: &Path) -> Result<PathBuf, String> {
+    let source_wav = dir.join("source.wav");
+    if source_wav.exists() {
+        return Ok(source_wav);
+    }
+    let source_ext = existing_source(dir)
+        .filter(|p| p.extension().and_then(|e| e.to_str()) != Some("wav"))
+        .ok_or_else(|| "source file not found; call fetch_audio first".to_string())?;
+    slicer::decode_to_wav(&source_ext, &source_wav)?;
+    Ok(source_wav)
+}
+
+/// instruments: whole-song AI split (contract v6 addendum "Split the whole
+/// song once"). Runs the engine over `source.wav` (decoded lazily from
+/// `source.<ext>` if needed) instead of `loop.wav`, records
+/// `state.json.instrumentsScope = "song"`, and ensures the cached whole-song
+/// analysis (`analysis/source.json`) exists before returning. Takes the same
+/// per-pass progress closure shape as `engine::separate` so callers keep
+/// full pass-level progress fidelity.
+pub fn run_instruments(
+    track_id: &str,
+    passes: &[String],
+    progress: impl FnMut(engine::EngineProgress),
+) -> Result<engine::SeparateResult, String> {
+    let dir = workspace::work_dir(track_id)?;
+    let source_wav = ensure_source_wav(&dir)?;
+
+    let result = engine::separate(&source_wav, &dir, passes, progress)?;
+
+    let mut state = library::load_state(track_id);
+    state.instruments_scope = Some("song".to_string());
+    library::write_state(track_id, &state)?;
+
+    // Ensure the whole-song analysis is cached (used by cut_region's
+    // beat/bar snapping) before returning.
+    let _ = analysis::analyze_file(&source_wav)?;
+
+    Ok(result)
+}
+
 /// Full fetch -> trim -> stems -> analyze pipeline. Writes `manifest.json`
 /// into `out_dir` and copies the 4 stem wavs + loop.wav alongside it.
 pub fn run_full(

@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod cuts;
 pub mod dsp_filters;
 pub mod downloader;
 pub mod engine;
