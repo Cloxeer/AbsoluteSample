@@ -1,0 +1,378 @@
+//! Thin #[tauri::command] wrappers around the audio/pipeline modules.
+//! All blocking work runs via `tauri::async_runtime::spawn_blocking`;
+//! progress is emitted on the `"pipeline://progress"` event.
+
+use crate::audio::progress::Progress;
+use crate::audio::{analysis, downloader, slicer, workspace};
+use crate::pipeline;
+use serde::Serialize;
+use tauri::{AppHandle, Emitter};
+
+struct TauriProgress {
+    app: AppHandle,
+}
+
+#[derive(Serialize, Clone)]
+struct ProgressPayload {
+    stage: String,
+    percent: f32,
+    message: String,
+}
+
+impl Progress for TauriProgress {
+    fn report(&self, stage: &str, percent: f32, msg: &str) {
+        let _ = self.app.emit(
+            "pipeline://progress",
+            ProgressPayload {
+                stage: stage.to_string(),
+                percent,
+                message: msg.to_string(),
+            },
+        );
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyReport {
+    pub ffmpeg: Option<String>,
+    pub ffprobe: Option<String>,
+    pub ytdlp: Option<String>,
+    pub ok: bool,
+}
+
+#[tauri::command]
+pub async fn check_dependencies() -> Result<DependencyReport, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let ffmpeg = crate::audio::version_string("ffmpeg", "-version");
+        let ffprobe = crate::audio::version_string("ffprobe", "-version");
+        let ytdlp = downloader::version();
+        let ok = ffmpeg.is_some() && ffprobe.is_some() && ytdlp.is_some();
+        Ok(DependencyReport { ffmpeg, ffprobe, ytdlp, ok })
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackInfo {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    #[serde(rename = "sourcePath")]
+    pub source_path: String,
+    #[serde(rename = "wavPath")]
+    pub wav_path: String,
+    #[serde(rename = "durationSec")]
+    pub duration_sec: f64,
+    #[serde(rename = "sampleRate")]
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub codec: String,
+    #[serde(rename = "workDir")]
+    pub work_dir: String,
+}
+
+impl From<pipeline::TrackManifest> for TrackInfo {
+    fn from(t: pipeline::TrackManifest) -> Self {
+        TrackInfo {
+            id: t.id,
+            title: t.title,
+            url: t.url,
+            source_path: t.source_path,
+            wav_path: t.wav_path,
+            duration_sec: t.duration_sec,
+            sample_rate: t.sample_rate,
+            channels: t.channels,
+            codec: t.codec,
+            work_dir: t.work_dir,
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn fetch_audio(app: AppHandle, url: String) -> Result<TrackInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let progress = TauriProgress { app };
+        let track = pipeline::run_fetch(&url, &progress)?;
+        Ok(track.into())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopInfo {
+    #[serde(rename = "trackId")]
+    pub track_id: String,
+    #[serde(rename = "startSec")]
+    pub start_sec: f64,
+    #[serde(rename = "endSec")]
+    pub end_sec: f64,
+    #[serde(rename = "durationSec")]
+    pub duration_sec: f64,
+    #[serde(rename = "loopPath")]
+    pub loop_path: String,
+    #[serde(rename = "wavPath")]
+    pub wav_path: String,
+}
+
+impl From<pipeline::LoopManifest> for LoopInfo {
+    fn from(l: pipeline::LoopManifest) -> Self {
+        LoopInfo {
+            track_id: l.track_id,
+            start_sec: l.start_sec,
+            end_sec: l.end_sec,
+            duration_sec: l.duration_sec,
+            loop_path: l.loop_path,
+            wav_path: l.wav_path,
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn trim_loop(
+    app: AppHandle,
+    track_id: String,
+    start_sec: f64,
+    end_sec: f64,
+) -> Result<LoopInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let progress = TauriProgress { app };
+        let dir = workspace::work_dir(&track_id)?;
+        // Find source.<ext> in the work dir.
+        let source_path = std::fs::read_dir(&dir)
+            .map_err(|e| format!("failed to read work dir: {e}"))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_stem().and_then(|s| s.to_str()) == Some("source")
+                    && p.extension().and_then(|e| e.to_str()) != Some("wav")
+            })
+            .ok_or_else(|| "source file not found; call fetch_audio first".to_string())?;
+
+        let result = pipeline::run_trim(&track_id, &source_path, start_sec, end_sec, &progress)?;
+        Ok(result.into())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StemInfo {
+    pub index: u32,
+    pub key: String,
+    pub label: String,
+    pub band: String,
+    pub path: String,
+    pub bytes: u64,
+    #[serde(rename = "peakDb")]
+    pub peak_db: f64,
+    #[serde(rename = "rmsDb")]
+    pub rms_db: f64,
+}
+
+impl From<pipeline::StemManifest> for StemInfo {
+    fn from(s: pipeline::StemManifest) -> Self {
+        StemInfo {
+            index: s.index,
+            key: s.key,
+            label: s.label,
+            band: s.band,
+            path: s.path,
+            bytes: s.bytes,
+            peak_db: s.peak_db,
+            rms_db: s.rms_db,
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn separate_stems(app: AppHandle, track_id: String) -> Result<Vec<StemInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let progress = TauriProgress { app };
+        let dir = workspace::work_dir(&track_id)?;
+        let loop_wav = dir.join("loop.wav");
+        if !loop_wav.exists() {
+            return Err("loop.wav not found; call trim_loop first".to_string());
+        }
+        let stems = pipeline::run_stems(&track_id, &loop_wav, &progress)?;
+        Ok(stems.into_iter().map(StemInfo::from).collect())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopAnalysisOut {
+    pub bpm: f64,
+    pub confidence: f64,
+    pub transients: Vec<f64>,
+    #[serde(rename = "beatGrid")]
+    pub beat_grid: Vec<f64>,
+    pub bars: u32,
+    #[serde(rename = "onsetEnvelope")]
+    pub onset_envelope: Vec<f64>,
+    #[serde(rename = "peakDb")]
+    pub peak_db: f64,
+    #[serde(rename = "rmsDb")]
+    pub rms_db: f64,
+}
+
+impl From<analysis::LoopAnalysis> for LoopAnalysisOut {
+    fn from(a: analysis::LoopAnalysis) -> Self {
+        LoopAnalysisOut {
+            bpm: a.bpm,
+            confidence: a.confidence,
+            transients: a.transients,
+            beat_grid: a.beat_grid,
+            bars: a.bars,
+            onset_envelope: a.onset_envelope,
+            peak_db: a.peak_db,
+            rms_db: a.rms_db,
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn analyze_loop(app: AppHandle, track_id: String) -> Result<LoopAnalysisOut, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let progress = TauriProgress { app };
+        let dir = workspace::work_dir(&track_id)?;
+        let loop_wav = dir.join("loop.wav");
+        if !loop_wav.exists() {
+            return Err("loop.wav not found; call trim_loop first".to_string());
+        }
+        let probe = downloader::probe(&loop_wav)?;
+        let result = pipeline::run_analyze(&loop_wav, probe.duration_sec, &progress)?;
+        Ok(result.into())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn save_stem(src_path: String, dest_path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::copy(&src_path, &dest_path).map_err(|e| format!("failed to copy: {e}"))?;
+        Ok(dest_path)
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn save_all_stems(track_id: String, dest_dir: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let stems_dir = workspace::stems_dir(&track_id)?;
+        let dest = std::path::Path::new(&dest_dir);
+        std::fs::create_dir_all(dest).map_err(|e| format!("failed to create dest dir: {e}"))?;
+        let mut result = Vec::new();
+        for entry in std::fs::read_dir(&stems_dir).map_err(|e| format!("failed to read stems dir: {e}"))? {
+            let entry = entry.map_err(|e| format!("failed to read entry: {e}"))?;
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("wav") {
+                let filename = path.file_name().unwrap();
+                let dest_path = dest.join(filename);
+                std::fs::copy(&path, &dest_path).map_err(|e| format!("failed to copy stem: {e}"))?;
+                result.push(dest_path.to_string_lossy().to_string());
+            }
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn open_work_dir(track_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = workspace::work_dir(&track_id)?;
+        crate::audio::silent_command("explorer")
+            .arg(dir.as_os_str())
+            .spawn()
+            .map_err(|e| format!("failed to open explorer: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SliceInfoOut {
+    pub index: u32,
+    #[serde(rename = "startSec")]
+    pub start_sec: f64,
+    #[serde(rename = "endSec")]
+    pub end_sec: f64,
+    pub path: String,
+}
+
+#[tauri::command]
+pub async fn slice_beats(
+    app: AppHandle,
+    track_id: String,
+    stem_key: Option<String>,
+    bpm: f64,
+    divisions: u32,
+) -> Result<Vec<SliceInfoOut>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let progress = TauriProgress { app };
+        progress.report("slice", 0.0, "slicing beats");
+
+        let dir = workspace::work_dir(&track_id)?;
+        let (src, key) = match &stem_key {
+            Some(k) => {
+                let stems_dir = workspace::stems_dir(&track_id)?;
+                let entries = std::fs::read_dir(&stems_dir)
+                    .map_err(|e| format!("failed to read stems dir: {e}"))?;
+                let path = entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .find(|p| p.to_string_lossy().contains(k.as_str()))
+                    .ok_or_else(|| format!("stem '{k}' not found; call separate_stems first"))?;
+                (path, k.clone())
+            }
+            None => (dir.join("loop.wav"), "loop".to_string()),
+        };
+
+        if !src.exists() {
+            return Err(format!("source wav not found: {}", src.display()));
+        }
+
+        let probe = downloader::probe(&src)?;
+        let loop_wav = dir.join("loop.wav");
+        let loop_probe = if loop_wav.exists() { downloader::probe(&loop_wav)? } else { probe.clone() };
+        let analysis_result = analysis::analyze(&loop_wav, loop_probe.duration_sec)?;
+
+        let out_dir = workspace::slices_dir(&track_id)?;
+        let slices = slicer::slice_beats(
+            &src,
+            &out_dir,
+            &key,
+            &analysis_result.beat_grid,
+            bpm,
+            divisions,
+            probe.duration_sec,
+        )?;
+
+        progress.report("slice", 100.0, "slicing complete");
+
+        Ok(slices
+            .into_iter()
+            .map(|s| SliceInfoOut {
+                index: s.index,
+                start_sec: s.start_sec,
+                end_sec: s.end_sec,
+                path: s.path.to_string_lossy().to_string(),
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}

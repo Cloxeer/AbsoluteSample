@@ -1,0 +1,11 @@
+{
+  "name": "absolutesample",
+  "private": true,
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "pnpm --filter @absolutesample/desktop dev",
+    "build": "pnpm --filter @absolutesample/desktop build",
+    "test": "pnpm --filter @absolutesample/desktop test",
+    "tauri": "pnpm --filter @absolutesample/desktop tauri"
+  }
+}

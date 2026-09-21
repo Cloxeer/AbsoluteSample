@@ -1,0 +1,39 @@
+[package]
+name = "absolutesample"
+version = "0.1.0"
+description = "AbsoluteSample"
+edition = "2021"
+
+[lib]
+name = "absolutesample_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "absolutesample"
+path = "src/main.rs"
+
+[[bin]]
+name = "absolutesample-cli"
+path = "src/bin/cli.rs"
+
+[features]
+default = ["tauri-app"]
+# Gates the actual Tauri application (lib.rs Builder + commands.rs). The CLI
+# binary and the audio/pipeline modules never depend on this feature, so the
+# CLI + unit tests can build with a plain GNU toolchain when MSVC/WebView2
+# tooling isn't available, via `--no-default-features`.
+tauri-app = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"], optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+panic = "unwind"

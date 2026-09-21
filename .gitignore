@@ -1,0 +1,7 @@
+node_modules/
+dist/
+target/
+test-output/
+apps/desktop/public/fixtures/*.wav
+*.log
+.DS_Store
