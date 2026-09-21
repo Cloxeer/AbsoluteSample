@@ -272,6 +272,8 @@ pub struct LoopAnalysisOut {
     pub peak_db: f64,
     #[serde(rename = "rmsDb")]
     pub rms_db: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<analysis::KeyEstimate>,
 }
 
 impl From<analysis::LoopAnalysis> for LoopAnalysisOut {
@@ -285,6 +287,7 @@ impl From<analysis::LoopAnalysis> for LoopAnalysisOut {
             onset_envelope: a.onset_envelope,
             peak_db: a.peak_db,
             rms_db: a.rms_db,
+            key: a.key,
         }
     }
 }

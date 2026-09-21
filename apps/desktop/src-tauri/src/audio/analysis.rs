@@ -19,6 +19,198 @@ pub struct LoopAnalysis {
     pub onset_envelope: Vec<f64>,
     pub peak_db: f64,
     pub rms_db: f64,
+    /// Key detection (contract v6 addendum: "Key detection and naming"),
+    /// `None` when the signal was too short/quiet to get a confident chroma.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<KeyEstimate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyEstimate {
+    pub tonic: String,
+    pub mode: String, // "major" | "minor"
+    pub confidence: f64,
+    pub camelot: String,
+}
+
+const PITCH_CLASSES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+// Camelot wheel: major/minor keys mapped to their wheel position + letter.
+// Index = semitone offset from C (0=C .. 11=B).
+const CAMELOT_MAJOR: [&str; 12] = ["8B", "3B", "10B", "5B", "12B", "7B", "2B", "9B", "4B", "11B", "6B", "1B"];
+const CAMELOT_MINOR: [&str; 12] = ["5A", "12A", "7A", "2A", "9A", "4A", "11A", "6A", "1A", "8A", "3A", "10A"];
+
+// Krumhansl-Schmuckler key profiles.
+const MAJOR_PROFILE: [f64; 12] =
+    [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+const MINOR_PROFILE: [f64; 12] =
+    [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+
+const FFT_SIZE: usize = 1024;
+const FFT_HOP: usize = 512;
+
+/// In-place radix-2 Cooley-Tukey FFT (`n` must be a power of two). Pure Rust,
+/// no external dependency.
+fn fft(re: &mut [f64], im: &mut [f64]) {
+    let n = re.len();
+    if n <= 1 {
+        return;
+    }
+    // bit-reversal permutation
+    let mut j = 0usize;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j &= !bit;
+            bit >>= 1;
+        }
+        j |= bit;
+        if i < j {
+            re.swap(i, j);
+            im.swap(i, j);
+        }
+    }
+    let mut len = 2;
+    while len <= n {
+        let ang = -2.0 * std::f64::consts::PI / len as f64;
+        let wr = ang.cos();
+        let wi = ang.sin();
+        let mut i = 0;
+        while i < n {
+            let mut cur_wr = 1.0;
+            let mut cur_wi = 0.0;
+            for k in 0..len / 2 {
+                let ur = re[i + k];
+                let ui = im[i + k];
+                let vr = re[i + k + len / 2] * cur_wr - im[i + k + len / 2] * cur_wi;
+                let vi = re[i + k + len / 2] * cur_wi + im[i + k + len / 2] * cur_wr;
+                re[i + k] = ur + vr;
+                im[i + k] = ui + vi;
+                re[i + k + len / 2] = ur - vr;
+                im[i + k + len / 2] = ui - vi;
+                let next_wr = cur_wr * wr - cur_wi * wi;
+                let next_wi = cur_wr * wi + cur_wi * wr;
+                cur_wr = next_wr;
+                cur_wi = next_wi;
+            }
+            i += len;
+        }
+        len <<= 1;
+    }
+}
+
+/// Computes a 12-bin chroma vector (pitch class energy, summed over all
+/// frames and normalized to sum 1) from a mono signal at `sample_rate`, via a
+/// 1024-window/512-hop Hann-windowed STFT, mapping FFT bins to pitch classes
+/// using A4=440Hz equal temperament (contract v6 addendum: "Key detection").
+pub fn compute_chroma(samples: &[f32], sample_rate: u32) -> [f64; 12] {
+    let mut chroma = [0.0f64; 12];
+    if samples.len() < FFT_SIZE {
+        return chroma;
+    }
+
+    // Hann window, precomputed once.
+    let window: Vec<f64> = (0..FFT_SIZE)
+        .map(|i| 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / (FFT_SIZE - 1) as f64).cos())
+        .collect();
+
+    // Precompute FFT bin -> pitch class (skip bin 0 / DC, and anything below
+    // ~C2 / above ~C7 which is mostly noise/harmonics for key detection).
+    let sr = sample_rate as f64;
+    let mut bin_pitch_class = vec![None; FFT_SIZE / 2];
+    for (bin, entry) in bin_pitch_class.iter_mut().enumerate().skip(1) {
+        let freq = bin as f64 * sr / FFT_SIZE as f64;
+        if freq < 65.0 || freq > 2100.0 {
+            continue;
+        }
+        // MIDI note number relative to A4=440Hz, then mod 12 -> pitch class
+        // where 0 = C (A4 is midi 69, pitch class 9).
+        let midi = 69.0 + 12.0 * (freq / 440.0).log2();
+        let pc = ((midi.round() as i64).rem_euclid(12)) as usize;
+        *entry = Some(pc);
+    }
+
+    let mut pos = 0usize;
+    while pos + FFT_SIZE <= samples.len() {
+        let mut re: Vec<f64> = (0..FFT_SIZE).map(|i| samples[pos + i] as f64 * window[i]).collect();
+        let mut im = vec![0.0f64; FFT_SIZE];
+        fft(&mut re, &mut im);
+        for bin in 1..FFT_SIZE / 2 {
+            if let Some(pc) = bin_pitch_class[bin] {
+                let mag = (re[bin] * re[bin] + im[bin] * im[bin]).sqrt();
+                chroma[pc] += mag;
+            }
+        }
+        pos += FFT_HOP;
+    }
+
+    let sum: f64 = chroma.iter().sum();
+    if sum > 0.0 {
+        for v in chroma.iter_mut() {
+            *v /= sum;
+        }
+    }
+    chroma
+}
+
+/// Pearson correlation between `chroma` (rotated so tonic `shift` is index 0)
+/// and `profile`.
+fn correlate(chroma: &[f64; 12], profile: &[f64; 12], shift: usize) -> f64 {
+    let rotated: Vec<f64> = (0..12).map(|i| chroma[(i + shift) % 12]).collect();
+    let mean_a = rotated.iter().sum::<f64>() / 12.0;
+    let mean_b = profile.iter().sum::<f64>() / 12.0;
+    let mut num = 0.0;
+    let mut den_a = 0.0;
+    let mut den_b = 0.0;
+    for i in 0..12 {
+        let da = rotated[i] - mean_a;
+        let db = profile[i] - mean_b;
+        num += da * db;
+        den_a += da * da;
+        den_b += db * db;
+    }
+    if den_a <= 0.0 || den_b <= 0.0 {
+        0.0
+    } else {
+        num / (den_a.sqrt() * den_b.sqrt())
+    }
+}
+
+/// Krumhansl-Schmuckler key detection over a chroma vector: tries all 24
+/// (tonic, mode) candidates and returns the best match, with `confidence`
+/// derived from the correlation margin between the best and second-best.
+pub fn detect_key_from_chroma(chroma: &[f64; 12]) -> Option<KeyEstimate> {
+    if chroma.iter().sum::<f64>() <= 0.0 {
+        return None;
+    }
+    let mut scores: Vec<(usize, bool, f64)> = Vec::with_capacity(24);
+    for tonic in 0..12 {
+        scores.push((tonic, true, correlate(chroma, &MAJOR_PROFILE, tonic)));
+        scores.push((tonic, false, correlate(chroma, &MINOR_PROFILE, tonic)));
+    }
+    scores.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+    let (tonic, is_major, best) = scores[0];
+    let second = scores.get(1).map(|s| s.2).unwrap_or(best);
+    // Margin between best and second-best correlation, normalized to 0..1.
+    let margin = (best - second).max(0.0);
+    let confidence = (margin / 0.3).clamp(0.0, 1.0);
+
+    let camelot = if is_major { CAMELOT_MAJOR[tonic] } else { CAMELOT_MINOR[tonic] };
+    Some(KeyEstimate {
+        tonic: PITCH_CLASSES[tonic].to_string(),
+        mode: if is_major { "major".to_string() } else { "minor".to_string() },
+        confidence,
+        camelot: camelot.to_string(),
+    })
+}
+
+/// Detects the key of a decoded wav file by decoding it mono at
+/// [`SAMPLE_RATE`] and running chroma + Krumhansl-Schmuckler correlation.
+pub fn detect_key(wav_path: &Path) -> Result<Option<KeyEstimate>, String> {
+    let samples = decode_mono_f32(wav_path)?;
+    let chroma = compute_chroma(&samples, SAMPLE_RATE);
+    Ok(detect_key_from_chroma(&chroma))
 }
 
 /// Decodes `wav_path` to mono f32 PCM at 22050 Hz via ffmpeg stdout.
@@ -293,6 +485,8 @@ pub fn analyze(wav_path: &Path, duration_sec: f64) -> Result<LoopAnalysis, Strin
     };
 
     let loudness = super::dsp_filters::measure_loudness(wav_path)?;
+    let chroma = compute_chroma(&samples, SAMPLE_RATE);
+    let key = detect_key_from_chroma(&chroma);
 
     Ok(LoopAnalysis {
         bpm: tempo.bpm,
@@ -303,6 +497,7 @@ pub fn analyze(wav_path: &Path, duration_sec: f64) -> Result<LoopAnalysis, Strin
         onset_envelope: envelope,
         peak_db: loudness.peak_db,
         rms_db: loudness.rms_db,
+        key,
     })
 }
 
@@ -409,6 +604,42 @@ mod tests {
                 w[1]
             );
         }
+    }
+
+    /// Synthesizes a chord as the sum of sine waves at the given
+    /// frequencies, `duration_sec` long at `sample_rate`.
+    fn synth_chord(freqs: &[f64], duration_sec: f64, sample_rate: u32) -> Vec<f32> {
+        let n = (duration_sec * sample_rate as f64) as usize;
+        let mut samples = vec![0.0f32; n];
+        for i in 0..n {
+            let t = i as f64 / sample_rate as f64;
+            let mut s = 0.0;
+            for &f in freqs {
+                s += (t * f * std::f64::consts::TAU).sin();
+            }
+            samples[i] = (s / freqs.len() as f64 * 0.8) as f32;
+        }
+        samples
+    }
+
+    #[test]
+    fn detects_c_major_triad() {
+        // C4=261.63, E4=329.63, G4=392.00
+        let samples = synth_chord(&[261.63, 329.63, 392.00], 3.0, SAMPLE_RATE);
+        let chroma = compute_chroma(&samples, SAMPLE_RATE);
+        let key = detect_key_from_chroma(&chroma).expect("expected a key estimate");
+        assert_eq!(key.tonic, "C");
+        assert_eq!(key.mode, "major");
+    }
+
+    #[test]
+    fn detects_a_minor_triad() {
+        // A3=220.00, C4=261.63, E4=329.63
+        let samples = synth_chord(&[220.00, 261.63, 329.63], 3.0, SAMPLE_RATE);
+        let chroma = compute_chroma(&samples, SAMPLE_RATE);
+        let key = detect_key_from_chroma(&chroma).expect("expected a key estimate");
+        assert_eq!(key.tonic, "A");
+        assert_eq!(key.mode, "minor");
     }
 
     #[test]
