@@ -273,3 +273,61 @@ on disk mirrors the same split: `{ stems, device, failedPasses, elapsedSec, pass
 level, since the file has no sibling "session" object to split across). The `separate_instruments` Tauri command
 itself returns `{ stems, elapsedSec, passSeconds, device, failedPasses }` (one flat object) since it's a single
 just-finished operation's result, not a persisted session snapshot.
+
+---
+
+# v6 addendum: whole-song split, grid-snapped samples, one-shots, local files, notes, trash, honesty
+
+## Split the whole song once (item 1)
+`separate_instruments` runs on `source.wav` (decoded 24-bit soxr from source.<ext>, created lazily at split time, kept) instead of `loop.wav`.
+Instrument stems therefore cover the full song. The loop/selection is applied afterwards, instantly, by cutting regions out of stems.
+`trim_loop` still exists for the source lane and the Quick EQ bands path. `state.json.instrumentsScope: "song"|"loop"` records which was used; old loop-scoped splits keep working.
+
+## Region cut (items 2, 4)
+`cut_region({ trackId, stemKey, startSec, endSec, snap: 'none'|'beat'|'bar', fadeMs?: number (default 5), trimLeadingSilence?: boolean })
+  -> { path, startSec, endSec, bars: number|null, peaks, durationSec }`
+Writes `<workdir>/cuts/<stemKey>_<start>-<end>.wav` (24-bit). Snapping uses the song analysis beat grid (`analyze_file` on source.wav, cached as `analysis/source.json`).
+`save_sample` accepts an optional `{ startSec, endSec, snap, fadeMs, trimLeadingSilence }` and cuts via cut_region instead of copying the whole stem.
+
+## Key detection and naming (item 3)
+`analyze_file` result gains `key: { tonic: 'G', mode: 'major'|'minor', confidence: number, camelot: string }` (Krumhansl-Schmuckler on a chroma from ffmpeg-decoded mono; pure Rust).
+Default sample name: `<song> - <stem label> - <bpm>bpm - <key short e.g. Gm> - <n>bars` (bars omitted when not grid-snapped). Sample gains `keyShort`, `bars`.
+
+## One-shots (item 5)
+`slice_hits({ trackId, stemKey, minGapMs?: 60, maxHits?: 64 }) -> Sample[]` writes one wav per onset (from onset to next onset or 1 s max, 5 ms fades, leading silence trimmed) into
+`~/.absolutesample/samples/<song>/<stem> hits/NN.wav` and registers each in samples.json with `kind: 'hit'`. Sample gains `kind: 'stem'|'region'|'hit'`.
+
+## Drag out (item 6)
+Frontend uses Tauri's drag plugin (`@crabnebula/tauri-plugin-drag`, free, MIT) to drag a sample's file path to any app. Rust registers `tauri_plugin_drag`; capability `drag:default`.
+Samples panel rows are draggable; the whole file (not a copy) is offered.
+
+## GPU busy and low priority (item 8)
+`engine_status()` gains `busy: boolean` and `busyTrackId`; `separate_instruments` takes `lowPriority?: boolean` which starts the Python child with BELOW_NORMAL_PRIORITY_CLASS
+(and passes `--low-priority`, which the script uses to call `torch.set_num_threads(max(1, cpu//2))` and set CUDA to a lower-priority stream when available). Only one split runs at a time; a second request returns Err("engine busy").
+
+## Storage (item 9)
+`library_size()` already returns bytes/samplesBytes/trashBytes (new). `clear_scans()` deletes every unkept song; `empty_trash()`.
+
+## Local files first (item 10)
+`import_local({ path }) -> TrackInfo` accepts wav/flac/mp3/m4a/aiff/ogg: id = "local-" + 12 hex of sha1(path+size+mtime); copies the original into `work/<id>/source.<ext>`
+(no re-encode), probes it, writes track.json/state.json, `sourceKind: 'local'|'youtube'` on TrackInfo. Tauri `dragDropEnabled` window option on; frontend listens to `tauri://drag-drop`.
+
+## Stem confidence (item 12)
+InstrumentStem gains `confidence: { score: 0..1, reasons: string[] }` computed in separate.py: score from the strongest family tag (0.5 weight), inverse of leakage estimate
+(energy of the stem that is also present in "other" via band-limited correlation, 0.3 weight), and family agreement with the bucket (0.2 weight). Reasons are short strings like "strong Cello tag", "some leakage into Other".
+
+## Trash (item 13)
+`delete_track` and `delete_sample` move to `~/.absolutesample/trash/<yyyymmdd-hhmmss>-<id>/` with a `meta.json` (kind, original paths, deletedAt). `list_trash() -> TrashEntry[]`,
+`restore_trash({ id })`, `empty_trash()`. Purge entries older than 7 days on app start (`prune_trash`). "Undo" toast in the UI for 8 s after a delete calls restore_trash.
+
+## Instrument naming (from the last review)
+separate.py: `displayLabel` per stem = the strongest family when it beats the bucket family by 1.3x and >= 0.06 (e.g. "Strings"), else the bucket label. If two families are within 25% of each other and both >= 0.08: "Guitar + Strings". `detections: [{label, score}]` = top 5 instrument-level tags (never generic), shown under the track like the kit list.
+`--low-priority` flag as above.
+
+## Notes (replaces Loop & Beat Matrix)
+`engine/notes.py --input <wav> --out <dir>` uses Basic Pitch (free, local) to write `notes.mid` and `notes.json`: `{ notes: [{startSec, endSec, midi, name, velocity}], key: {tonic, mode, confidence}, chords: [{startSec, endSec, name, notes:[...]}], bpm?: number }`.
+Chords: per beat (from analysis bpm) take the sounding pitch classes and match major/minor/7th templates. Rust: `extract_notes({ path }) -> NotesResult` (cached next to the wav as `<name>.notes.json`), `export_midi({ path, destPath })`.
+Frontend "Notes" tab: BPM + confidence with info buttons, source picker (any stem, any saved sample), piano roll (SVG, 12 rows per octave, 4 octaves visible, scrollable), key + scale notes, chord strip in time with the transport, and a kid-level explanation block ("This song is in G major. Its home note is G. It mostly uses these 7 notes: ..."). Export MIDI button.
+
+## UI rules (apply everywhere)
+No solo/mute on instrument tracks. Lane drag-select on every waveform (source and instruments) with In/Out flags; the lane keeps its own cursor (local audition position) and the master playhead crosses all lanes. Info "?" on PK, RMS, BPM, Key, Confidence with one-sentence plain explanations. Playhead is drawn at `time - outputLatency` (AudioContext.outputLatency || baseLatency). Local file drop zone is the primary hero input; YouTube URL is a small secondary control. Transport shows storage used and a GPU busy chip. Low priority is a small toggle in the engine card.

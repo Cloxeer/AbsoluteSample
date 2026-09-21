@@ -25,8 +25,10 @@ Protocol (stdout, one JSON object per line):
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import logging
+import os
 import shutil
 import sys
 import time
@@ -70,6 +72,17 @@ STEM_MODEL = {
     "kick": MODELS["drums"], "snare": MODELS["drums"], "toms": MODELS["drums"],
     "hihat": MODELS["drums"], "ride": MODELS["drums"], "crash": MODELS["drums"],
 }
+
+
+def apply_low_priority() -> None:
+    """Best-effort: fewer CPU threads and a below-normal process priority on Windows."""
+    import torch
+
+    torch.set_num_threads(max(1, (os.cpu_count() or 2) // 2))
+    try:
+        ctypes.windll.kernel32.SetPriorityClass(-1, 0x4000)  # BELOW_NORMAL_PRIORITY_CLASS
+    except Exception:
+        pass
 
 
 def emit(obj: dict) -> None:
@@ -249,6 +262,25 @@ GENERIC = {"Music", "Musical instrument", "Silence", "Sound effect", "Effects un
            "Plucked string instrument", "Hum", "Throbbing", "Noise", "Inside, small room", "Mantra", "Narration, monologue"}
 
 
+def band_limited_leakage(a: np.ndarray, b: np.ndarray, sr: int, lo: float = 200.0, hi: float = 5000.0) -> float:
+    """Correlation-based leakage estimate between two mono signals, band-limited via an FFT mask."""
+    n = min(len(a), len(b))
+    if n < 2:
+        return 0.0
+    a = a[:n].astype(np.float64)
+    b = b[:n].astype(np.float64)
+    freqs = np.fft.rfftfreq(n, d=1.0 / sr)
+    mask = (freqs >= lo) & (freqs <= hi)
+    a_f = np.fft.irfft(np.fft.rfft(a) * mask, n=n)
+    b_f = np.fft.irfft(np.fft.rfft(b) * mask, n=n)
+    if a_f.std() < 1e-9 or b_f.std() < 1e-9:
+        return 0.0
+    corr = float(np.corrcoef(a_f, b_f)[0, 1])
+    if np.isnan(corr):
+        return 0.0
+    return max(0.0, corr)
+
+
 def pass_tag(stems: dict[str, Path], device: str) -> dict[str, dict]:
     import librosa
     import torch
@@ -259,6 +291,14 @@ def pass_tag(stems: dict[str, Path], device: str) -> dict[str, dict]:
     label_of = model.config.id2label
     out: dict[str, dict] = {}
     keys = [k for k in ("vocals", "drums", "bass", "guitar", "piano", "other") if k in stems]
+
+    # 30 s mono windows (native sample rate) for the leakage estimate.
+    leak_win: dict[str, tuple[np.ndarray, int]] = {}
+    for key in keys:
+        d, sr0 = read_wav(stems[key])
+        mono = d.mean(axis=1)
+        leak_win[key] = (mono[: int(30 * sr0)], sr0)
+
     for n, key in enumerate(keys):
         progress("tag", 100.0 * n / max(1, len(keys)), f"Listening to {key}")
         y, sr = read_wav(stems[key])
@@ -269,7 +309,10 @@ def pass_tag(stems: dict[str, Path], device: str) -> dict[str, dict]:
         # Classification only: the model is level sensitive, so peak-normalize each window.
         wins = [w / max(float(np.abs(w).max()), 1e-6) * 0.9 for w in wins]
         if not wins:
-            out[key] = {"tags": [], "soundsLike": None}
+            out[key] = {
+                "tags": [], "soundsLike": None, "displayLabel": STEM_META[key][0],
+                "detections": [], "confidence": {"score": 0.0, "reasons": ["no signal in this stem"]},
+            }
             continue
         probs = []
         for w in wins[:24]:
@@ -284,12 +327,60 @@ def pass_tag(stems: dict[str, Path], device: str) -> dict[str, dict]:
         own = BUCKET_FAMILY.get(key)
         # Vocal bleed is common in instrument stems; only call an instrument stem "Vocals" when it is unmistakable.
         candidates = {f: v for f, v in fam_scores.items() if not (f == "Vocals" and own != "Vocals" and v < 0.35)}
-        best_fam, best = max(candidates.items(), key=lambda t: t[1])
+        ranked = sorted(candidates.items(), key=lambda t: -t[1])
+        best_fam, best = ranked[0]
         own_score = fam_scores.get(own, 0.0) if own else 0.0
         sounds_like = None
         if best >= 0.06 and best_fam != own and best >= 1.3 * own_score:
             sounds_like = best_fam
-        out[key] = {"tags": tags, "soundsLike": sounds_like}
+
+        # displayLabel: vocals/drums buckets never get renamed.
+        if key in ("vocals", "drums"):
+            display_label = STEM_META[key][0]
+        elif best_fam != own and best >= 0.06 and best >= 1.3 * own_score:
+            display_label = best_fam
+        elif (
+            len(ranked) >= 2
+            and ranked[0][1] >= 0.08 and ranked[1][1] >= 0.08
+            and min(ranked[0][1], ranked[1][1]) / max(ranked[0][1], ranked[1][1]) >= 0.75
+        ):
+            display_label = f"{ranked[0][0]} + {ranked[1][0]}"
+        else:
+            display_label = STEM_META[key][0]
+
+        detections = tags
+
+        # Leakage: this stem vs "other" (band-limited correlation on a 30 s window).
+        leakage = 0.0
+        if key != "other" and "other" in leak_win:
+            a, sr_a = leak_win[key]
+            b, sr_b = leak_win["other"]
+            if sr_a == sr_b:
+                leakage = band_limited_leakage(a, b, sr_a)
+
+        family_component = 1.0 if best_fam == own else 0.5
+        score = 0.5 * min(best / 0.5, 1.0) + 0.3 * (1.0 - leakage) + 0.2 * family_component
+        score = max(0.0, min(1.0, score))
+        reasons = []
+        if best >= 0.06:
+            reasons.append(f"strong {best_fam} tag {best:.2f}")
+        else:
+            reasons.append(f"weak tag signal {best:.2f}")
+        if key == "other":
+            pass
+        elif leakage >= 0.15:
+            reasons.append(f"some leakage into Other {leakage:.2f}")
+        else:
+            reasons.append(f"little leakage into Other {leakage:.2f}")
+        reasons.append("family matches bucket" if best_fam == own else "family differs from bucket")
+
+        out[key] = {
+            "tags": tags,
+            "soundsLike": sounds_like,
+            "displayLabel": display_label,
+            "detections": detections,
+            "confidence": {"score": round(score, 3), "reasons": reasons},
+        }
     return out
 
 
@@ -300,6 +391,7 @@ def main() -> int:
     ap.add_argument("--passes", default="instruments,vocals,lead,drums,tag")
     ap.add_argument("--models-dir", required=True)
     ap.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
+    ap.add_argument("--low-priority", action="store_true")
     args = ap.parse_args()
 
     inp = Path(args.input).resolve()
@@ -315,6 +407,9 @@ def main() -> int:
     passes = [p.strip() for p in args.passes.split(",") if p.strip()]
 
     import torch
+
+    if args.low_priority:
+        apply_low_priority()
 
     device = "cuda" if (args.device != "cpu" and torch.cuda.is_available()) else "cpu"
     emit({"event": "device", "device": device, "gpu": torch.cuda.get_device_name(0) if device == "cuda" else None})
@@ -366,6 +461,21 @@ def main() -> int:
     listing = []
     for key, path in stems.items():
         label, group, order = STEM_META[key]
+        info = tag_info.get(key)
+        if info is None:
+            parent_key = PARENT.get(key)
+            parent_info = tag_info.get(parent_key) if parent_key else None
+            confidence = parent_info["confidence"] if parent_info else None
+            display_label = label
+            detections: list[dict] = []
+            tags: list[dict] = []
+            sounds_like = None
+        else:
+            confidence = info["confidence"]
+            display_label = info["displayLabel"]
+            detections = info["detections"]
+            tags = info["tags"]
+            sounds_like = info["soundsLike"]
         listing.append({
             "key": key,
             "label": label,
@@ -374,8 +484,11 @@ def main() -> int:
             "path": str(path),
             "model": STEM_MODEL.get(key, MODELS["instruments"]),
             "order": order,
-            "tags": tag_info.get(key, {}).get("tags", []),
-            "soundsLike": tag_info.get(key, {}).get("soundsLike"),
+            "tags": tags,
+            "soundsLike": sounds_like,
+            "displayLabel": display_label,
+            "detections": detections,
+            "confidence": confidence,
         })
     listing.sort(key=lambda s: s["order"])
     emit({"event": "done", "stems": listing, "device": device})
