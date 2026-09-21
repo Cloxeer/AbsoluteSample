@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { backend } from "@/lib/backend";
 import { onProgress } from "@/lib/events";
+import { markJobStarted } from "@/lib/localJobs";
 import type { InstrumentsResult, InstrumentStem, LoopAnalysis, LoopInfo, ProgressPayload, StemInfo, TrackInfo, TrackSession } from "@/lib/types";
 
 export type EngineState =
@@ -77,6 +78,7 @@ export function useAudioEngine() {
 
   const fetchAudio = useCallback(async (url: string, force = false) => {
     const currentTrackId = engine.track?.id;
+    if (currentTrackId) markJobStarted(currentTrackId);
     setEngine((prev) => ({ ...prev, state: "fetching", error: null }));
     try {
       const track = await backend.fetchAudio({ url, force, currentTrackId });
@@ -119,6 +121,7 @@ export function useAudioEngine() {
   }, []);
 
   const trimLoop = useCallback(async (trackId: string, startSec: number, endSec: number) => {
+    markJobStarted(trackId);
     setEngine((prev) => ({ ...prev, state: "trimming", error: null }));
     try {
       const loop = await backend.trimLoop({ trackId, startSec, endSec });
@@ -131,6 +134,7 @@ export function useAudioEngine() {
   }, []);
 
   const separateStems = useCallback(async (trackId: string) => {
+    markJobStarted(trackId);
     setEngine((prev) => ({ ...prev, state: "separating", error: null }));
     try {
       const stems = await backend.separateStems({ trackId });
@@ -143,6 +147,7 @@ export function useAudioEngine() {
   }, []);
 
   const separateInstruments = useCallback(async (trackId: string) => {
+    markJobStarted(trackId);
     setEngine((prev) => ({ ...prev, state: "separating", error: null }));
     try {
       const { stems, ...instrumentsMeta } = await backend.separateInstruments({ trackId });

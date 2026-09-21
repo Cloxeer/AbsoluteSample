@@ -115,6 +115,7 @@ export function InstrumentTrack({
       normalize: true,
       barWidth: 2,
       barGap: 1,
+      cursorWidth: 0,
       url: wavUrl,
       ...peaksOptions(stem.peaks, stem.durationSec),
     });
@@ -146,16 +147,13 @@ export function InstrumentTrack({
       >
         <div className="flex items-start gap-2">
           <Icon size={14} color={color} className="mt-0.5 shrink-0" aria-hidden />
-          <div className="min-w-0 flex-1 group/label">
+          <div className="min-w-0 flex-1" title={stem.model}>
             <div className="text-sm font-semibold truncate">{stem.label}</div>
             {soundsLikeCaption(stem) && (
               <div className="text-[10px] text-muted truncate" title={tagsTooltip(stem)}>
                 {soundsLikeCaption(stem)}
               </div>
             )}
-            <div className="text-[10px] text-muted truncate opacity-0 group-hover/label:opacity-100 transition-opacity" title={stem.model}>
-              {stem.model}
-            </div>
           </div>
           <PlayPauseButton
             playing={isPlaying}

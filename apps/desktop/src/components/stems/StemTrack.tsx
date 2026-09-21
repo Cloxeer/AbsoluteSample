@@ -71,6 +71,7 @@ export function StemTrack({
       normalize: true,
       barWidth: 2,
       barGap: 1,
+      cursorWidth: 0,
       url: wavUrl,
       ...peaksOptions(stem.peaks, stem.durationSec),
     });

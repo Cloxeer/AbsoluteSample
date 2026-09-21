@@ -73,6 +73,7 @@ export function SampleRow({ sample, selected, onToggleSelect, onRename, onDelete
       height: 36,
       normalize: true,
       interact: false,
+      cursorWidth: 0,
       url,
       ...peaksOptions(sample.peaks, sample.durationSec),
     });

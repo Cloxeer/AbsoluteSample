@@ -295,7 +295,6 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
     setPassReasons({});
     await separateInstruments(engine.track.id);
     setSplitSuccess(true);
-    setKept(true);
     onLibraryChanged?.();
     setTimeout(() => setSplitSuccess(false), 1500);
   };
@@ -305,7 +304,6 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
     setUseQuickEq(true);
     await separateStems(engine.track.id);
     setSplitSuccess(true);
-    setKept(true);
     onLibraryChanged?.();
     setTimeout(() => setSplitSuccess(false), 1500);
   };

@@ -5,6 +5,7 @@ import { samplePlayer } from "@/lib/samplePlayer";
 import { onsetsFromAnalysis, padsForRow } from "@/lib/beatMatrix";
 import type { InstrumentStem, LoopAnalysis, Sample } from "@/lib/types";
 import { groupInstruments } from "@/lib/instruments";
+import { isAudible } from "@/lib/stemPresence";
 
 const INSTRUMENT_COLORS: Record<string, string> = {
   vocals: "#F25F5C",
@@ -48,9 +49,11 @@ export function BeatMatrix({ analysis, instruments, samples, currentTime, isPlay
   const rows: Row[] = useMemo(() => {
     const out: Row[] = [];
     for (const node of nodes) {
+      if (!isAudible(node.stem)) continue;
       out.push({ key: node.stem.key, label: node.stem.label, color: INSTRUMENT_COLORS[node.stem.group] ?? "#8A94A6", path: node.stem.path, kind: "instrument" });
       if (expandedKit && node.children.length > 0) {
         for (const child of node.children) {
+          if (!isAudible(child)) continue;
           out.push({ key: child.key, label: `  ${child.label}`, color: INSTRUMENT_COLORS[child.group] ?? "#8A94A6", path: child.path, kind: "instrument" });
         }
       }

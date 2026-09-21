@@ -77,6 +77,7 @@ export function InspectorTab({ track, loop, stems: _stems, instruments, analysis
       progressColor: "#4CC9F0",
       cursorColor: "#4CC9F0",
       height: 80,
+      cursorWidth: 0,
       url: loopWavUrl,
       ...peaksOptions(loop.peaks, loop.durationSec),
     });

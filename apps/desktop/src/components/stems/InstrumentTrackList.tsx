@@ -6,6 +6,7 @@ import { SaveSampleButton } from "./SaveSampleButton";
 import { Button } from "@/components/neumorphic/Button";
 import { backend } from "@/lib/backend";
 import { groupInstruments } from "@/lib/instruments";
+import { isAudible } from "@/lib/stemPresence";
 import type { InstrumentStem, Sample } from "@/lib/types";
 import type { TrackGainState } from "@/hooks/useSyncPlayback";
 
@@ -57,6 +58,8 @@ export function InstrumentTrackList({
   const [wavUrls, setWavUrls] = useState<Record<string, string>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const nodes = groupInstruments(stems);
+  const audibleNodes = nodes.filter((n) => isAudible(n.stem));
+  const silentNodes = nodes.filter((n) => !isAudible(n.stem));
 
   useEffect(() => {
     let cancelled = false;
@@ -143,34 +146,50 @@ export function InstrumentTrackList({
     );
   };
 
+  const renderNode = (node: (typeof nodes)[number], isMaster: boolean) => {
+    const isOpen = expanded[node.stem.key] ?? false;
+    const isKit = node.stem.group === "drums" && node.children.length > 0;
+    const childLabel = isKit ? KIT_LABEL : "lead & backing";
+    const audibleChildren = node.children.filter((c) => isAudible(c));
+    const silentChildren = node.children.filter((c) => !isAudible(c));
+    return (
+      <div key={`${trackId}:${node.stem.key}`} className="flex flex-col gap-2">
+        {renderRow(node.stem, false, isMaster, true)}
+        {node.children.length > 0 && (
+          <>
+            <DisclosureToggle
+              open={isOpen}
+              count={node.children.length}
+              label={childLabel}
+              onToggle={() => setExpanded((prev) => ({ ...prev, [node.stem.key]: !isOpen }))}
+            />
+            {isOpen && (
+              <div className="flex flex-col gap-2">
+                {audibleChildren.map((child) => renderRow(child, true, false, false))}
+                {silentChildren.length > 0 && (
+                  <SilentStemsRow stems={silentChildren} renderRow={(s) => renderRow(s, true, false, false)} />
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-col gap-3">
-        {nodes.map((node, i) => {
-          const isOpen = expanded[node.stem.key] ?? false;
-          const isKit = node.stem.group === "drums" && node.children.length > 0;
-          const childLabel = isKit ? KIT_LABEL : "lead & backing";
-          return (
-            <div key={`${trackId}:${node.stem.key}`} className="flex flex-col gap-2">
-              {renderRow(node.stem, false, i === 0, true)}
-              {node.children.length > 0 && (
-                <>
-                  <DisclosureToggle
-                    open={isOpen}
-                    count={node.children.length}
-                    label={childLabel}
-                    onToggle={() => setExpanded((prev) => ({ ...prev, [node.stem.key]: !isOpen }))}
-                  />
-                  {isOpen && (
-                    <div className="flex flex-col gap-2">
-                      {node.children.map((child) => renderRow(child, true, false, false))}
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          );
-        })}
+        {audibleNodes.map((node, i) => renderNode(node, i === 0 && audibleNodes.length > 0))}
+        {silentNodes.length > 0 && (
+          <SilentStemsRow
+            stems={silentNodes.map((n) => n.stem)}
+            renderRow={(s) => {
+              const node = silentNodes.find((n) => n.stem.key === s.key)!;
+              return renderNode(node, false);
+            }}
+          />
+        )}
       </div>
       <div className="flex gap-2 justify-end">
         <Button onClick={handleOpenFolder}>Open folder</Button>
@@ -178,6 +197,30 @@ export function InstrumentTrackList({
           Export All
         </Button>
       </div>
+    </div>
+  );
+}
+
+/** Collapses a set of effectively-silent stems into a single muted row with a Show/Hide toggle. */
+function SilentStemsRow<T extends { key: string; label: string }>({
+  stems,
+  renderRow,
+}: {
+  stems: T[];
+  renderRow: (stem: T) => React.ReactNode;
+}) {
+  const [show, setShow] = useState(false);
+  if (stems.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-2">
+      <button
+        type="button"
+        onClick={() => setShow((v) => !v)}
+        className="self-start text-xs px-2 py-1 rounded-full border border-white/10 text-muted hover:text-text transition-colors"
+      >
+        {stems.length} silent stem{stems.length === 1 ? "" : "s"} hidden: {stems.map((s) => s.label).join(", ")} · {show ? "Hide" : "Show"}
+      </button>
+      {show && <div className="flex flex-col gap-2">{stems.map((s) => renderRow(s))}</div>}
     </div>
   );
 }
