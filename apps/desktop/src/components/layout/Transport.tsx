@@ -104,7 +104,7 @@ export function Transport({
           )}
           <span
             className={clsx(
-              "text-xs px-2 py-1 rounded-full border font-medium",
+              "text-xs px-2 py-1 rounded-full border font-medium whitespace-nowrap",
               mode === "audition" ? "text-cyan border-cyan/30 bg-cyan/5" : "text-muted border-white/10"
             )}
           >

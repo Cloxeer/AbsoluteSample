@@ -57,6 +57,28 @@ cargo run --release --no-default-features --bin absolutesample-cli -- run \
 The `tauri-app` cargo feature (default on) gates everything that needs the Tauri runtime. The CLI and
 unit tests build with `--no-default-features` so they only need ffmpeg and a linker.
 
+## AI instrument separation (free, local)
+
+"Split" runs four open-source models on your GPU (or CPU), chained so each pass refines the last:
+
+| Pass | Model | Output |
+|---|---|---|
+| Instruments | Demucs v4 `htdemucs_6s` | vocals, drums, bass, guitar, piano, other |
+| Vocals refine | BS-Roformer (viperx, SDR 12.97) | ensembled with the Demucs vocals; what leaves the vocals goes back into "other" so the stems still sum to the mix |
+| Lead and backing | Mel-Band Roformer karaoke | lead vocals, backing vocals |
+| Drum kit | MDX23C DrumSep | kick, snare, toms, hi-hat, ride, crash |
+
+The engine is a Python 3.12 virtualenv the app installs on first use into `~/.absolutesample/engine`
+(PyTorch CUDA plus `audio-separator`, about 4.5 GB; model weights about 1.5 GB download once).
+Click "Install engine" in the app or run:
+
+```bash
+apps/desktop/src-tauri/target/release/absolutesample-cli.exe engine install
+```
+
+Timings on an RTX 2070 Super: a 15 s loop in about 20 s, a full 3 minute song in about 2.5 minutes.
+The old crossover splitter is still available as "Quick EQ bands".
+
 ## Using the stem view
 
 The stem view is laid out like a DAW: track headers on the left, waveform lanes on the right, one shared
@@ -88,7 +110,7 @@ Loop is cyan. Esc stops, L toggles loop, ? in the transport lists the shortcuts.
    rectified flux, peak picking with a 50 ms gap, autocorrelation tempo search 60–200 BPM with
    parabolic refinement and octave disambiguation, and a beat grid anchored on the strongest onset.
 
-Work files live under `%LOCALAPPDATA%/AbsoluteSample/work/<video id>/`.
+Work files live under `~/.absolutesample/work/<video id>/`.
 
 ## Test
 
