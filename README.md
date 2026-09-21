@@ -63,8 +63,8 @@ unit tests build with `--no-default-features` so they only need ffmpeg and a lin
    decode is produced for the browser waveform.
 2. **Trim**: `ffmpeg -ss S -to E -c copy` cuts the loop at packet granularity with zero re-encode, then
    decodes `loop.wav` for the DSP stage.
-3. **Stems**: one ffmpeg `filter_complex` run. Each crossover is a Linkwitz-Riley 4th order filter
-   (two cascaded Q=0.7071 Butterworth 2nd-order sections).
+3. **Stems**: one ffmpeg `filter_complex` run. Each crossover is a Linkwitz-Riley 8th order filter (48 dB/oct)
+   (four cascaded Q=0.7071 Butterworth 2nd-order sections).
    * `01_drums_sub`   LP 130 Hz
    * `02_bass_lowmid` HP 130 Hz → LP 800 Hz
    * `03_mid_vocals`  HP 800 Hz → LP 4.5 kHz → Mid channel (L+R)/2, which cancels side-panned instruments

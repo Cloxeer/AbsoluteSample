@@ -1,10 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
+import { Play } from "lucide-react";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
 import { backend } from "@/lib/backend";
 import type { LoopAnalysis, SliceInfo, StemInfo, StemKey, TrackInfo, LoopInfo } from "@/lib/types";
 import clsx from "clsx";
+
+const ROW_COLORS: Record<string, string> = {
+  drums_sub: "#FF6B6B",
+  bass_lowmid: "#FFB84D",
+  mid_vocals: "#7C5CFF",
+  highs_air: "#35D0FF",
+  loop: "#8B8F9A",
+};
 
 export interface InspectorTabProps {
   track: TrackInfo | null;
@@ -64,6 +73,8 @@ export function InspectorTab({ track, loop, stems, analysis, onAnalyze }: Inspec
   const [divisions, setDivisions] = useState(16);
   const [slices, setSlices] = useState<SliceInfo[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
+  const [activePad, setActivePad] = useState<string | null>(null);
+  const [activeRow, setActiveRow] = useState<string | null>(null);
 
   useEffect(() => {
     if (!track || !loop) return;
@@ -112,8 +123,22 @@ export function InspectorTab({ track, loop, stems, analysis, onAnalyze }: Inspec
     }
   };
 
-  const handlePlayBeat = (start: number, end: number) => {
+  const handlePlayBeat = (start: number, end: number, rowKey?: string, padId?: string) => {
     wsRef.current?.play(start, end);
+    if (rowKey) {
+      setActiveRow(rowKey);
+      setTimeout(() => setActiveRow((r) => (r === rowKey ? null : r)), (end - start) * 1000);
+    }
+    if (padId) {
+      setActivePad(padId);
+      setTimeout(() => setActivePad((p) => (p === padId ? null : p)), (end - start) * 1000);
+    }
+  };
+
+  const handleAuditionRow = (rowKey: string) => {
+    if (!analysis) return;
+    const duration = (analysis.bars * 4 * 60) / analysis.bpm;
+    handlePlayBeat(0, duration, rowKey);
   };
 
   const handleSliceBeats = async () => {
@@ -165,21 +190,50 @@ export function InspectorTab({ track, loop, stems, analysis, onAnalyze }: Inspec
             {ROW_KEYS.map((rowKey) => {
               const stem = stems?.find((s) => s.key === rowKey);
               if (rowKey !== "loop" && !stem) return null;
+              const color = ROW_COLORS[rowKey] ?? "#7C5CFF";
+              const rowPlaying = activeRow === rowKey;
               return (
-                <div key={rowKey} className="flex items-center gap-2">
-                  <span className="w-32 text-xs text-muted shrink-0">{ROW_LABELS[rowKey]}</span>
+                <div
+                  key={rowKey}
+                  role="group"
+                  aria-label={`${ROW_LABELS[rowKey]} row`}
+                  className={clsx(
+                    "flex items-center gap-2 rounded-xl p-1",
+                    rowPlaying && "border-l-4"
+                  )}
+                  style={rowPlaying ? { borderLeftColor: color } : undefined}
+                >
+                  <Button
+                    aria-label={`Audition ${ROW_LABELS[rowKey]}`}
+                    aria-pressed={rowPlaying}
+                    pressed={rowPlaying}
+                    tone="accent"
+                    onClick={() => handleAuditionRow(rowKey)}
+                    className="!p-0 h-6 w-6 flex items-center justify-center shrink-0"
+                  >
+                    <Play size={10} />
+                  </Button>
+                  <span className="w-28 text-xs text-muted shrink-0">{ROW_LABELS[rowKey]}</span>
                   <div className="flex gap-1">
                     {beatColumns.map((beatTime, i) => {
                       const stepDur = beatColumns.length > 1 ? beatColumns[1] - beatColumns[0] : 0.25;
                       const lit = isLit(beatTime);
+                      const padId = `${rowKey}-${i}`;
+                      const isActive = activePad === padId;
                       return (
                         <button
                           key={i}
-                          onClick={() => handlePlayBeat(beatTime, beatTime + stepDur)}
+                          onClick={() => handlePlayBeat(beatTime, beatTime + stepDur, rowKey, padId)}
+                          data-pressed={isActive || undefined}
                           className={clsx(
-                            "w-6 h-6 rounded-md text-[9px]",
-                            lit ? "bg-accent neu-surface-pressed text-white" : "neu-surface-raised bg-surface text-muted"
+                            "w-6 h-6 rounded-md text-[9px] transition-[box-shadow,transform] duration-150 active:scale-90",
+                            isActive
+                              ? "neu-surface-pressed text-white"
+                              : lit
+                                ? "bg-accent/70 neu-surface-raised text-white"
+                                : "neu-surface-raised bg-surface text-muted"
                           )}
+                          style={isActive ? { backgroundColor: color, boxShadow: `0 0 10px ${color}` } : undefined}
                           aria-label={`Beat ${i + 1} ${rowKey}`}
                         />
                       );

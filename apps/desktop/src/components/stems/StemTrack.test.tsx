@@ -85,7 +85,64 @@ describe("StemTrack", () => {
         onDownload={onDownload}
       />
     );
-    fireEvent.click(screen.getByLabelText("Download WAV"));
+    fireEvent.click(screen.getByLabelText("Download Drums / Sub WAV"));
     expect(onDownload).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls onAudition and reflects pressed state when the per-track play button is clicked", () => {
+    const onAudition = vi.fn();
+    const { rerender } = render(
+      <StemTrack
+        stem={stem}
+        wavUrl="blob:mock"
+        solo={false}
+        mute={false}
+        volume={1}
+        isAuditioning={false}
+        onToggleSolo={vi.fn()}
+        onToggleMute={vi.fn()}
+        onVolumeChange={vi.fn()}
+        onDownload={vi.fn()}
+        onAudition={onAudition}
+      />
+    );
+    const playBtn = screen.getByLabelText("Play Drums / Sub only");
+    expect(playBtn).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(playBtn);
+    expect(onAudition).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <StemTrack
+        stem={stem}
+        wavUrl="blob:mock"
+        solo={false}
+        mute={false}
+        volume={1}
+        isAuditioning
+        onToggleSolo={vi.fn()}
+        onToggleMute={vi.fn()}
+        onVolumeChange={vi.fn()}
+        onDownload={vi.fn()}
+        onAudition={onAudition}
+      />
+    );
+    expect(screen.getByLabelText("Pause Drums / Sub only")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("shows a MUTED tag and dims the lane when muted", () => {
+    render(
+      <StemTrack
+        stem={stem}
+        wavUrl="blob:mock"
+        solo={false}
+        mute
+        volume={1}
+        onToggleSolo={vi.fn()}
+        onToggleMute={vi.fn()}
+        onVolumeChange={vi.fn()}
+        onDownload={vi.fn()}
+      />
+    );
+    expect(screen.getByText("MUTED")).toBeInTheDocument();
   });
 });

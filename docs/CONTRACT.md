@@ -46,7 +46,7 @@ interface StemInfo {
   index: 1|2|3|4;
   key: 'drums_sub'|'bass_lowmid'|'mid_vocals'|'highs_air';
   label: string;             // "Drums / Sub" etc.
-  band: string;              // "LP 130 Hz (LR4)" etc.
+  band: string;              // "LP 130 Hz (LR8)" etc.
   path: string;              // absolute wav path
   bytes: number;
   peakDb: number; rmsDb: number;   // from ffmpeg astats
@@ -81,7 +81,7 @@ Frontend loads wavs into Wavesurfer via `convertFileSrc(path)` from `@tauri-apps
 `src/lib/backend.ts` exports the typed API. If `window.__TAURI_INTERNALS__` is absent it uses `src/lib/backend.mock.ts`, which serves fixture data from `/public/fixtures/` (produced by the CLI seed run: `manifest.json` + wavs). Real Tauri path uses `invoke`.
 
 ## DSP spec (ffmpeg filter graph, single pass)
-Linkwitz-Riley 4th order = two cascaded 2nd-order Butterworth (Q=0.7071):
+Linkwitz-Riley 8th order = four cascaded 2nd-order Butterworth (Q=0.7071):
 - LP(f): `lowpass=f=F:p=2:t=q:w=0.7071,lowpass=f=F:p=2:t=q:w=0.7071`
 - HP(f): `highpass=f=F:p=2:t=q:w=0.7071,highpass=f=F:p=2:t=q:w=0.7071`
 - Stem1 drums_sub  : LP(130)

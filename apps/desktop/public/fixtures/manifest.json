@@ -24,41 +24,41 @@
       "index": 1,
       "key": "drums_sub",
       "label": "Drums / Sub",
-      "band": "LP 130 Hz (LR4)",
+      "band": "LP 130 Hz (LR8)",
       "path": "C:\\Users\\sebastian\\AppData\\Local\\AbsoluteSample\\work\\nRKgT3d6xoE\\stems\\01_drums_sub.wav",
       "bytes": 3967386,
-      "peakDb": -6.637339,
-      "rmsDb": -19.946476
+      "peakDb": -7.981493,
+      "rmsDb": -21.387972
     },
     {
       "index": 2,
       "key": "bass_lowmid",
       "label": "Bass / Low-Mid",
-      "band": "HP 130 Hz - LP 800 Hz (LR4)",
+      "band": "HP 130 Hz - LP 800 Hz (LR8)",
       "path": "C:\\Users\\sebastian\\AppData\\Local\\AbsoluteSample\\work\\nRKgT3d6xoE\\stems\\02_bass_lowmid.wav",
       "bytes": 3967386,
-      "peakDb": -2.528159,
-      "rmsDb": -17.779037
+      "peakDb": -3.449103,
+      "rmsDb": -19.345835
     },
     {
       "index": 3,
       "key": "mid_vocals",
       "label": "Mid / Vocals",
-      "band": "HP 800 Hz - LP 4500 Hz (LR4)",
+      "band": "HP 800 Hz - LP 4500 Hz (LR8)",
       "path": "C:\\Users\\sebastian\\AppData\\Local\\AbsoluteSample\\work\\nRKgT3d6xoE\\stems\\03_mid_vocals.wav",
       "bytes": 3967386,
-      "peakDb": -2.48959,
-      "rmsDb": -19.637594
+      "peakDb": -4.55789,
+      "rmsDb": -21.353132
     },
     {
       "index": 4,
       "key": "highs_air",
       "label": "Highs / Air",
-      "band": "HP 4500 Hz (LR4)",
+      "band": "HP 4500 Hz (LR8)",
       "path": "C:\\Users\\sebastian\\AppData\\Local\\AbsoluteSample\\work\\nRKgT3d6xoE\\stems\\04_highs_air.wav",
       "bytes": 3967386,
-      "peakDb": -10.766968,
-      "rmsDb": -38.06889
+      "peakDb": -11.871731,
+      "rmsDb": -39.991535
     }
   ],
   "analysis": {

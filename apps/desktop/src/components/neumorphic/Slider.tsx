@@ -72,7 +72,7 @@ export function Slider({
 
   return (
     <div
-      className={clsx("flex items-center gap-2", isVertical ? "flex-col h-32" : "flex-row w-32", className)}
+      className={clsx("flex items-center gap-2", isVertical ? "flex-col h-32" : "flex-row", !className?.includes("w-") && !isVertical && "w-32", className)}
       aria-label={label}
     >
       <div

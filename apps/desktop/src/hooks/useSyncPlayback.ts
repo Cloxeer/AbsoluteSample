@@ -29,6 +29,51 @@ export function computeGains(tracks: TrackGainState[]): Record<string, number> {
   return result;
 }
 
+export type TransportMode = "mix" | "audition";
+
+export interface TransportState {
+  mode: TransportMode;
+  auditionId: string | null;
+  isPlaying: boolean;
+}
+
+export type TransportAction =
+  | { type: "PLAY_MIX" }
+  | { type: "PAUSE" }
+  | { type: "STOP" }
+  | { type: "AUDITION"; id: string };
+
+/**
+ * Pure state machine for the transport's mode/audition/play-state. Kept separate from the
+ * imperative wavesurfer side-effects (in useSyncPlayback) so the transition logic itself is
+ * trivially unit-testable.
+ *
+ * Rules:
+ * - PLAY_MIX always switches to mix mode and starts playback.
+ * - STOP always resets to mix mode, no audition, stopped.
+ * - PAUSE keeps the current mode/audition target but stops playback.
+ * - AUDITION on the currently-playing auditioned track toggles it off (stops, back to mix/paused).
+ *   AUDITION on any other id (or while stopped) starts auditioning that id.
+ */
+export function nextTransportState(state: TransportState, action: TransportAction): TransportState {
+  switch (action.type) {
+    case "PLAY_MIX":
+      return { mode: "mix", auditionId: null, isPlaying: true };
+    case "STOP":
+      return { mode: "mix", auditionId: null, isPlaying: false };
+    case "PAUSE":
+      return { ...state, isPlaying: false };
+    case "AUDITION": {
+      if (state.mode === "audition" && state.auditionId === action.id && state.isPlaying) {
+        return { mode: "mix", auditionId: null, isPlaying: false };
+      }
+      return { mode: "audition", auditionId: action.id, isPlaying: true };
+    }
+    default:
+      return state;
+  }
+}
+
 export interface WaveSurferLike {
   play: () => void;
   pause: () => void;
@@ -44,7 +89,13 @@ export function useSyncPlayback() {
   const instancesRef = useRef<Map<string, WaveSurferLike>>(new Map());
   const masterIdRef = useRef<string | null>(null);
   const [tracks, setTracks] = useState<TrackGainState[]>([]);
-  const [isPlaying, setIsPlaying] = useState(false);
+  const [transport, setTransport] = useState<TransportState>({
+    mode: "mix",
+    auditionId: null,
+    isPlaying: false,
+  });
+  const transportRef = useRef(transport);
+  transportRef.current = transport;
   const [loopEnabled, setLoopEnabled] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const loopEnabledRef = useRef(false);
@@ -97,58 +148,103 @@ export function useSyncPlayback() {
     }
   }, []);
 
-  /** Called by every track on `timeupdate`; only the master drives the clock and re-syncs the others. */
+  /** The instance currently driving the on-screen clock: the audition target in audition mode, otherwise the mix master. */
+  const clockSourceId = useCallback(() => {
+    const t = transportRef.current;
+    return t.mode === "audition" ? t.auditionId : masterIdRef.current;
+  }, []);
+
+  /** Called by every track on `timeupdate`; only the active clock source drives the readout (and re-syncs the others in mix mode). */
   const handleTimeUpdate = useCallback(
     (sourceId: string, time: number) => {
-      if (sourceId !== masterIdRef.current) return;
+      if (sourceId !== clockSourceId()) return;
       setCurrentTime(time);
-      syncTime(sourceId, time);
+      if (transportRef.current.mode === "mix") syncTime(sourceId, time);
     },
-    [syncTime]
+    [clockSourceId, syncTime]
   );
 
-  /** Called by every track on `finish`; the master decides whether to loop or stop. */
+  /** Called by every track on `finish`; the active clock source decides whether to loop or stop. */
   const handleFinish = useCallback((sourceId: string) => {
-    if (sourceId !== masterIdRef.current) return;
+    if (sourceId !== clockSourceId()) return;
+    const t = transportRef.current;
     if (loopEnabledRef.current) {
-      for (const ws of instancesRef.current.values()) {
-        ws.setTime(0);
-        ws.play();
+      if (t.mode === "audition" && t.auditionId) {
+        const ws = instancesRef.current.get(t.auditionId);
+        ws?.setTime(0);
+        ws?.play();
+      } else {
+        for (const ws of instancesRef.current.values()) {
+          ws.setTime(0);
+          ws.play();
+        }
       }
       setCurrentTime(0);
     } else {
-      for (const ws of instancesRef.current.values()) ws.pause();
-      setIsPlaying(false);
+      if (t.mode === "audition" && t.auditionId) {
+        instancesRef.current.get(t.auditionId)?.pause();
+      } else {
+        for (const ws of instancesRef.current.values()) ws.pause();
+      }
+      setTransport((prev) => nextTransportState(prev, { type: "PAUSE" }));
     }
-  }, []);
+  }, [clockSourceId]);
 
   // Re-apply the solo/mute/volume gain matrix whenever it changes.
   useEffect(() => {
     applyGains();
   }, [applyGains]);
 
-  const play = useCallback(() => {
+  /** Play the full mix: pause any audition-only instance first, then play every registered track from its own position. */
+  const playMix = useCallback(() => {
     for (const ws of instancesRef.current.values()) ws.play();
-    setIsPlaying(true);
+    setTransport((prev) => nextTransportState(prev, { type: "PLAY_MIX" }));
   }, []);
 
   const pause = useCallback(() => {
-    for (const ws of instancesRef.current.values()) ws.pause();
-    setIsPlaying(false);
+    const t = transportRef.current;
+    if (t.mode === "audition" && t.auditionId) {
+      instancesRef.current.get(t.auditionId)?.pause();
+    } else {
+      for (const ws of instancesRef.current.values()) ws.pause();
+    }
+    setTransport((prev) => nextTransportState(prev, { type: "PAUSE" }));
   }, []);
 
   const togglePlay = useCallback(() => {
-    if (isPlaying) pause();
-    else play();
-  }, [isPlaying, play, pause]);
+    if (transportRef.current.isPlaying) pause();
+    else playMix();
+  }, [pause, playMix]);
 
-  const stop = useCallback(() => {
+  const stopAll = useCallback(() => {
     for (const ws of instancesRef.current.values()) {
       ws.pause();
       ws.setTime(0);
     }
-    setIsPlaying(false);
+    setTransport((prev) => nextTransportState(prev, { type: "STOP" }));
     setCurrentTime(0);
+  }, []);
+
+  /**
+   * Solo-audition a single track: pause every other instance, seek/play only `id`.
+   * Calling it again on the already-playing auditioned track stops it (toggle off).
+   */
+  const auditionTrack = useCallback((id: string) => {
+    const target = instancesRef.current.get(id);
+    const prevState = transportRef.current;
+    const turningOff = prevState.mode === "audition" && prevState.auditionId === id && prevState.isPlaying;
+
+    for (const [instanceId, ws] of instancesRef.current.entries()) {
+      if (instanceId !== id) ws.pause();
+    }
+
+    if (turningOff) {
+      target?.pause();
+    } else {
+      target?.play();
+    }
+
+    setTransport((prev) => nextTransportState(prev, { type: "AUDITION", id }));
   }, []);
 
   const toggleLoop = useCallback(() => setLoopEnabled((v) => !v), []);
@@ -164,11 +260,17 @@ export function useSyncPlayback() {
     handleTimeUpdate,
     handleFinish,
     currentTime,
-    play,
+    // legacy aliases kept for compatibility with the mix-everything transport
+    play: playMix,
     pause,
+    stop: stopAll,
     togglePlay,
-    stop,
-    isPlaying,
+    isPlaying: transport.isPlaying,
+    mode: transport.mode,
+    auditionId: transport.auditionId,
+    playMix,
+    stopAll,
+    auditionTrack,
     loopEnabled,
     toggleLoop,
   };

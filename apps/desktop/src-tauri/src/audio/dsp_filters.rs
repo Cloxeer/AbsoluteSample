@@ -7,31 +7,35 @@ use std::path::{Path, PathBuf};
 pub const STEM_KEYS: [&str; 4] = ["drums_sub", "bass_lowmid", "mid_vocals", "highs_air"];
 pub const STEM_LABELS: [&str; 4] = ["Drums / Sub", "Bass / Low-Mid", "Mid / Vocals", "Highs / Air"];
 pub const STEM_BANDS: [&str; 4] = [
-    "LP 130 Hz (LR4)",
-    "HP 130 Hz - LP 800 Hz (LR4)",
-    "HP 800 Hz - LP 4500 Hz (LR4)",
-    "HP 4500 Hz (LR4)",
+    "LP 130 Hz (LR8)",
+    "HP 130 Hz - LP 800 Hz (LR8)",
+    "HP 800 Hz - LP 4500 Hz (LR8)",
+    "HP 4500 Hz (LR8)",
 ];
 
-fn lr4_lp(f: u32) -> String {
-    format!("lowpass=f={f}:p=2:t=q:w=0.7071,lowpass=f={f}:p=2:t=q:w=0.7071")
+/// Linkwitz-Riley 8th order (48 dB/oct): four cascaded Q=0.7071 Butterworth 2nd-order sections.
+/// Steeper than LR4 so adjacent bands leak far less into each other while the bands still sum flat.
+fn lr_lp(f: u32) -> String {
+    let sec = format!("lowpass=f={f}:p=2:t=q:w=0.7071");
+    [sec.as_str(); 4].join(",")
 }
 
-fn lr4_hp(f: u32) -> String {
-    format!("highpass=f={f}:p=2:t=q:w=0.7071,highpass=f={f}:p=2:t=q:w=0.7071")
+fn lr_hp(f: u32) -> String {
+    let sec = format!("highpass=f={f}:p=2:t=q:w=0.7071");
+    [sec.as_str(); 4].join(",")
 }
 
 /// Builds the single-pass ffmpeg filter_complex graph string per the
 /// contract's DSP spec, producing 4 labeled outputs `[s1]..[s4]`.
 pub fn build_filter_graph() -> String {
-    let s1 = lr4_lp(130);
-    let s2 = format!("{},{}", lr4_hp(130), lr4_lp(800));
+    let s1 = lr_lp(130);
+    let s2 = format!("{},{}", lr_hp(130), lr_lp(800));
     let s3 = format!(
         "{},{},pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1",
-        lr4_hp(800),
-        lr4_lp(4500)
+        lr_hp(800),
+        lr_lp(4500)
     );
-    let s4 = format!("{},stereotools=mlev=0.6:slev=1.6", lr4_hp(4500));
+    let s4 = format!("{},stereotools=mlev=0.6:slev=1.6", lr_hp(4500));
 
     format!(
         "[0:a]asplit=4[a][b][c][d]; [a]{s1}[s1]; [b]{s2}[s2]; [c]{s3}[s3]; [d]{s4}[s4]"
@@ -129,12 +133,15 @@ mod tests {
     fn filter_graph_matches_contract_shape() {
         let g = build_filter_graph();
         assert!(g.starts_with("[0:a]asplit=4[a][b][c][d];"));
-        assert!(g.contains("[a]lowpass=f=130:p=2:t=q:w=0.7071,lowpass=f=130:p=2:t=q:w=0.7071[s1]"));
-        assert!(g.contains("highpass=f=130:p=2:t=q:w=0.7071,highpass=f=130:p=2:t=q:w=0.7071,lowpass=f=800:p=2:t=q:w=0.7071,lowpass=f=800:p=2:t=q:w=0.7071[s2]"));
+        assert_eq!(g.matches("lowpass=f=130:p=2:t=q:w=0.7071").count(), 4);
+        assert!(g.contains("[a]lowpass=f=130:p=2:t=q:w=0.7071,"));
+        assert_eq!(g.matches("highpass=f=130:p=2:t=q:w=0.7071").count(), 4);
+        assert!(g.contains("lowpass=f=800:p=2:t=q:w=0.7071[s2]"));
         assert!(g.contains("highpass=f=800"));
         assert!(g.contains("lowpass=f=4500"));
         assert!(g.contains("pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1[s3]"));
-        assert!(g.contains("highpass=f=4500:p=2:t=q:w=0.7071,highpass=f=4500:p=2:t=q:w=0.7071,stereotools=mlev=0.6:slev=1.6[s4]"));
+        assert_eq!(g.matches("highpass=f=4500:p=2:t=q:w=0.7071").count(), 4);
+        assert!(g.contains("highpass=f=4500:p=2:t=q:w=0.7071,stereotools=mlev=0.6:slev=1.6[s4]"));
     }
 
     #[test]

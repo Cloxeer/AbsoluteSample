@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Download } from "lucide-react";
 import WaveSurfer from "wavesurfer.js";
-import { Surface } from "@/components/neumorphic/Surface";
-import { Button } from "@/components/neumorphic/Button";
-import { Slider } from "@/components/neumorphic/Slider";
-import { formatDb } from "@/lib/format";
+import { TrackHeader } from "./TrackHeader";
+import { Playhead } from "@/components/waveform/Playhead";
 import type { StemInfo } from "@/lib/types";
 import clsx from "clsx";
 
@@ -21,10 +18,14 @@ export interface StemTrackProps {
   solo: boolean;
   mute: boolean;
   volume: number;
+  /** True while this stem is the audition (solo-play) target and actively playing. */
+  isAuditioning?: boolean;
+  currentTime?: number;
   onToggleSolo: () => void;
   onToggleMute: () => void;
   onVolumeChange: (v: number) => void;
   onDownload: () => void;
+  onAudition?: () => void;
   onReady?: (ws: WaveSurfer) => void;
   onTimeUpdate?: (time: number) => void;
   onFinish?: () => void;
@@ -37,10 +38,13 @@ export function StemTrack({
   solo,
   mute,
   volume,
+  isAuditioning = false,
+  currentTime = 0,
   onToggleSolo,
   onToggleMute,
   onVolumeChange,
   onDownload,
+  onAudition,
   onReady,
   onTimeUpdate,
   onFinish,
@@ -50,23 +54,27 @@ export function StemTrack({
   const wsRef = useRef<WaveSurfer | null>(null);
   const [peakDb] = useState(stem.peakDb);
   const [rmsDb] = useState(stem.rmsDb);
+  const [duration, setDuration] = useState(0);
+  const color = STEM_COLORS[stem.key] ?? "#7C5CFF";
 
   useEffect(() => {
     if (!containerRef.current || !wavUrl) return;
-    const color = STEM_COLORS[stem.key] ?? "#7C5CFF";
     const ws = WaveSurfer.create({
       container: containerRef.current,
       waveColor: color,
       progressColor: color,
       cursorColor: "#35D0FF",
-      height: 56,
+      height: 72,
       normalize: true,
       barWidth: 2,
       barGap: 1,
       url: wavUrl,
     });
     wsRef.current = ws;
-    ws.on("ready", () => onReady?.(ws));
+    ws.on("ready", () => {
+      setDuration(ws.getDuration());
+      onReady?.(ws);
+    });
     ws.on("timeupdate", (t) => onTimeUpdate?.(t));
     ws.on("finish", () => onFinish?.());
     return () => {
@@ -78,59 +86,32 @@ export function StemTrack({
   }, [wavUrl]);
 
   return (
-    <Surface variant="raised" className="flex items-center gap-4 p-3">
+    <div role="group" aria-label={`${stem.label} track`} className="flex items-stretch gap-3">
+      <TrackHeader
+        color={color}
+        name={stem.label}
+        band={stem.band}
+        isAuditioning={isAuditioning}
+        solo={solo}
+        mute={mute}
+        volume={volume}
+        peakDb={peakDb}
+        rmsDb={rmsDb}
+        onAudition={() => onAudition?.()}
+        onToggleSolo={onToggleSolo}
+        onToggleMute={onToggleMute}
+        onVolumeChange={onVolumeChange}
+        onDownload={onDownload}
+      />
       <div
-        className="w-1.5 self-stretch rounded-full"
-        style={{ backgroundColor: STEM_COLORS[stem.key] ?? "#7C5CFF" }}
-        aria-hidden
-      />
-      <div className="w-36 shrink-0">
-        <div className="text-sm font-semibold">{stem.label}</div>
-        <div className="text-xs text-muted">{stem.band}</div>
+        className={clsx(
+          "relative flex-1 min-w-0 rounded-2xl bg-surface neu-surface-raised p-2 transition-opacity duration-150",
+          mute && "opacity-35"
+        )}
+      >
+        <div className="min-w-0" ref={containerRef} data-testid={`waveform-${stem.key}`} />
+        <Playhead currentTime={currentTime} duration={duration} />
       </div>
-
-      <div className="flex-1 min-w-0" ref={containerRef} data-testid={`waveform-${stem.key}`} />
-
-      <div className="flex flex-col items-center gap-1 w-16 shrink-0 text-[10px] text-muted font-mono tabular-nums">
-        <span>{formatDb(peakDb)}</span>
-        <span>{formatDb(rmsDb)}</span>
-      </div>
-
-      <div className="flex items-center gap-1 shrink-0">
-        <Button
-          aria-label="Solo"
-          aria-pressed={solo}
-          pressed={solo}
-          onClick={onToggleSolo}
-          className={clsx("!px-2 !py-1 text-xs font-bold", solo && "text-accent")}
-        >
-          S
-        </Button>
-        <Button
-          aria-label="Mute"
-          aria-pressed={mute}
-          pressed={mute}
-          onClick={onToggleMute}
-          className={clsx("!px-2 !py-1 text-xs font-bold", mute && "text-stem-drums")}
-        >
-          M
-        </Button>
-      </div>
-
-      <Slider
-        orientation="vertical"
-        value={volume}
-        min={0}
-        max={1}
-        step={0.01}
-        onChange={onVolumeChange}
-        label={`${stem.label} volume`}
-        className="h-16 shrink-0"
-      />
-
-      <Button aria-label="Download WAV" onClick={onDownload} className="!px-2 !py-2 shrink-0">
-        <Download size={16} />
-      </Button>
-    </Surface>
+    </div>
   );
 }
