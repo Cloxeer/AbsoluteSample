@@ -120,6 +120,10 @@ export function InstrumentTrackList({
         onTogglePlay={() => onAudition(stem.key)}
         onVolumeChange={(v) => onUpsertTrack({ ...t, volume: v })}
         onDownload={() => handleDownload(stem)}
+        trackId={trackId}
+        songTitle={songTitle}
+        samples={samples}
+        onSampleSaved={onSampleSaved}
         extraAction={
           songTitle && loopStartSec !== undefined && loopEndSec !== undefined ? (
             <SaveSampleButton

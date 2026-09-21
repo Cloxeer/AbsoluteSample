@@ -6,9 +6,11 @@ import { InfoTip } from "@/components/neumorphic/InfoTip";
 import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { Slider } from "@/components/neumorphic/Slider";
 import { Playhead } from "@/components/waveform/Playhead";
+import { useLaneSelection, LaneSelectionChips } from "@/components/waveform/LaneSelection";
+import { LaneSelectionActions } from "./LaneSelectionActions";
 import { formatDb } from "@/lib/format";
 import { peaksOptions } from "@/lib/wavePeaks";
-import type { InstrumentGroup, InstrumentStem } from "@/lib/types";
+import type { InstrumentGroup, InstrumentStem, Sample } from "@/lib/types";
 import clsx from "clsx";
 
 const GROUP_COLORS: Record<InstrumentGroup, string> = {
@@ -101,6 +103,12 @@ export interface InstrumentTrackProps {
   onTimeUpdate?: (time: number) => void;
   onFinish?: () => void;
   onDestroy?: () => void;
+  /** Track id, for lane-selection save/download/slice actions. */
+  trackId?: string;
+  songTitle?: string;
+  samples?: Sample[];
+  /** Called after a lane-selection save/download/slice completes. */
+  onSampleSaved?: () => void;
 }
 
 export function InstrumentTrack({
@@ -118,12 +126,18 @@ export function InstrumentTrack({
   onTimeUpdate,
   onFinish,
   onDestroy,
+  trackId,
+  songTitle,
+  samples = [],
+  onSampleSaved,
 }: InstrumentTrackProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
   const [duration, setDuration] = useState(0);
+  const [ws, setWs] = useState<WaveSurfer | null>(null);
   const color = GROUP_COLORS[stem.group];
   const Icon = GROUP_ICONS[stem.group];
+  const { regionsPlugin, selection, clear } = useLaneSelection(ws);
 
   useEffect(() => {
     if (!containerRef.current || !wavUrl) return;
@@ -136,13 +150,15 @@ export function InstrumentTrack({
       normalize: true,
       barWidth: 2,
       barGap: 1,
-      cursorWidth: 0,
+      cursorWidth: 1,
       url: wavUrl,
+      plugins: [regionsPlugin],
       ...peaksOptions(stem.peaks, stem.durationSec),
     });
     wsRef.current = ws;
     ws.on("ready", () => {
       setDuration(ws.getDuration());
+      setWs(ws);
       onReady?.(ws);
     });
     ws.on("timeupdate", (t) => onTimeUpdate?.(t));
@@ -151,6 +167,8 @@ export function InstrumentTrack({
       onDestroy?.();
       ws.destroy();
       wsRef.current = null;
+      setWs(null);
+      clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wavUrl]);
@@ -223,9 +241,24 @@ export function InstrumentTrack({
           </div>
         )}
       </div>
-      <div className="relative flex-1 min-w-0 rounded-2xl bg-surface neu-surface-raised p-2 transition-opacity duration-150">
-        <div className="min-w-0" ref={containerRef} data-testid={`waveform-${stem.key}`} />
-        <Playhead currentTime={currentTime} duration={duration} />
+      <div className="flex-1 min-w-0 flex flex-col gap-1">
+        <div className="relative rounded-2xl bg-surface neu-surface-raised p-2 transition-opacity duration-150">
+          <div className="min-w-0" ref={containerRef} data-testid={`waveform-${stem.key}`} />
+          <Playhead currentTime={currentTime} duration={duration} />
+          <LaneSelectionChips selection={selection} durationSec={duration} />
+        </div>
+        {selection && trackId && songTitle && wavUrl && (
+          <LaneSelectionActions
+            trackId={trackId}
+            stemKey={stem.key}
+            stemLabel={stem.label}
+            songTitle={songTitle}
+            wavUrl={wavUrl}
+            selection={selection}
+            samples={samples}
+            onSaved={onSampleSaved}
+          />
+        )}
       </div>
     </div>
   );

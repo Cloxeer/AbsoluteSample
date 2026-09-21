@@ -3,6 +3,7 @@ import { CheckCircle2, Cpu, Loader2 } from "lucide-react";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
 import { onEngineProgress } from "@/lib/events";
+import { getLowPriority, setLowPriority } from "@/lib/lowPriority";
 import type { EngineProgressPayload, EngineStatus } from "@/lib/types";
 import clsx from "clsx";
 
@@ -22,6 +23,7 @@ const STAGE_LABELS: Record<string, string> = {
 
 export function EngineStatusCard({ status, installing, onInstall }: EngineStatusCardProps) {
   const [log, setLog] = useState<EngineProgressPayload[]>([]);
+  const [lowPriority, setLowPriorityState] = useState(() => getLowPriority());
   const unlistenRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -33,6 +35,12 @@ export function EngineStatusCard({ status, installing, onInstall }: EngineStatus
     return () => unlistenRef.current?.();
   }, []);
 
+  const toggleLowPriority = () => {
+    const next = !lowPriority;
+    setLowPriorityState(next);
+    setLowPriority(next);
+  };
+
   if (!status) return null;
 
   if (status.installed) {
@@ -41,6 +49,16 @@ export function EngineStatusCard({ status, installing, onInstall }: EngineStatus
         <CheckCircle2 size={14} className="text-ok" />
         <span className="text-text font-medium">AI engine ready</span>
         {status.gpuName && <span className="text-muted">{status.gpuName}</span>}
+        <Button
+          aria-label="Toggle low priority"
+          aria-pressed={lowPriority}
+          pressed={lowPriority}
+          tone="cyan"
+          onClick={toggleLowPriority}
+          className="!px-2 !py-1 text-[11px] ml-auto"
+        >
+          Low priority
+        </Button>
       </Surface>
     );
   }

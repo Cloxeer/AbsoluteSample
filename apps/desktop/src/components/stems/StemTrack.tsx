@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
 import { TrackHeader } from "./TrackHeader";
 import { Playhead } from "@/components/waveform/Playhead";
-import type { StemInfo } from "@/lib/types";
+import { useLaneSelection, LaneSelectionChips } from "@/components/waveform/LaneSelection";
+import { LaneSelectionActions } from "./LaneSelectionActions";
+import type { Sample, StemInfo } from "@/lib/types";
 import { peaksOptions } from "@/lib/wavePeaks";
 
 const STEM_COLORS: Record<string, string> = {
@@ -27,6 +29,12 @@ export interface StemTrackProps {
   onTimeUpdate?: (time: number) => void;
   onFinish?: () => void;
   onDestroy?: () => void;
+  /** Track id, for lane-selection save/download/slice actions. */
+  trackId?: string;
+  songTitle?: string;
+  samples?: Sample[];
+  /** Called after a lane-selection save/download/slice completes. */
+  onSampleSaved?: () => void;
 }
 
 export function StemTrack({
@@ -43,13 +51,19 @@ export function StemTrack({
   onTimeUpdate,
   onFinish,
   onDestroy,
+  trackId,
+  songTitle,
+  samples = [],
+  onSampleSaved,
 }: StemTrackProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
   const [peakDb] = useState(stem.peakDb);
   const [rmsDb] = useState(stem.rmsDb);
   const [duration, setDuration] = useState(0);
+  const [ws, setWs] = useState<WaveSurfer | null>(null);
   const color = STEM_COLORS[stem.key] ?? "#F25F5C";
+  const { regionsPlugin, selection, clear } = useLaneSelection(ws);
 
   useEffect(() => {
     if (!containerRef.current || !wavUrl) return;
@@ -62,13 +76,15 @@ export function StemTrack({
       normalize: true,
       barWidth: 2,
       barGap: 1,
-      cursorWidth: 0,
+      cursorWidth: 1,
       url: wavUrl,
+      plugins: [regionsPlugin],
       ...peaksOptions(stem.peaks, stem.durationSec),
     });
     wsRef.current = ws;
     ws.on("ready", () => {
       setDuration(ws.getDuration());
+      setWs(ws);
       onReady?.(ws);
     });
     ws.on("timeupdate", (t) => onTimeUpdate?.(t));
@@ -77,6 +93,8 @@ export function StemTrack({
       onDestroy?.();
       ws.destroy();
       wsRef.current = null;
+      setWs(null);
+      clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wavUrl]);
@@ -96,9 +114,24 @@ export function StemTrack({
         onDownload={onDownload}
         extraAction={extraAction}
       />
-      <div className="relative flex-1 min-w-0 rounded-2xl bg-surface neu-surface-raised p-2 transition-opacity duration-150">
-        <div className="min-w-0" ref={containerRef} data-testid={`waveform-${stem.key}`} />
-        <Playhead currentTime={currentTime} duration={duration} />
+      <div className="flex-1 min-w-0 flex flex-col gap-1">
+        <div className="relative rounded-2xl bg-surface neu-surface-raised p-2 transition-opacity duration-150">
+          <div className="min-w-0" ref={containerRef} data-testid={`waveform-${stem.key}`} />
+          <Playhead currentTime={currentTime} duration={duration} />
+          <LaneSelectionChips selection={selection} durationSec={duration} />
+        </div>
+        {selection && trackId && songTitle && wavUrl && (
+          <LaneSelectionActions
+            trackId={trackId}
+            stemKey={stem.key}
+            stemLabel={stem.label}
+            songTitle={songTitle}
+            wavUrl={wavUrl}
+            selection={selection}
+            samples={samples}
+            onSaved={onSampleSaved}
+          />
+        )}
       </div>
     </div>
   );

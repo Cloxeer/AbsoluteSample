@@ -1,7 +1,59 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { InstrumentTrack } from "./InstrumentTrack";
 import type { InstrumentStem } from "@/lib/types";
+
+vi.mock("wavesurfer.js", () => {
+  return {
+    default: {
+      create: vi.fn(() => ({
+        on: vi.fn(),
+        destroy: vi.fn(),
+        play: vi.fn(),
+        pause: vi.fn(),
+        setTime: vi.fn(),
+        getCurrentTime: vi.fn(() => 0),
+        getDuration: vi.fn(() => 10),
+        setVolume: vi.fn(),
+        isPlaying: vi.fn(() => false),
+      })),
+    },
+  };
+});
+
+const mockUseLaneSelection = vi.fn();
+
+vi.mock("@/components/waveform/LaneSelection", async () => {
+  const actual = await vi.importActual<typeof import("@/components/waveform/LaneSelection")>(
+    "@/components/waveform/LaneSelection"
+  );
+  return {
+    ...actual,
+    useLaneSelection: (...args: unknown[]) => mockUseLaneSelection(...args),
+  };
+});
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  save: vi.fn(),
+}));
+
+vi.mock("@/lib/backend", () => ({
+  backend: {
+    saveSample: vi.fn(),
+    cutRegion: vi.fn(),
+    sliceHits: vi.fn(),
+    saveStem: vi.fn(),
+  },
+}));
+
+vi.mock("@/lib/samplePlayer", () => ({
+  samplePlayer: {
+    subscribe: vi.fn(() => () => {}),
+    isPlaying: vi.fn(() => false),
+    playPath: vi.fn(),
+    stop: vi.fn(),
+  },
+}));
 
 const baseStem: InstrumentStem = {
   key: "guitar",
@@ -34,6 +86,10 @@ const baseProps = {
 };
 
 describe("InstrumentTrack", () => {
+  beforeEach(() => {
+    mockUseLaneSelection.mockReturnValue({ regionsPlugin: {}, selection: null, clear: vi.fn() });
+  });
+
   it("renders displayLabel in place of label when present", () => {
     render(<InstrumentTrack {...baseProps} stem={baseStem} />);
     expect(screen.getByText("Cello")).toBeInTheDocument();
@@ -68,5 +124,36 @@ describe("InstrumentTrack", () => {
     render(<InstrumentTrack {...baseProps} stem={baseStem} />);
     expect(screen.queryByLabelText(/^Solo/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/^Mute/)).not.toBeInTheDocument();
+  });
+
+  it("does not show the lane-selection actions row when there is no selection", () => {
+    render(
+      <InstrumentTrack
+        {...baseProps}
+        stem={baseStem}
+        wavUrl="mock/track/instruments/guitar.wav"
+        trackId="track1"
+        songTitle="My song"
+      />
+    );
+    expect(screen.queryByLabelText(`Download Guitar selection`)).not.toBeInTheDocument();
+  });
+
+  it("shows the lane-selection actions row once a selection is set", () => {
+    mockUseLaneSelection.mockReturnValue({
+      regionsPlugin: {},
+      selection: { start: 1, end: 2 },
+      clear: vi.fn(),
+    });
+    render(
+      <InstrumentTrack
+        {...baseProps}
+        stem={baseStem}
+        wavUrl="mock/track/instruments/guitar.wav"
+        trackId="track1"
+        songTitle="My song"
+      />
+    );
+    expect(screen.getByLabelText(`Download Guitar selection`)).toBeInTheDocument();
   });
 });
