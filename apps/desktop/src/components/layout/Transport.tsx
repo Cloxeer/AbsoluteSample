@@ -110,7 +110,7 @@ export function Transport({
 
         <Surface variant="raised" className="flex items-center gap-3 px-4 py-2">
           <PlayPauseButton
-            playing={isPlaying && mode === "mix"}
+            playing={isPlaying}
             onToggle={onPlayPause}
             label="mix"
             size={18}
@@ -143,7 +143,7 @@ export function Transport({
               mode === "audition" ? "text-cyan border-cyan/30 bg-cyan/5" : "text-muted border-white/10"
             )}
           >
-            {mode === "audition" && auditionLabel ? `Solo: ${auditionLabel}` : "Mix"}
+            {mode === "audition" && auditionLabel ? auditionLabel : "Mix"}
           </span>
           <div className="flex items-center gap-2 pl-2 border-l border-white/[0.06]">
             <span className="text-[10px] text-muted uppercase">Vol</span>

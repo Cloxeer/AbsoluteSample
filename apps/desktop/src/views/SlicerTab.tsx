@@ -14,6 +14,7 @@ import { useSyncPlayback } from "@/hooks/useSyncPlayback";
 import { backend } from "@/lib/backend";
 import { onProgress } from "@/lib/events";
 import { formatTime } from "@/lib/format";
+import { nowPlaying } from "@/lib/nowPlaying";
 import type { EngineStatus, ProgressPayload, Sample } from "@/lib/types";
 import WaveSurfer from "wavesurfer.js";
 import { peaksOptions } from "@/lib/wavePeaks";
@@ -76,6 +77,7 @@ function LoopPreview({
   const wsRef = useRef<WaveSurfer | null>(null);
   const [url, setUrl] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
+  const isNowPlayingSourceRef = useRef(false);
 
   useEffect(() => {
     let alive = true;
@@ -100,14 +102,38 @@ function LoopPreview({
       normalize: true,
       ...peaksOptions(peaks, endSec - startSec),
     });
-    ws.on("play", () => setPlaying(true));
-    ws.on("pause", () => setPlaying(false));
-    ws.on("finish", () => setPlaying(false));
+    ws.on("play", () => {
+      setPlaying(true);
+      isNowPlayingSourceRef.current = true;
+      nowPlaying.start("loop", "Loop", endSec - startSec, {
+        pause: () => ws.pause(),
+        resume: () => void ws.play(),
+        stop: () => ws.pause(),
+      });
+    });
+    ws.on("timeupdate", (t) => {
+      if (isNowPlayingSourceRef.current) nowPlaying.tick(t);
+    });
+    ws.on("pause", () => {
+      setPlaying(false);
+      if (isNowPlayingSourceRef.current) {
+        isNowPlayingSourceRef.current = false;
+        nowPlaying.setPlaying(false);
+      }
+    });
+    ws.on("finish", () => {
+      setPlaying(false);
+      if (isNowPlayingSourceRef.current) {
+        isNowPlayingSourceRef.current = false;
+        nowPlaying.stop();
+      }
+    });
     wsRef.current = ws;
     return () => {
       ws.destroy();
       wsRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url]);
 
   return (

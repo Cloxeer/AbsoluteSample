@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { mixEngine } from "@/lib/mixEngine";
 import { samplePlayer } from "@/lib/samplePlayer";
+import { nowPlaying } from "@/lib/nowPlaying";
 
 export interface TrackGainState {
   id: string;
@@ -209,6 +210,7 @@ export function useSyncPlayback() {
     const tick = () => {
       const t = mixEngine.currentTime();
       setCurrentTime(t);
+      nowPlaying.tick(t);
       const mode = transportRef.current.mode;
       if (mode === "mix") {
         for (const [id, ws] of instancesRef.current.entries()) {
@@ -223,6 +225,12 @@ export function useSyncPlayback() {
     return () => cancelAnimationFrame(raf);
   }, [transport.isPlaying]);
 
+  const mixControllerRef = useRef<{ pause(): void; resume(): void; stop(): void }>({
+    pause: () => mixEngine.pause(),
+    resume: () => mixEngine.play(mixEngine.currentTime()),
+    stop: () => mixEngine.stop(),
+  });
+
   /** Play the full mix through mixEngine, from its current position. Display wavesurfer instances follow along but never emit audio. */
   const playMix = useCallback(async () => {
     samplePlayer.stop();
@@ -235,11 +243,13 @@ export function useSyncPlayback() {
       if (inMixRef.current.get(id) !== false) ws.pause();
     }
     mixEngine.play(mixEngine.currentTime());
+    nowPlaying.start("mix", "Mix", 0, mixControllerRef.current);
     setTransport((prev) => nextTransportState(prev, { type: "PLAY_MIX" }));
   }, [mixTrackDefs]);
 
   const pause = useCallback(() => {
     mixEngine.pause();
+    nowPlaying.setPlaying(false);
     setTransport((prev) => nextTransportState(prev, { type: "PAUSE" }));
   }, []);
 
@@ -250,6 +260,7 @@ export function useSyncPlayback() {
 
   const stopAll = useCallback(() => {
     mixEngine.stop();
+    nowPlaying.stop();
     for (const [, ws] of instancesRef.current.entries()) {
       ws.pause();
       ws.setTime(0);
@@ -275,9 +286,17 @@ export function useSyncPlayback() {
 
       if (turningOff) {
         mixEngine.pause();
+        nowPlaying.setPlaying(false);
         setTransport((prev) => nextTransportState(prev, { type: "AUDITION", id }));
         return;
       }
+
+      const auditionController = {
+        pause: () => mixEngine.pause(),
+        resume: () => mixEngine.play(mixEngine.currentTime()),
+        stop: () => mixEngine.stop(),
+      };
+      nowPlaying.start("audition", `Solo: ${id}`, 0, auditionController);
 
       const url = urlsRef.current.get(id);
       if (url) {

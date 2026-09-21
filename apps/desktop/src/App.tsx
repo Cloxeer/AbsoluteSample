@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Transport } from "@/components/layout/Transport";
 import { Stepper } from "@/components/layout/Stepper";
 import { Tabs } from "@/components/layout/Tabs";
@@ -11,6 +11,7 @@ import { useSyncPlayback } from "@/hooks/useSyncPlayback";
 import { useJobs } from "@/hooks/useJobs";
 import { samplePlayer } from "@/lib/samplePlayer";
 import { mixEngine } from "@/lib/mixEngine";
+import { nowPlaying } from "@/lib/nowPlaying";
 import { backend } from "@/lib/backend";
 import type { DependencyReport, LibraryEntry, Sample } from "@/lib/types";
 
@@ -31,6 +32,7 @@ export default function App() {
   const [deps, setDeps] = useState<DependencyReport | null>(null);
   const [masterVolume, setMasterVolume] = useState(1);
   const sync = useSyncPlayback();
+  const npState = useSyncExternalStore(nowPlaying.subscribe.bind(nowPlaying), nowPlaying.getState.bind(nowPlaying));
   const engineApi = useAudioEngine();
   const { engine, analyzeLoop } = engineApi;
   const { jobs } = useJobs();
@@ -135,25 +137,30 @@ export default function App() {
   const currentStep = activeTab === "inspector" ? "matrix" : !engine.track ? "source" : !engine.loop ? "loop" : "stems";
 
   const handlePlayPause = useCallback(() => {
-    if (sync.isPlaying) {
-      sync.stopAll();
-      samplePlayer.stop();
+    if (npState.isPlaying) {
+      nowPlaying.pause();
+    } else if (npState.kind !== null) {
+      nowPlaying.resume();
     } else {
-      sync.togglePlay();
+      void sync.playMix();
     }
-  }, [sync]);
+  }, [sync, npState.isPlaying, npState.kind]);
 
+  const transportMode: "mix" | "audition" = npState.kind === null || npState.kind === "mix" ? "mix" : "audition";
   const auditionLabel = useMemo(() => {
-    if (sync.mode !== "audition" || !sync.auditionId) return null;
-    return engine.stems?.find((s) => s.key === sync.auditionId)?.label ?? sync.auditionId;
-  }, [sync.mode, sync.auditionId, engine.stems]);
+    if (transportMode !== "audition") return null;
+    if (npState.kind === "audition" && sync.auditionId) {
+      return engine.stems?.find((s) => s.key === sync.auditionId)?.label ?? sync.auditionId;
+    }
+    return npState.label || null;
+  }, [transportMode, npState.kind, npState.label, sync.auditionId, engine.stems]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.code === "Space") {
         e.preventDefault();
-        sync.togglePlay();
+        handlePlayPause();
       } else if (e.key.toLowerCase() === "l") {
         sync.toggleLoop();
       } else if (e.key === "Escape") {
@@ -174,7 +181,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [sync, stemOrder, engine.stems]);
+  }, [sync, stemOrder, engine.stems, handlePlayPause]);
 
   // Per-song jobs: when a job for another song finishes, refresh only the library listing.
   const prevJobIdsRef = useRef<Set<string>>(new Set());
@@ -211,9 +218,9 @@ export default function App() {
     <div className="min-h-screen bg-bg text-text flex flex-col gap-4">
       <Transport
         deps={deps}
-        isPlaying={sync.isPlaying}
-        currentTime={sync.currentTime}
-        mode={sync.mode}
+        isPlaying={npState.isPlaying}
+        currentTime={npState.time}
+        mode={transportMode}
         auditionLabel={auditionLabel}
         loopEnabled={sync.loopEnabled}
         bpm={engine.analysis?.bpm ?? null}
@@ -226,6 +233,7 @@ export default function App() {
         otherSongJob={otherSongJob}
         onPlayPause={handlePlayPause}
         onStop={() => {
+          nowPlaying.stop();
           sync.stopAll();
           samplePlayer.stop();
         }}

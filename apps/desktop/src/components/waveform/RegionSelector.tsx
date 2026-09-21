@@ -7,6 +7,7 @@ import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
 import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { formatTime } from "@/lib/format";
+import { nowPlaying } from "@/lib/nowPlaying";
 
 export interface RegionSelectorProps {
   wavUrl: string;
@@ -92,6 +93,10 @@ export function RegionSelector({
   const [sourcePlaying, setSourcePlaying] = useState(false);
   const [selectionPlaying, setSelectionPlaying] = useState(false);
   const selectionStopAt = useRef<number | null>(null);
+  const nextPlayLabelRef = useRef<string>("Source");
+  const isNowPlayingSourceRef = useRef(false);
+  const startRef = useRef(start);
+  startRef.current = start;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -131,20 +136,46 @@ export function RegionSelector({
 
     ws.on("timeupdate", (t) => {
       setPlayhead(t);
+      if (isNowPlayingSourceRef.current) nowPlaying.tick(t);
       if (selectionStopAt.current !== null && t >= selectionStopAt.current) {
         ws.pause();
       }
     });
-    ws.on("play", () => setSourcePlaying(true));
+    ws.on("play", () => {
+      setSourcePlaying(true);
+      isNowPlayingSourceRef.current = true;
+      const dur = selectionStopAt.current !== null ? Math.max(0, selectionStopAt.current - ws.getCurrentTime()) : ws.getDuration();
+      nowPlaying.start(
+        "source",
+        nextPlayLabelRef.current,
+        dur,
+        {
+          pause: () => ws.pause(),
+          resume: () => void ws.play(),
+          stop: () => {
+            ws.pause();
+            ws.setTime(startRef.current);
+          },
+        }
+      );
+    });
     ws.on("pause", () => {
       setSourcePlaying(false);
       setSelectionPlaying(false);
       selectionStopAt.current = null;
+      if (isNowPlayingSourceRef.current) {
+        isNowPlayingSourceRef.current = false;
+        nowPlaying.setPlaying(false);
+      }
     });
     ws.on("finish", () => {
       setSourcePlaying(false);
       setSelectionPlaying(false);
       selectionStopAt.current = null;
+      if (isNowPlayingSourceRef.current) {
+        isNowPlayingSourceRef.current = false;
+        nowPlaying.stop();
+      }
     });
 
     regions.on("region-updated", (region: Region) => {
@@ -194,7 +225,10 @@ export function RegionSelector({
     if (!ws) return;
     selectionStopAt.current = null;
     if (ws.isPlaying()) ws.pause();
-    else ws.play();
+    else {
+      nextPlayLabelRef.current = "Source";
+      ws.play();
+    }
   };
 
   const stop = () => {
@@ -203,6 +237,10 @@ export function RegionSelector({
     selectionStopAt.current = null;
     ws.pause();
     ws.setTime(start);
+    if (isNowPlayingSourceRef.current) {
+      isNowPlayingSourceRef.current = false;
+      nowPlaying.stop();
+    }
   };
 
   const toggleSelectionPlay = () => {
@@ -215,6 +253,7 @@ export function RegionSelector({
     }
     selectionStopAt.current = end;
     setSelectionPlaying(true);
+    nextPlayLabelRef.current = "Selection";
     ws.setTime(start);
     ws.play();
   };

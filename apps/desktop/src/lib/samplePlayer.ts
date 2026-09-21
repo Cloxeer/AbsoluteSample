@@ -1,5 +1,6 @@
 import type { Sample } from "./types";
 import { mixEngine } from "./mixEngine";
+import { nowPlaying } from "./nowPlaying";
 
 export interface SamplePlayerState {
   id: string | null;
@@ -18,6 +19,8 @@ class SamplePlayerSingleton {
   private listeners = new Set<Listener>();
   private rafId: number | null = null;
   private endTime: number | null = null;
+  /** True while this player is the source nowPlaying is tracking, so stop()/handleEnded() know whether to reset it. */
+  private isNowPlayingSource = false;
 
   private ensureAudio(): HTMLAudioElement {
     if (!this.audio) {
@@ -31,6 +34,10 @@ class SamplePlayerSingleton {
     this.currentId = null;
     this.endTime = null;
     this.stopTicking();
+    if (this.isNowPlayingSource) {
+      this.isNowPlayingSource = false;
+      nowPlaying.stop();
+    }
     this.emit();
   }
 
@@ -40,6 +47,7 @@ class SamplePlayerSingleton {
       this.stop();
       return;
     }
+    nowPlaying.tick(this.audio.currentTime);
     this.emit();
     this.rafId = requestAnimationFrame(this.tick);
   };
@@ -66,11 +74,15 @@ class SamplePlayerSingleton {
 
   /** Plays a sample from the start (or the given slice), stopping any previous playback first. */
   play(sample: Sample, url: string, opts?: { start?: number; end?: number }): void {
-    this.playPath(sample.id, url, opts);
+    this.playPath(sample.id, url, { ...opts, kind: "sample", label: sample.name });
   }
 
   /** Sibling of play(): auditions an arbitrary slice of a wav by url/id (e.g. a Beat Matrix pad), not requiring a full Sample. */
-  playPath(id: string, url: string, opts?: { start?: number; end?: number }): void {
+  playPath(
+    id: string,
+    url: string,
+    opts?: { start?: number; end?: number; kind?: "sample" | "pad"; label?: string }
+  ): void {
     this.stop();
     if (mixEngine.isPlaying) mixEngine.pause();
     const audio = this.ensureAudio();
@@ -78,6 +90,15 @@ class SamplePlayerSingleton {
     audio.currentTime = opts?.start ?? 0;
     this.endTime = opts?.end ?? null;
     this.currentId = id;
+    const kind = opts?.kind ?? "sample";
+    const label = opts?.label ?? id;
+    const duration = (opts?.end ?? 0) - (opts?.start ?? 0);
+    nowPlaying.start(kind, label, duration > 0 ? duration : 0, {
+      pause: () => this.audio?.pause(),
+      resume: () => void this.audio?.play(),
+      stop: () => this.stop(),
+    });
+    this.isNowPlayingSource = true;
     void audio.play();
     this.startTicking();
     this.emit();
@@ -95,6 +116,10 @@ class SamplePlayerSingleton {
     this.currentId = null;
     this.endTime = null;
     this.stopTicking();
+    if (this.isNowPlayingSource) {
+      this.isNowPlayingSource = false;
+      nowPlaying.stop();
+    }
     this.emit();
   }
 

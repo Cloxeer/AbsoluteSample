@@ -31,10 +31,20 @@ describe("Transport", () => {
     expect(onPlayPause).toHaveBeenCalledTimes(1);
   });
 
-  it("shows the audition caption and Solo chip while in audition mode", () => {
-    render(<Transport {...baseProps} mode="audition" auditionLabel="Drums / Sub" />);
-    expect(screen.getByText("Solo: Drums / Sub")).toBeInTheDocument();
+  it("shows the audition caption and chip while in audition mode", () => {
+    render(<Transport {...baseProps} mode="audition" auditionLabel="Solo: Drums / Sub" />);
+    expect(screen.getAllByText("Solo: Drums / Sub").length).toBeGreaterThan(0);
     expect(screen.getByText(/Auditioning/)).toBeInTheDocument();
+  });
+
+  it("shows the nowPlaying label (e.g. a sample or loop name) as the chip", () => {
+    render(<Transport {...baseProps} mode="audition" auditionLabel="Selection" />);
+    expect(screen.getAllByText("Selection").length).toBeGreaterThan(0);
+  });
+
+  it("reflects nowPlaying.isPlaying directly, independent of mode", () => {
+    render(<Transport {...baseProps} isPlaying mode="audition" auditionLabel="Kick" />);
+    expect(screen.getByLabelText("Pause mix")).toBeInTheDocument();
   });
 
   it("toggles loop with an obvious pressed state", () => {

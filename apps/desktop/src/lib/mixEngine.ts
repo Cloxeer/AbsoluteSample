@@ -217,6 +217,12 @@ export class MixEngine {
   get isPlaying(): boolean {
     return this._isPlaying;
   }
+
+  /** Estimated output latency in seconds; 0 if no AudioContext has been created yet. */
+  outputLatency(): number {
+    if (!this._ctx) return 0;
+    return this._ctx.outputLatency || this._ctx.baseLatency || 0;
+  }
 }
 
 /** Shared singleton used by the app; tests construct their own MixEngine with a fake AudioContext. */
