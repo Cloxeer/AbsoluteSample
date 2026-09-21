@@ -5,6 +5,8 @@ export interface DependencyReport {
   ok: boolean;
 }
 
+export type SourceKind = "local" | "youtube";
+
 export interface TrackInfo {
   id: string;
   title: string;
@@ -17,6 +19,7 @@ export interface TrackInfo {
   codec: string;
   workDir: string;
   peaks?: number[];
+  sourceKind?: SourceKind;
 }
 
 export interface LoopInfo {
@@ -44,6 +47,13 @@ export interface StemInfo {
   durationSec?: number;
 }
 
+export interface KeyDetection {
+  tonic: string;
+  mode: "major" | "minor";
+  confidence: number;
+  camelot: string;
+}
+
 export interface LoopAnalysis {
   bpm: number;
   confidence: number;
@@ -53,6 +63,7 @@ export interface LoopAnalysis {
   onsetEnvelope: number[];
   peakDb: number;
   rmsDb: number;
+  key?: KeyDetection;
 }
 
 export interface SliceInfo {
@@ -88,6 +99,8 @@ export interface EngineStatus {
   gpuName: string | null;
   modelsPresent: string[];
   enginePath: string;
+  busy?: boolean;
+  busyTrackId?: string | null;
 }
 
 export type InstrumentGroup = "vocals" | "drums" | "bass" | "guitar" | "keys" | "other";
@@ -107,6 +120,9 @@ export interface InstrumentStem {
   durationSec?: number;
   tags?: { label: string; score: number }[];
   soundsLike?: string | null;
+  displayLabel?: string;
+  detections?: { label: string; score: number }[];
+  confidence?: { score: number; reasons: string[] };
 }
 
 export interface InstrumentsResult {
@@ -168,6 +184,8 @@ export interface Job {
 
 // v4 addendum: scans vs kept songs, and samples
 
+export type SampleKind = "stem" | "region" | "hit";
+
 export interface Sample {
   id: string;
   name: string;
@@ -184,6 +202,9 @@ export interface Sample {
   bpm: number | null;
   createdAt: string;
   peaks?: number[];
+  kind?: SampleKind;
+  keyShort?: string | null;
+  bars?: number | null;
 }
 
 export interface LibrarySize {
@@ -191,4 +212,34 @@ export interface LibrarySize {
   tracks: number;
   scans: number;
   samplesBytes: number;
+  trashBytes?: number;
+}
+
+// v6 addendum
+
+export type RegionSnap = "none" | "beat" | "bar";
+
+export interface RegionParams {
+  startSec: number;
+  endSec: number;
+  snap: RegionSnap;
+  fadeMs?: number;
+  trimLeadingSilence?: boolean;
+}
+
+export interface CutRegionResult {
+  path: string;
+  startSec: number;
+  endSec: number;
+  bars: number | null;
+  peaks: number[];
+  durationSec: number;
+}
+
+export interface TrashEntry {
+  id: string;
+  kind: "track" | "sample";
+  name: string;
+  deletedAt: string;
+  bytes: number;
 }

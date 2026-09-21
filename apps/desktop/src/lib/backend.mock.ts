@@ -1,5 +1,6 @@
 import { emitMockEngineProgress, emitMockProgress } from "./events";
 import type {
+  CutRegionResult,
   DependencyReport,
   EngineStatus,
   InstrumentGroup,
@@ -7,12 +8,14 @@ import type {
   LibraryEntry,
   LoopAnalysis,
   LoopInfo,
+  RegionParams,
   Sample,
   SliceInfo,
   StemInfo,
   StemKey,
   TrackInfo,
   TrackSession,
+  TrashEntry,
 } from "./types";
 
 const INSTRUMENT_DEFS: { key: string; label: string; group: InstrumentGroup; parent: string | null; order: number; freq: number }[] = [
@@ -296,11 +299,29 @@ const GUITAR_TAGS = [
   { label: "Guitar", score: 0.21 },
 ];
 
+const GUITAR_DETECTIONS = [
+  { label: "Cello", score: 0.22 },
+  { label: "Bowed string instrument", score: 0.15 },
+  { label: "Violin", score: 0.11 },
+];
+
+const GUITAR_CONFIDENCE = { score: 0.64, reasons: ["strong Cello tag 0.22", "some leakage into Other 0.31"] };
+
 function decorateInstruments(stems: InstrumentStem[], loopDurationSec: number): InstrumentStem[] {
   return stems.map((s) => {
     const out = withPeaks(s, s.path, loopDurationSec);
     if (s.key === "guitar" || (s.group === "guitar" && s.parent === null)) {
-      return { ...out, soundsLike: out.soundsLike ?? "Strings", tags: out.tags && out.tags.length > 0 ? out.tags : GUITAR_TAGS };
+      return {
+        ...out,
+        soundsLike: out.soundsLike ?? "Strings",
+        tags: out.tags && out.tags.length > 0 ? out.tags : GUITAR_TAGS,
+        displayLabel: out.displayLabel ?? "Strings",
+        detections: out.detections && out.detections.length > 0 ? out.detections : GUITAR_DETECTIONS,
+        confidence: out.confidence ?? GUITAR_CONFIDENCE,
+      };
+    }
+    if (s.key === "other" || (s.group === "other" && s.parent === null)) {
+      return { ...out, displayLabel: out.displayLabel ?? "Accordion" };
     }
     return out;
   });
@@ -340,6 +361,14 @@ interface LibraryRecord {
 let libraryStore: Map<string, LibraryRecord> | null = null;
 let sampleStore: Sample[] = [];
 const MAX_SCANS = 3;
+
+interface TrashRecord {
+  entry: TrashEntry;
+  restoreTrack?: { id: string; rec: LibraryRecord };
+  restoreSample?: Sample;
+}
+let trashStore: TrashRecord[] = [];
+let engineBusyTrackId: string | null = null;
 
 function estimateBytes(durationSec: number, hasLoop: boolean, hasBands: boolean, hasInstruments: boolean): number {
   const pcmBytesPerSec = 44100 * 2 * 2;
@@ -688,10 +717,17 @@ export async function setKept(trackId: string, kept: boolean): Promise<LibraryEn
 
 export async function deleteTrack(trackId: string): Promise<void> {
   const store = await getLibraryStore();
+  const rec = store.get(trackId);
+  if (rec) {
+    trashStore = [
+      { entry: { id: trackId, kind: "track", name: rec.entry.title, deletedAt: new Date().toISOString(), bytes: rec.entry.bytes }, restoreTrack: { id: trackId, rec } },
+      ...trashStore,
+    ];
+  }
   store.delete(trackId);
 }
 
-export async function librarySize(): Promise<{ bytes: number; tracks: number; scans: number; samplesBytes: number }> {
+export async function librarySize(): Promise<{ bytes: number; tracks: number; scans: number; samplesBytes: number; trashBytes: number }> {
   const store = await getLibraryStore();
   const values = Array.from(store.values());
   return {
@@ -699,7 +735,36 @@ export async function librarySize(): Promise<{ bytes: number; tracks: number; sc
     tracks: values.length,
     scans: values.filter((r) => !r.entry.kept).length,
     samplesBytes: sampleStore.reduce((sum, s) => sum + s.bytes, 0),
+    trashBytes: trashStore.reduce((sum, t) => sum + t.entry.bytes, 0),
   };
+}
+
+export async function listTrash(): Promise<TrashEntry[]> {
+  return trashStore.map((t) => t.entry);
+}
+
+export async function restoreTrash(args: { id: string }): Promise<void> {
+  const t = trashStore.find((x) => x.entry.id === args.id);
+  if (!t) return;
+  if (t.restoreTrack) {
+    const store = await getLibraryStore();
+    store.set(t.restoreTrack.id, t.restoreTrack.rec);
+  }
+  if (t.restoreSample) {
+    sampleStore = [t.restoreSample, ...sampleStore];
+  }
+  trashStore = trashStore.filter((x) => x.entry.id !== args.id);
+}
+
+export async function emptyTrash(): Promise<void> {
+  trashStore = [];
+}
+
+export async function clearScans(): Promise<void> {
+  const store = await getLibraryStore();
+  for (const [id, rec] of Array.from(store.entries())) {
+    if (!rec.entry.kept) store.delete(id);
+  }
 }
 
 export async function trimLoop(_args: { trackId: string; startSec: number; endSec: number }): Promise<LoopInfo> {
@@ -808,6 +873,8 @@ export async function engineStatus(): Promise<EngineStatus> {
     gpuName: cachedEngineInstalled ? "Mock GPU" : null,
     modelsPresent: cachedEngineInstalled ? ["htdemucs_6s"] : [],
     enginePath: "mock/engine",
+    busy: engineBusyTrackId !== null,
+    busyTrackId: engineBusyTrackId,
   };
 }
 
@@ -889,7 +956,8 @@ export async function analyzeFile(args: { path: string }): Promise<LoopAnalysis>
   return synthesizeAnalysis(bpm, 15);
 }
 
-export async function separateInstruments(args: { trackId: string }): Promise<{ stems: InstrumentStem[]; elapsedSec: number; passSeconds: Record<string, number>; device: string; failedPasses: string[] }> {
+export async function separateInstruments(args: { trackId: string; passes?: string[]; lowPriority?: boolean }): Promise<{ stems: InstrumentStem[]; elapsedSec: number; passSeconds: Record<string, number>; device: string; failedPasses: string[] }> {
+  engineBusyTrackId = args.trackId;
   const mockFail = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("mockfail") === "1";
   const passes: { pass: string; message: string }[] = [
     { pass: "instruments", message: "Separating instruments (Demucs)..." },
@@ -934,6 +1002,7 @@ export async function separateInstruments(args: { trackId: string }): Promise<{ 
     rec.instruments = stems;
     rec.entry = { ...rec.entry, hasInstruments: true, instrumentCount: stems.length };
   }
+  engineBusyTrackId = null;
   return { stems, elapsedSec, passSeconds, device: "cpu (mock)", failedPasses };
 }
 
@@ -956,16 +1025,151 @@ function findSampleSource(rec: LibraryRecord, stemKey: string): { path: string; 
   return null;
 }
 
-export async function saveSample(args: { trackId: string; stemKey: string; name?: string }): Promise<Sample> {
+function snapRegion(startSec: number, endSec: number, snap: "none" | "beat" | "bar", analysis: LoopAnalysis | null): { startSec: number; endSec: number; bars: number | null } {
+  if (snap === "none" || !analysis || analysis.beatGrid.length === 0) {
+    return { startSec, endSec, bars: null };
+  }
+  const grid = analysis.beatGrid;
+  const nearest = (t: number) => grid.reduce((best, g) => (Math.abs(g - t) < Math.abs(best - t) ? g : best), grid[0]);
+  let snappedStart = nearest(startSec);
+  let snappedEnd = nearest(endSec);
+  if (snap === "bar") {
+    const barLen = (60 / analysis.bpm) * 4;
+    snappedStart = Math.round(snappedStart / barLen) * barLen;
+    snappedEnd = Math.round(snappedEnd / barLen) * barLen;
+  }
+  if (snappedEnd <= snappedStart) snappedEnd = snappedStart + 60 / analysis.bpm;
+  const barLen = (60 / analysis.bpm) * 4;
+  const bars = Math.max(1, Math.round((snappedEnd - snappedStart) / barLen));
+  return { startSec: Number(snappedStart.toFixed(3)), endSec: Number(snappedEnd.toFixed(3)), bars };
+}
+
+export async function cutRegion(args: { trackId: string; stemKey: string; startSec: number; endSec: number; snap: "none" | "beat" | "bar"; fadeMs?: number; trimLeadingSilence?: boolean }): Promise<CutRegionResult> {
+  const store = await getLibraryStore();
+  const rec = store.get(args.trackId);
+  if (!rec) throw new Error(`Unknown track: ${args.trackId}`);
+  const source = findSampleSource(rec, args.stemKey);
+  if (!source) throw new Error(`Unknown stem: ${args.stemKey}`);
+  const { startSec, endSec, bars } = snapRegion(args.startSec, args.endSec, args.snap, rec.analysis);
+  await delay(80);
+  return {
+    path: `${source.path}#cut_${startSec}-${endSec}`,
+    startSec,
+    endSec,
+    bars,
+    peaks: synthesizePeaks(`${source.path}|cut|${startSec}|${endSec}`),
+    durationSec: endSec - startSec,
+  };
+}
+
+export async function sliceHits(args: { trackId: string; stemKey: string; minGapMs?: number; maxHits?: number }): Promise<Sample[]> {
+  const store = await getLibraryStore();
+  const rec = store.get(args.trackId);
+  if (!rec) throw new Error(`Unknown track: ${args.trackId}`);
+  const source = findSampleSource(rec, args.stemKey);
+  if (!source) throw new Error(`Unknown stem: ${args.stemKey}`);
+  const grid = rec.analysis?.transients ?? rec.analysis?.beatGrid ?? [0, 0.5, 1, 1.5];
+  const maxHits = Math.min(args.maxHits ?? 64, 64);
+  const hits: Sample[] = [];
+  for (let i = 0; i < Math.min(grid.length, maxHits); i++) {
+    const startSec = grid[i];
+    const endSec = i + 1 < grid.length ? Math.min(grid[i + 1], startSec + 1) : startSec + 1;
+    const id = `hit_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`;
+    hits.push({
+      id,
+      name: `${source.label} hit ${String(i + 1).padStart(2, "0")}`,
+      path: `${source.path}#hit_${i}`,
+      bytes: 60_000,
+      songId: args.trackId,
+      songTitle: rec.entry.title,
+      stemKey: args.stemKey,
+      stemLabel: source.label,
+      group: source.group,
+      startSec,
+      endSec,
+      durationSec: endSec - startSec,
+      bpm: rec.analysis?.bpm ?? null,
+      createdAt: new Date().toISOString(),
+      peaks: synthesizePeaks(`${source.path}|hit|${i}`),
+      kind: "hit",
+      keyShort: rec.analysis?.key ? `${rec.analysis.key.tonic}${rec.analysis.key.mode === "minor" ? "m" : ""}` : null,
+      bars: null,
+    });
+  }
+  sampleStore = [...hits, ...sampleStore];
+  return hits;
+}
+
+export async function importLocal(args: { path: string }): Promise<TrackInfo> {
+  const basename = args.path.split(/[\\/]/).pop() ?? args.path;
+  const title = basename.replace(/\.[^.]+$/, "");
+  const id = `local-${hashString(args.path).toString(16).slice(0, 12)}`;
+  const manifest = await getManifest();
+  const store = await getLibraryStore();
+  const track: TrackInfo = {
+    id,
+    title,
+    url: args.path,
+    sourcePath: args.path,
+    wavPath: manifest.track.wavPath,
+    durationSec: manifest.track.durationSec,
+    sampleRate: 44100,
+    channels: 2,
+    codec: basename.split(".").pop() ?? "wav",
+    workDir: `mock/${id}`,
+    peaks: manifest.track.peaks,
+    sourceKind: "local",
+  };
+  const now = new Date().toISOString();
+  store.set(id, {
+    entry: {
+      id,
+      title,
+      url: args.path,
+      durationSec: track.durationSec,
+      fetchedAt: now,
+      lastOpenedAt: now,
+      kept: false,
+      hasLoop: false,
+      loopStartSec: null,
+      loopEndSec: null,
+      hasBands: false,
+      hasInstruments: false,
+      instrumentCount: 0,
+      bytes: estimateBytes(track.durationSec, false, false, false),
+    },
+    track,
+    loop: null,
+    stems: null,
+    instruments: null,
+    analysis: null,
+  });
+  return track;
+}
+
+export async function saveSample(args: { trackId: string; stemKey: string; name?: string; region?: RegionParams }): Promise<Sample> {
   const store = await getLibraryStore();
   const rec = store.get(args.trackId);
   if (!rec) throw new Error(`Unknown track: ${args.trackId}`);
   const source = findSampleSource(rec, args.stemKey);
   if (!source) throw new Error(`Unknown stem: ${args.stemKey}`);
 
-  const startSec = rec.loop?.startSec ?? 0;
-  const endSec = rec.loop?.endSec ?? rec.track.durationSec;
-  const defaultName = `${rec.entry.title} - ${source.label} ${formatMmSs(startSec)}-${formatMmSs(endSec)}`;
+  let startSec = rec.loop?.startSec ?? 0;
+  let endSec = rec.loop?.endSec ?? rec.track.durationSec;
+  let bars: number | null = null;
+  if (args.region) {
+    const snapped = snapRegion(args.region.startSec, args.region.endSec, args.region.snap, rec.analysis);
+    startSec = snapped.startSec;
+    endSec = snapped.endSec;
+    bars = snapped.bars;
+  }
+  const keyShort = rec.analysis?.key ? `${rec.analysis.key.tonic}${rec.analysis.key.mode === "minor" ? "m" : ""}` : null;
+  const bpmPart = rec.analysis?.bpm ? ` - ${rec.analysis.bpm}bpm` : "";
+  const keyPart = keyShort ? ` - ${keyShort}` : "";
+  const barsPart = bars ? ` - ${bars}bars` : "";
+  const defaultName = args.region
+    ? `${rec.entry.title} - ${source.label}${bpmPart}${keyPart}${barsPart}`
+    : `${rec.entry.title} - ${source.label} ${formatMmSs(startSec)}-${formatMmSs(endSec)}`;
   let name = (args.name ?? "").trim() || defaultName;
   let suffix = 2;
   const base = name;
@@ -990,6 +1194,9 @@ export async function saveSample(args: { trackId: string; stemKey: string; name?
     bpm: rec.analysis?.bpm ?? null,
     createdAt: new Date().toISOString(),
     peaks: synthesizePeaks(source.path + "|sample|" + args.trackId + args.stemKey),
+    kind: args.region ? "region" : "stem",
+    keyShort,
+    bars,
   };
   sampleStore = [sample, ...sampleStore];
   return sample;
@@ -1007,6 +1214,13 @@ export async function renameSample(args: { id: string; name: string }): Promise<
 }
 
 export async function deleteSample(args: { id: string }): Promise<void> {
+  const sample = sampleStore.find((s) => s.id === args.id);
+  if (sample) {
+    trashStore = [
+      { entry: { id: args.id, kind: "sample", name: sample.name, deletedAt: new Date().toISOString(), bytes: sample.bytes }, restoreSample: sample },
+      ...trashStore,
+    ];
+  }
   sampleStore = sampleStore.filter((s) => s.id !== args.id);
 }
 

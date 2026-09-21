@@ -1,6 +1,7 @@
 import { isTauri, mediaUrl } from "./mediaUrl";
 import * as mock from "./backend.mock";
 import type {
+  CutRegionResult,
   DependencyReport,
   EngineStatus,
   InstrumentsResult,
@@ -8,12 +9,14 @@ import type {
   LibrarySize,
   LoopAnalysis,
   LoopInfo,
+  RegionParams,
   Sample,
   SliceInfo,
   StemInfo,
   StemKey,
   TrackInfo,
   TrackSession,
+  TrashEntry,
 } from "./types";
 
 async function invokeTauri<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -82,7 +85,7 @@ export const backend = {
     return mock.engineInstall();
   },
 
-  async separateInstruments(args: { trackId: string; passes?: string[] }): Promise<InstrumentsResult> {
+  async separateInstruments(args: { trackId: string; passes?: string[]; lowPriority?: boolean }): Promise<InstrumentsResult> {
     if (isTauri()) return invokeTauri<InstrumentsResult>("separate_instruments", args);
     return mock.separateInstruments(args);
   },
@@ -117,9 +120,44 @@ export const backend = {
     return mock.librarySize();
   },
 
-  async saveSample(args: { trackId: string; stemKey: string; name?: string }): Promise<Sample> {
+  async saveSample(args: { trackId: string; stemKey: string; name?: string; region?: RegionParams }): Promise<Sample> {
     if (isTauri()) return invokeTauri<Sample>("save_sample", args);
     return mock.saveSample(args);
+  },
+
+  async cutRegion(args: { trackId: string; stemKey: string } & RegionParams): Promise<CutRegionResult> {
+    if (isTauri()) return invokeTauri<CutRegionResult>("cut_region", { ...args });
+    return mock.cutRegion(args);
+  },
+
+  async sliceHits(args: { trackId: string; stemKey: string; minGapMs?: number; maxHits?: number }): Promise<Sample[]> {
+    if (isTauri()) return invokeTauri<Sample[]>("slice_hits", args);
+    return mock.sliceHits(args);
+  },
+
+  async importLocal(args: { path: string }): Promise<TrackInfo> {
+    if (isTauri()) return invokeTauri<TrackInfo>("import_local", args);
+    return mock.importLocal(args);
+  },
+
+  async listTrash(): Promise<TrashEntry[]> {
+    if (isTauri()) return invokeTauri<TrashEntry[]>("list_trash");
+    return mock.listTrash();
+  },
+
+  async restoreTrash(args: { id: string }): Promise<void> {
+    if (isTauri()) return invokeTauri<void>("restore_trash", args);
+    return mock.restoreTrash(args);
+  },
+
+  async emptyTrash(): Promise<void> {
+    if (isTauri()) return invokeTauri<void>("empty_trash");
+    return mock.emptyTrash();
+  },
+
+  async clearScans(): Promise<void> {
+    if (isTauri()) return invokeTauri<void>("clear_scans");
+    return mock.clearScans();
   },
 
   async listSamples(): Promise<Sample[]> {
