@@ -348,7 +348,7 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
           </Button>
         </div>
         <p className="text-[11px] text-muted">
-          Fetching a new link keeps this song only if it was split, exported, or marked Keep.
+          This song is a scan. Press Keep to hold it, or save the tracks you want as samples. Older scans are removed as you fetch new links.
         </p>
         {engine.progress && (
           <div className="flex flex-col gap-1">

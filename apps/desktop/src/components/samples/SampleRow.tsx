@@ -100,7 +100,7 @@ export function SampleRow({ sample, selected, onToggleSelect, onRename, onDelete
       >
         {playing ? <Pause size={14} /> : <Play size={14} />}
       </button>
-      <div className="flex-1 min-w-0">
+      <div className="flex-1 min-w-[9rem]">
         {editing ? (
           <input
             autoFocus

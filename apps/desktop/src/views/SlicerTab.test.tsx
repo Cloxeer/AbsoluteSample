@@ -82,6 +82,6 @@ describe("SlicerTab", () => {
 
     render(<SlicerTab engineApi={engineResult.current} syncApi={syncResult.current} />);
     expect(screen.queryByText("Paste a YouTube link")).not.toBeInTheDocument();
-    expect(await screen.findByText(/Fetching a new link keeps this song only if/)).toBeInTheDocument();
+    expect(await screen.findByText(/This song is a scan/)).toBeInTheDocument();
   });
 });
