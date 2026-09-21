@@ -37,7 +37,7 @@ pub fn decode_to_wav(src: &Path, dest: &Path) -> Result<(), String> {
 
     let output = silent_command("ffmpeg")
         .args([
-            "-i", &src_s, "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", "-y", &dest_s,
+            "-i", &src_s, "-ac", "2", "-ar", "44100", "-af", "aresample=resampler=soxr:precision=28", "-c:a", "pcm_s24le", "-y", &dest_s,
         ])
         .output()
         .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
@@ -99,7 +99,7 @@ pub fn slice_beats(
 
         let output = silent_command("ffmpeg")
             .args([
-                "-ss", &start_s, "-t", &dur_s, "-i", &src_s, "-c:a", "pcm_s16le", "-y", &out_s,
+                "-ss", &start_s, "-t", &dur_s, "-i", &src_s, "-af", "aresample=resampler=soxr:precision=28", "-c:a", "pcm_s24le", "-y", &out_s,
             ])
             .output()
             .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;

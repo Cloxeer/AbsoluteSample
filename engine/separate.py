@@ -116,8 +116,14 @@ def make_separator(model_dir: Path, out_dir: Path, pass_name: str, device_pref: 
         model_file_dir=str(model_dir),
         output_dir=str(out_dir),
         output_format="WAV",
-        normalization_threshold=0.9,
-        use_autocast=device_pref != "cpu",
+        # Quality first: no input normalization (keeps original levels and headroom),
+        # no fp16 autocast (avoids quantization buzz on older GPUs), more Demucs shifts
+        # and overlap for cleaner seams. Slower, but audibly cleaner.
+        normalization_threshold=1.0,
+        amplification_threshold=0.0,
+        use_autocast=False,
+        demucs_params={"segment_size": "Default", "shifts": 4, "overlap": 0.5, "segments_enabled": True},
+        mdxc_params={"segment_size": 256, "override_model_segment_size": False, "batch_size": 1, "overlap": 8, "pitch_shift": 0},
     )
     sep.logger.addHandler(_ProgressHook(pass_name))
     return sep
@@ -164,10 +170,10 @@ def pass_vocals(sep_factory, inp: Path, sr: int, stems: dict[str, Path]) -> None
     other, _ = read_wav(stems["other"])
     rof, dem = match_len(rof, dem)
     other = other[: len(dem)]
-    ens = 0.5 * (rof + dem)
-    # Conserve the mix: whatever left the vocals goes back into "other".
-    other = other + (dem - ens)
-    write_wav(stems["vocals"], ens, sr)
+    # Use the Roformer vocals outright: averaging two models that are not sample-aligned
+    # phases and smears. Conserve the mix by moving the difference into "other".
+    other = other + (dem - rof)
+    write_wav(stems["vocals"], rof, sr)
     write_wav(stems["other"], other, sr)
 
 
