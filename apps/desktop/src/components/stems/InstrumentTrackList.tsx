@@ -17,7 +17,7 @@ export interface InstrumentTrackListProps {
   mode: "mix" | "audition";
   auditionId: string | null;
   onUpsertTrack: (state: TrackGainState) => void;
-  onRegisterInstance: (id: string, ws: WaveSurfer, isMaster?: boolean, inMix?: boolean) => void;
+  onRegisterInstance: (id: string, ws: WaveSurfer, isMaster?: boolean, inMix?: boolean, url?: string) => void;
   onUnregisterInstance: (id: string) => void;
   onTimeUpdate: (id: string, time: number) => void;
   onFinish: (id: string) => void;
@@ -135,7 +135,7 @@ export function InstrumentTrackList({
             />
           ) : undefined
         }
-        onReady={(ws) => onRegisterInstance(stem.key, ws, isMaster, inMix)}
+        onReady={(ws) => onRegisterInstance(stem.key, ws, isMaster, inMix, wavUrls[stem.path])}
         onTimeUpdate={(time) => onTimeUpdate(stem.key, time)}
         onFinish={() => onFinish(stem.key)}
         onDestroy={() => onUnregisterInstance(stem.key)}

@@ -1,4 +1,5 @@
 import type { Sample } from "./types";
+import { mixEngine } from "./mixEngine";
 
 export interface SamplePlayerState {
   id: string | null;
@@ -71,6 +72,7 @@ class SamplePlayerSingleton {
   /** Sibling of play(): auditions an arbitrary slice of a wav by url/id (e.g. a Beat Matrix pad), not requiring a full Sample. */
   playPath(id: string, url: string, opts?: { start?: number; end?: number }): void {
     this.stop();
+    if (mixEngine.isPlaying) mixEngine.pause();
     const audio = this.ensureAudio();
     audio.src = url;
     audio.currentTime = opts?.start ?? 0;

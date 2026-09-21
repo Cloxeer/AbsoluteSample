@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { mixEngine } from "@/lib/mixEngine";
+import { samplePlayer } from "@/lib/samplePlayer";
 
 export interface TrackGainState {
   id: string;
@@ -83,13 +85,14 @@ export interface WaveSurferLike {
   isPlaying: () => boolean;
 }
 
-const DRIFT_THRESHOLD_SEC = 0.03;
-
 export function useSyncPlayback() {
   const instancesRef = useRef<Map<string, WaveSurferLike>>(new Map());
   const masterIdRef = useRef<string | null>(null);
   /** Which registered ids belong in mix playback. Expanded child/kit tracks are registered with inMix=false. */
   const inMixRef = useRef<Map<string, boolean>>(new Map());
+  /** url per registered track id, used to drive mixEngine.load(). */
+  const urlsRef = useRef<Map<string, string>>(new Map());
+  const loadPromiseRef = useRef<Promise<void> | null>(null);
   const [tracks, setTracks] = useState<TrackGainState[]>([]);
   const [transport, setTransport] = useState<TransportState>({
     mode: "mix",
@@ -103,28 +106,46 @@ export function useSyncPlayback() {
   const loopEnabledRef = useRef(false);
   loopEnabledRef.current = loopEnabled;
 
-  const registerInstance = useCallback((id: string, ws: WaveSurferLike, isMaster = false, inMix = true) => {
-    instancesRef.current.set(id, ws);
-    inMixRef.current.set(id, inMix);
-    if (isMaster || masterIdRef.current === null) masterIdRef.current = id;
+  /** All top-level (non-expanded-child) registered tracks, as mixEngine track defs. */
+  const mixTrackDefs = useCallback(() => {
+    const defs: { id: string; url: string }[] = [];
+    for (const [id, inMix] of inMixRef.current.entries()) {
+      if (inMix === false) continue;
+      const url = urlsRef.current.get(id);
+      if (url) defs.push({ id, url });
+    }
+    return defs;
   }, []);
+
+  /** Kicks off (or refreshes) a mixEngine.load() for every currently-registered mix track. Safe to call repeatedly. */
+  const preloadMix = useCallback(() => {
+    const defs = mixTrackDefs();
+    if (defs.length === 0) return;
+    loadPromiseRef.current = mixEngine.load(defs);
+  }, [mixTrackDefs]);
+
+  const registerInstance = useCallback(
+    (id: string, ws: WaveSurferLike, isMaster = false, inMix = true, url?: string) => {
+      instancesRef.current.set(id, ws);
+      inMixRef.current.set(id, inMix);
+      if (url) urlsRef.current.set(id, url);
+      if (isMaster || masterIdRef.current === null) masterIdRef.current = id;
+      // Never let a display-only instance emit audio of its own.
+      ws.setVolume(0);
+      ws.pause();
+      if (url) preloadMix();
+    },
+    [preloadMix]
+  );
 
   const unregisterInstance = useCallback((id: string) => {
     instancesRef.current.delete(id);
     inMixRef.current.delete(id);
+    urlsRef.current.delete(id);
     if (masterIdRef.current === id) {
       const next = instancesRef.current.keys().next();
       masterIdRef.current = next.done ? null : next.value;
     }
-  }, []);
-
-  /** Instances that belong in mix (master) playback: top-level tracks only, never expanded children. */
-  const mixInstances = useCallback(() => {
-    const result: WaveSurferLike[] = [];
-    for (const [id, ws] of instancesRef.current.entries()) {
-      if (inMixRef.current.get(id) !== false) result.push(ws);
-    }
-    return result;
   }, []);
 
   const upsertTrack = useCallback((state: TrackGainState) => {
@@ -141,124 +162,139 @@ export function useSyncPlayback() {
     setTracks((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
+  /** Applies the solo/mute/volume gain matrix to mixEngine's per-track GainNodes. */
   const applyGains = useCallback(() => {
     const gains = computeGains(tracks);
-    for (const [id, ws] of instancesRef.current.entries()) {
-      const gain = gains[id] ?? 1;
-      ws.setVolume(gain);
+    for (const [id, gain] of Object.entries(gains)) {
+      mixEngine.setGain(id, gain);
     }
   }, [tracks]);
 
-  const syncTime = useCallback((sourceId: string, time: number) => {
-    const masterId = masterIdRef.current;
-    if (sourceId !== masterId) return;
-    for (const [id, ws] of instancesRef.current.entries()) {
-      if (id === masterId) continue;
-      const drift = Math.abs(ws.getCurrentTime() - time);
-      if (drift > DRIFT_THRESHOLD_SEC) {
-        ws.setTime(time);
-      }
-    }
-  }, []);
-
-  /** The instance currently driving the on-screen clock: the audition target in audition mode, otherwise the mix master. */
-  const clockSourceId = useCallback(() => {
-    const t = transportRef.current;
-    return t.mode === "audition" ? t.auditionId : masterIdRef.current;
-  }, []);
-
-  /** Called by every track on `timeupdate`; only the active clock source drives the readout (and re-syncs the others in mix mode). */
-  const handleTimeUpdate = useCallback(
-    (sourceId: string, time: number) => {
-      if (sourceId !== clockSourceId()) return;
-      setCurrentTime(time);
-      if (transportRef.current.mode === "mix") syncTime(sourceId, time);
-    },
-    [clockSourceId, syncTime]
-  );
-
-  /** Called by every track on `finish`; the active clock source decides whether to loop or stop. */
-  const handleFinish = useCallback((sourceId: string) => {
-    if (sourceId !== clockSourceId()) return;
-    const t = transportRef.current;
-    if (loopEnabledRef.current) {
-      if (t.mode === "audition" && t.auditionId) {
-        const ws = instancesRef.current.get(t.auditionId);
-        ws?.setTime(0);
-        ws?.play();
-      } else {
-        for (const ws of mixInstances()) {
-          ws.setTime(0);
-          ws.play();
-        }
-      }
-      setCurrentTime(0);
-    } else {
-      if (t.mode === "audition" && t.auditionId) {
-        instancesRef.current.get(t.auditionId)?.pause();
-      } else {
-        for (const ws of mixInstances()) ws.pause();
-      }
-      setTransport((prev) => nextTransportState(prev, { type: "PAUSE" }));
-    }
-  }, [clockSourceId, mixInstances]);
+  // Kept for API compatibility with track components that still wire wavesurfer's own
+  // timeupdate/finish events; no longer drives the transport clock (mixEngine does).
+  const syncTime = useCallback((_sourceId: string, _time: number) => {}, []);
+  const handleTimeUpdate = useCallback((_sourceId: string, _time: number) => {}, []);
+  const handleFinish = useCallback((_sourceId: string) => {}, []);
 
   // Re-apply the solo/mute/volume gain matrix whenever it changes.
   useEffect(() => {
     applyGains();
   }, [applyGains]);
 
-  /** Play the full mix: pause any audition-only instance first, then play every registered track from its own position. */
-  const playMix = useCallback(() => {
-    for (const ws of mixInstances()) ws.play();
+  // Drive mixEngine's loop flag from the loopEnabled toggle.
+  useEffect(() => {
+    mixEngine.setLoop(loopEnabled);
+  }, [loopEnabled]);
+
+  // React to mixEngine's own "ended" (natural end of the longest track), which fires whether or
+  // not loop is on; on loop it has already restarted itself, otherwise the transport goes to pause.
+  useEffect(() => {
+    mixEngine.onEnded(() => {
+      if (loopEnabledRef.current) {
+        setCurrentTime(0);
+      } else {
+        setTransport((prev) => nextTransportState(prev, { type: "PAUSE" }));
+        setCurrentTime(0);
+      }
+    });
+    return () => mixEngine.onEnded(null);
+  }, []);
+
+  // While playing, drive the transport clock from mixEngine.currentTime() every frame, and move
+  // every visible (display-only) wavesurfer instance's playhead to match — but never call
+  // ws.play() on them, since audio now comes entirely from mixEngine.
+  useEffect(() => {
+    if (!transport.isPlaying) return;
+    let raf: number;
+    const tick = () => {
+      const t = mixEngine.currentTime();
+      setCurrentTime(t);
+      const mode = transportRef.current.mode;
+      if (mode === "mix") {
+        for (const [id, ws] of instancesRef.current.entries()) {
+          if (inMixRef.current.get(id) !== false) ws.setTime(t);
+        }
+      } else if (mode === "audition" && transportRef.current.auditionId) {
+        instancesRef.current.get(transportRef.current.auditionId)?.setTime(t);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [transport.isPlaying]);
+
+  /** Play the full mix through mixEngine, from its current position. Display wavesurfer instances follow along but never emit audio. */
+  const playMix = useCallback(async () => {
+    samplePlayer.stop();
+    const defs = mixTrackDefs();
+    if (defs.length > 0) {
+      if (!loadPromiseRef.current) loadPromiseRef.current = mixEngine.load(defs);
+      await loadPromiseRef.current;
+    }
+    for (const [id, ws] of instancesRef.current.entries()) {
+      if (inMixRef.current.get(id) !== false) ws.pause();
+    }
+    mixEngine.play(mixEngine.currentTime());
     setTransport((prev) => nextTransportState(prev, { type: "PLAY_MIX" }));
-  }, [mixInstances]);
+  }, [mixTrackDefs]);
 
   const pause = useCallback(() => {
-    const t = transportRef.current;
-    if (t.mode === "audition" && t.auditionId) {
-      instancesRef.current.get(t.auditionId)?.pause();
-    } else {
-      for (const ws of mixInstances()) ws.pause();
-    }
+    mixEngine.pause();
     setTransport((prev) => nextTransportState(prev, { type: "PAUSE" }));
-  }, [mixInstances]);
+  }, []);
 
   const togglePlay = useCallback(() => {
     if (transportRef.current.isPlaying) pause();
-    else playMix();
+    else void playMix();
   }, [pause, playMix]);
 
   const stopAll = useCallback(() => {
-    for (const ws of mixInstances()) {
+    mixEngine.stop();
+    for (const [, ws] of instancesRef.current.entries()) {
       ws.pause();
       ws.setTime(0);
     }
     setTransport((prev) => nextTransportState(prev, { type: "STOP" }));
     setCurrentTime(0);
-  }, [mixInstances]);
+  }, []);
 
   /**
-   * Solo-audition a single track: pause every other instance, seek/play only `id`.
-   * Calling it again on the already-playing auditioned track stops it (toggle off).
+   * Solo-audition a single track, routed through mixEngine with just that one track loaded so
+   * there's a single consistent audio code path. Calling it again on the already-playing
+   * auditioned track stops it (toggle off).
    */
-  const auditionTrack = useCallback((id: string) => {
-    const target = instancesRef.current.get(id);
-    const prevState = transportRef.current;
-    const turningOff = prevState.mode === "audition" && prevState.auditionId === id && prevState.isPlaying;
+  const auditionTrack = useCallback(
+    (id: string) => {
+      const prevState = transportRef.current;
+      const turningOff = prevState.mode === "audition" && prevState.auditionId === id && prevState.isPlaying;
 
-    for (const [instanceId, ws] of instancesRef.current.entries()) {
-      if (instanceId !== id) ws.pause();
-    }
+      samplePlayer.stop();
+      for (const [instanceId, ws] of instancesRef.current.entries()) {
+        if (instanceId !== id) ws.pause();
+      }
 
-    if (turningOff) {
-      target?.pause();
-    } else {
-      target?.play();
-    }
+      if (turningOff) {
+        mixEngine.pause();
+        setTransport((prev) => nextTransportState(prev, { type: "AUDITION", id }));
+        return;
+      }
 
-    setTransport((prev) => nextTransportState(prev, { type: "AUDITION", id }));
-  }, []);
+      const url = urlsRef.current.get(id);
+      if (url) {
+        const loadPromise = mixEngine.load([{ id, url }]);
+        loadPromiseRef.current = loadPromise;
+        void loadPromise.then(() => {
+          const t = transportRef.current;
+          if (t.mode === "audition" && t.auditionId === id) {
+            mixEngine.play(0);
+          }
+        });
+      }
+
+      setTransport((prev) => nextTransportState(prev, { type: "AUDITION", id }));
+    },
+    []
+  );
 
   const toggleLoop = useCallback(() => setLoopEnabled((v) => !v), []);
 

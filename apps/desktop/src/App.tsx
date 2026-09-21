@@ -10,6 +10,7 @@ import { useAudioEngine } from "@/hooks/useAudioEngine";
 import { useSyncPlayback } from "@/hooks/useSyncPlayback";
 import { useJobs } from "@/hooks/useJobs";
 import { samplePlayer } from "@/lib/samplePlayer";
+import { mixEngine } from "@/lib/mixEngine";
 import { backend } from "@/lib/backend";
 import type { DependencyReport, LibraryEntry, Sample } from "@/lib/types";
 
@@ -229,7 +230,10 @@ export default function App() {
           samplePlayer.stop();
         }}
         onToggleLoop={sync.toggleLoop}
-        onMasterVolumeChange={setMasterVolume}
+        onMasterVolumeChange={(v) => {
+          setMasterVolume(v);
+          mixEngine.setMaster(v);
+        }}
         onToggleLibrary={() => setLibraryOpen((v) => !v)}
         onToggleSamples={() => setSamplesOpen((v) => !v)}
       />

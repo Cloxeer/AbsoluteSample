@@ -18,7 +18,7 @@ export interface StemGroupProps {
   auditionId: string | null;
   analysis?: LoopAnalysis | null;
   onUpsertTrack: (state: TrackGainState) => void;
-  onRegisterInstance: (id: string, ws: WaveSurfer, isMaster?: boolean) => void;
+  onRegisterInstance: (id: string, ws: WaveSurfer, isMaster?: boolean, inMix?: boolean, url?: string) => void;
   onUnregisterInstance: (id: string) => void;
   onTimeUpdate: (id: string, time: number) => void;
   onFinish: (id: string) => void;
@@ -143,7 +143,7 @@ export function StemGroup({
                 ) : undefined
               }
               onAudition={() => onAudition(stem.key)}
-              onReady={(ws) => onRegisterInstance(stem.key, ws, stem.index === 1)}
+              onReady={(ws) => onRegisterInstance(stem.key, ws, stem.index === 1, true, wavUrls[stem.path])}
               onTimeUpdate={(t) => onTimeUpdate(stem.key, t)}
               onFinish={() => onFinish(stem.key)}
               onDestroy={() => onUnregisterInstance(stem.key)}

@@ -209,6 +209,23 @@ def pass_drums(sep_factory, out: Path, sr: int, stems: dict[str, Path]) -> None:
         raise RuntimeError(f"drum model returned {sorted(res)}")
 
 
+def ensure_headroom(stems: dict[str, Path], sr: int, ceiling: float = 0.98) -> float:
+    """If any stem exceeds the ceiling, scale ALL stems by the same factor so nothing clips on
+    the 24-bit write and the stems still sum to (a scaled copy of) the mix. Returns the gain."""
+    peak = 0.0
+    data: dict[str, np.ndarray] = {}
+    for key, path in stems.items():
+        d, _ = read_wav(path)
+        data[key] = d
+        peak = max(peak, float(np.abs(d).max()) if d.size else 0.0)
+    if peak <= ceiling or peak == 0.0:
+        return 1.0
+    gain = ceiling / peak
+    for key, d in data.items():
+        write_wav(stems[key], d * gain, sr)
+    return gain
+
+
 # ---------------------------------------------------------------------------
 # Tag pass: what does each stem actually sound like?
 
@@ -249,6 +266,8 @@ def pass_tag(stems: dict[str, Path], device: str) -> dict[str, dict]:
         win = 160000
         wins = [y[i:i + win] for i in range(0, len(y), win)]
         wins = [w for w in wins if len(w) > 16000 and float(np.sqrt((w ** 2).mean())) > 1e-3]
+        # Classification only: the model is level sensitive, so peak-normalize each window.
+        wins = [w / max(float(np.abs(w).max()), 1e-6) * 0.9 for w in wins]
         if not wins:
             out[key] = {"tags": [], "soundsLike": None}
             continue
@@ -262,8 +281,10 @@ def pass_tag(stems: dict[str, Path], device: str) -> dict[str, dict]:
         scored = sorted(((label_of[i], float(p[i])) for i in range(len(p))), key=lambda t: -t[1])
         tags = [{"label": l, "score": round(s, 3)} for l, s in scored if l not in GENERIC][:5]
         fam_scores = {fam: max(float(p[i]) for i in range(len(p)) if label_of[i] in labels) for fam, labels in FAMILIES.items()}
-        best_fam, best = max(fam_scores.items(), key=lambda t: t[1])
         own = BUCKET_FAMILY.get(key)
+        # Vocal bleed is common in instrument stems; only call an instrument stem "Vocals" when it is unmistakable.
+        candidates = {f: v for f, v in fam_scores.items() if not (f == "Vocals" and own != "Vocals" and v < 0.35)}
+        best_fam, best = max(candidates.items(), key=lambda t: t[1])
         own_score = fam_scores.get(own, 0.0) if own else 0.0
         sounds_like = None
         if best >= 0.06 and best_fam != own and best >= 1.3 * own_score:
@@ -326,6 +347,10 @@ def main() -> int:
             emit({"event": "pass_done", "pass": name, "seconds": round(time.time() - t0, 1)})
         except Exception as e:  # noqa: BLE001
             emit({"event": "pass_failed", "pass": name, "error": str(e)[:400]})
+
+    gain = ensure_headroom(stems, sr)
+    if gain < 1.0:
+        emit({"event": "progress", "pass": "headroom", "percent": 100, "message": f"Applied shared gain {gain:.3f} to avoid clipping"})
 
     tag_info: dict[str, dict] = {}
     if "tag" in passes:
