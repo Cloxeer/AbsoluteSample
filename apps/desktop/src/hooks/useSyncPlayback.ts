@@ -88,6 +88,8 @@ const DRIFT_THRESHOLD_SEC = 0.03;
 export function useSyncPlayback() {
   const instancesRef = useRef<Map<string, WaveSurferLike>>(new Map());
   const masterIdRef = useRef<string | null>(null);
+  /** Which registered ids belong in mix playback. Expanded child/kit tracks are registered with inMix=false. */
+  const inMixRef = useRef<Map<string, boolean>>(new Map());
   const [tracks, setTracks] = useState<TrackGainState[]>([]);
   const [transport, setTransport] = useState<TransportState>({
     mode: "mix",
@@ -101,17 +103,28 @@ export function useSyncPlayback() {
   const loopEnabledRef = useRef(false);
   loopEnabledRef.current = loopEnabled;
 
-  const registerInstance = useCallback((id: string, ws: WaveSurferLike, isMaster = false) => {
+  const registerInstance = useCallback((id: string, ws: WaveSurferLike, isMaster = false, inMix = true) => {
     instancesRef.current.set(id, ws);
+    inMixRef.current.set(id, inMix);
     if (isMaster || masterIdRef.current === null) masterIdRef.current = id;
   }, []);
 
   const unregisterInstance = useCallback((id: string) => {
     instancesRef.current.delete(id);
+    inMixRef.current.delete(id);
     if (masterIdRef.current === id) {
       const next = instancesRef.current.keys().next();
       masterIdRef.current = next.done ? null : next.value;
     }
+  }, []);
+
+  /** Instances that belong in mix (master) playback: top-level tracks only, never expanded children. */
+  const mixInstances = useCallback(() => {
+    const result: WaveSurferLike[] = [];
+    for (const [id, ws] of instancesRef.current.entries()) {
+      if (inMixRef.current.get(id) !== false) result.push(ws);
+    }
+    return result;
   }, []);
 
   const upsertTrack = useCallback((state: TrackGainState) => {
@@ -174,7 +187,7 @@ export function useSyncPlayback() {
         ws?.setTime(0);
         ws?.play();
       } else {
-        for (const ws of instancesRef.current.values()) {
+        for (const ws of mixInstances()) {
           ws.setTime(0);
           ws.play();
         }
@@ -184,11 +197,11 @@ export function useSyncPlayback() {
       if (t.mode === "audition" && t.auditionId) {
         instancesRef.current.get(t.auditionId)?.pause();
       } else {
-        for (const ws of instancesRef.current.values()) ws.pause();
+        for (const ws of mixInstances()) ws.pause();
       }
       setTransport((prev) => nextTransportState(prev, { type: "PAUSE" }));
     }
-  }, [clockSourceId]);
+  }, [clockSourceId, mixInstances]);
 
   // Re-apply the solo/mute/volume gain matrix whenever it changes.
   useEffect(() => {
@@ -197,19 +210,19 @@ export function useSyncPlayback() {
 
   /** Play the full mix: pause any audition-only instance first, then play every registered track from its own position. */
   const playMix = useCallback(() => {
-    for (const ws of instancesRef.current.values()) ws.play();
+    for (const ws of mixInstances()) ws.play();
     setTransport((prev) => nextTransportState(prev, { type: "PLAY_MIX" }));
-  }, []);
+  }, [mixInstances]);
 
   const pause = useCallback(() => {
     const t = transportRef.current;
     if (t.mode === "audition" && t.auditionId) {
       instancesRef.current.get(t.auditionId)?.pause();
     } else {
-      for (const ws of instancesRef.current.values()) ws.pause();
+      for (const ws of mixInstances()) ws.pause();
     }
     setTransport((prev) => nextTransportState(prev, { type: "PAUSE" }));
-  }, []);
+  }, [mixInstances]);
 
   const togglePlay = useCallback(() => {
     if (transportRef.current.isPlaying) pause();
@@ -217,13 +230,13 @@ export function useSyncPlayback() {
   }, [pause, playMix]);
 
   const stopAll = useCallback(() => {
-    for (const ws of instancesRef.current.values()) {
+    for (const ws of mixInstances()) {
       ws.pause();
       ws.setTime(0);
     }
     setTransport((prev) => nextTransportState(prev, { type: "STOP" }));
     setCurrentTime(0);
-  }, []);
+  }, [mixInstances]);
 
   /**
    * Solo-audition a single track: pause every other instance, seek/play only `id`.

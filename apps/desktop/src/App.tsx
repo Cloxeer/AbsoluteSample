@@ -39,10 +39,10 @@ export default function App() {
     const done: string[] = [];
     if (engine.track) done.push("source");
     if (engine.loop) done.push("loop");
-    if (engine.stems) done.push("stems");
+    if (engine.stems || engine.instruments) done.push("stems");
     if (engine.analysis) done.push("matrix");
     return done;
-  }, [engine.track, engine.loop, engine.stems, engine.analysis]);
+  }, [engine.track, engine.loop, engine.stems, engine.instruments, engine.analysis]);
 
   const currentStep = activeTab === "inspector" ? "matrix" : !engine.track ? "source" : !engine.loop ? "loop" : "stems";
 
@@ -117,6 +117,7 @@ export default function App() {
             track={engine.track}
             loop={engine.loop}
             stems={engine.stems}
+            instruments={engine.instruments}
             analysis={engine.analysis}
             onAnalyze={() => analyzeLoop(engine.track?.id ?? "")}
           />

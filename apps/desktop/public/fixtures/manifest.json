@@ -3,21 +3,21 @@
     "id": "nRKgT3d6xoE",
     "title": "Harlan Road",
     "url": "https://youtu.be/nRKgT3d6xoE",
-    "sourcePath": "C:\\Users\\sebastian\\AppData\\Local\\AbsoluteSample\\work\\nRKgT3d6xoE\\source.webm",
-    "wavPath": "C:\\Users\\sebastian\\AppData\\Local\\AbsoluteSample\\work\\nRKgT3d6xoE\\source.wav",
+    "sourcePath": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\source.webm",
+    "wavPath": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\source.wav",
     "durationSec": 186.021,
     "sampleRate": 48000,
     "channels": 2,
     "codec": "opus",
-    "workDir": "C:\\Users\\sebastian\\AppData\\Local\\AbsoluteSample\\work\\nRKgT3d6xoE"
+    "workDir": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE"
   },
   "loop": {
     "trackId": "nRKgT3d6xoE",
     "startSec": 30.0,
     "endSec": 45.0,
     "durationSec": 15.0,
-    "loopPath": "C:\\Users\\sebastian\\AppData\\Local\\AbsoluteSample\\work\\nRKgT3d6xoE\\loop.webm",
-    "wavPath": "C:\\Users\\sebastian\\AppData\\Local\\AbsoluteSample\\work\\nRKgT3d6xoE\\loop.wav"
+    "loopPath": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\loop.webm",
+    "wavPath": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\loop.wav"
   },
   "stems": [
     {
@@ -25,7 +25,7 @@
       "key": "drums_sub",
       "label": "Drums / Sub",
       "band": "LP 130 Hz (LR8)",
-      "path": "C:\\Users\\sebastian\\AppData\\Local\\AbsoluteSample\\work\\nRKgT3d6xoE\\stems\\01_drums_sub.wav",
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\stems\\01_drums_sub.wav",
       "bytes": 3967386,
       "peakDb": -7.981493,
       "rmsDb": -21.387972
@@ -35,7 +35,7 @@
       "key": "bass_lowmid",
       "label": "Bass / Low-Mid",
       "band": "HP 130 Hz - LP 800 Hz (LR8)",
-      "path": "C:\\Users\\sebastian\\AppData\\Local\\AbsoluteSample\\work\\nRKgT3d6xoE\\stems\\02_bass_lowmid.wav",
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\stems\\02_bass_lowmid.wav",
       "bytes": 3967386,
       "peakDb": -3.449103,
       "rmsDb": -19.345835
@@ -45,7 +45,7 @@
       "key": "mid_vocals",
       "label": "Mid / Vocals",
       "band": "HP 800 Hz - LP 4500 Hz (LR8)",
-      "path": "C:\\Users\\sebastian\\AppData\\Local\\AbsoluteSample\\work\\nRKgT3d6xoE\\stems\\03_mid_vocals.wav",
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\stems\\03_mid_vocals.wav",
       "bytes": 3967386,
       "peakDb": -4.55789,
       "rmsDb": -21.353132
@@ -55,7 +55,7 @@
       "key": "highs_air",
       "label": "Highs / Air",
       "band": "HP 4500 Hz (LR8)",
-      "path": "C:\\Users\\sebastian\\AppData\\Local\\AbsoluteSample\\work\\nRKgT3d6xoE\\stems\\04_highs_air.wav",
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\stems\\04_highs_air.wav",
       "bytes": 3967386,
       "peakDb": -11.871731,
       "rmsDb": -39.991535
@@ -1434,5 +1434,196 @@
     ],
     "peakDb": -0.093545,
     "rmsDb": -12.807307
+  },
+  "instruments": [
+    {
+      "key": "vocals",
+      "label": "Vocals",
+      "group": "vocals",
+      "parent": null,
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\instruments\\vocals.wav",
+      "bytes": 3967328,
+      "peakDb": -1.122205,
+      "rmsDb": -17.88709,
+      "model": "htdemucs_6s.yaml",
+      "order": 10
+    },
+    {
+      "key": "lead_vocals",
+      "label": "Lead vocals",
+      "group": "vocals",
+      "parent": "vocals",
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\instruments\\lead_vocals.wav",
+      "bytes": 3967328,
+      "peakDb": -1.447809,
+      "rmsDb": -19.361402,
+      "model": "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt",
+      "order": 11
+    },
+    {
+      "key": "backing_vocals",
+      "label": "Backing vocals",
+      "group": "vocals",
+      "parent": "vocals",
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\instruments\\backing_vocals.wav",
+      "bytes": 3967328,
+      "peakDb": -1.583837,
+      "rmsDb": -24.694091,
+      "model": "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt",
+      "order": 12
+    },
+    {
+      "key": "drums",
+      "label": "Drums",
+      "group": "drums",
+      "parent": null,
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\instruments\\drums.wav",
+      "bytes": 3967328,
+      "peakDb": -6.034926,
+      "rmsDb": -41.71666,
+      "model": "htdemucs_6s.yaml",
+      "order": 20
+    },
+    {
+      "key": "kick",
+      "label": "Kick",
+      "group": "drums",
+      "parent": "drums",
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\instruments\\kick.wav",
+      "bytes": 3967328,
+      "peakDb": -44.688331,
+      "rmsDb": -78.097305,
+      "model": "MDX23C-DrumSep-aufr33-jarredou.ckpt",
+      "order": 21
+    },
+    {
+      "key": "snare",
+      "label": "Snare",
+      "group": "drums",
+      "parent": "drums",
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\instruments\\snare.wav",
+      "bytes": 3967328,
+      "peakDb": -8.540606,
+      "rmsDb": -43.398106,
+      "model": "MDX23C-DrumSep-aufr33-jarredou.ckpt",
+      "order": 22
+    },
+    {
+      "key": "toms",
+      "label": "Toms",
+      "group": "drums",
+      "parent": "drums",
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\instruments\\toms.wav",
+      "bytes": 3967328,
+      "peakDb": -35.145906,
+      "rmsDb": -73.065176,
+      "model": "MDX23C-DrumSep-aufr33-jarredou.ckpt",
+      "order": 23
+    },
+    {
+      "key": "hihat",
+      "label": "Hi-hat",
+      "group": "drums",
+      "parent": "drums",
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\instruments\\hihat.wav",
+      "bytes": 3967328,
+      "peakDb": -20.442627,
+      "rmsDb": -55.525355,
+      "model": "MDX23C-DrumSep-aufr33-jarredou.ckpt",
+      "order": 24
+    },
+    {
+      "key": "ride",
+      "label": "Ride",
+      "group": "drums",
+      "parent": "drums",
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\instruments\\ride.wav",
+      "bytes": 3967328,
+      "peakDb": -36.364412,
+      "rmsDb": -70.711981,
+      "model": "MDX23C-DrumSep-aufr33-jarredou.ckpt",
+      "order": 25
+    },
+    {
+      "key": "crash",
+      "label": "Crash",
+      "group": "drums",
+      "parent": "drums",
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\instruments\\crash.wav",
+      "bytes": 3967328,
+      "peakDb": -48.301588,
+      "rmsDb": -83.09632,
+      "model": "MDX23C-DrumSep-aufr33-jarredou.ckpt",
+      "order": 26
+    },
+    {
+      "key": "bass",
+      "label": "Bass",
+      "group": "bass",
+      "parent": null,
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\instruments\\bass.wav",
+      "bytes": 3967328,
+      "peakDb": -5.823,
+      "rmsDb": -18.56544,
+      "model": "htdemucs_6s.yaml",
+      "order": 30
+    },
+    {
+      "key": "guitar",
+      "label": "Guitar",
+      "group": "guitar",
+      "parent": null,
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\instruments\\guitar.wav",
+      "bytes": 3967328,
+      "peakDb": -8.835365,
+      "rmsDb": -27.05056,
+      "model": "htdemucs_6s.yaml",
+      "order": 40
+    },
+    {
+      "key": "piano",
+      "label": "Piano / Keys",
+      "group": "keys",
+      "parent": null,
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\instruments\\piano.wav",
+      "bytes": 3967328,
+      "peakDb": -21.86377,
+      "rmsDb": -51.812292,
+      "model": "htdemucs_6s.yaml",
+      "order": 50
+    },
+    {
+      "key": "other",
+      "label": "Other / Synths & FX",
+      "group": "other",
+      "parent": null,
+      "path": "C:\\Users\\sebastian\\.absolutesample\\work\\nRKgT3d6xoE\\instruments\\other.wav",
+      "bytes": 3967328,
+      "peakDb": -2.410164,
+      "rmsDb": -20.838715,
+      "model": "htdemucs_6s.yaml",
+      "order": 60
+    }
+  ],
+  "engine": {
+    "installed": true,
+    "pythonFound": true,
+    "pythonPath": "C:\\Users\\sebastian\\.absolutesample\\engine\\venv\\Scripts\\python.exe",
+    "venvPath": "C:\\Users\\sebastian\\.absolutesample\\engine\\venv",
+    "torchVersion": "2.6.0+cu124",
+    "cuda": true,
+    "gpuName": "NVIDIA GeForce RTX 2070 SUPER",
+    "modelsPresent": [
+      "5c90dfd2-34c22ccb.th",
+      "MDX23C-DrumSep-aufr33-jarredou.ckpt",
+      "config_drumsep_mdx23c.yaml",
+      "download_checks.json",
+      "htdemucs_6s.yaml",
+      "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt",
+      "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956_config.yaml",
+      "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+      "model_bs_roformer_ep_317_sdr_12.9755.yaml"
+    ],
+    "enginePath": "C:\\Users\\sebastian\\.absolutesample\\engine"
   }
 }

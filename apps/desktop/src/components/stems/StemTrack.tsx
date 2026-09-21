@@ -8,8 +8,8 @@ import clsx from "clsx";
 const STEM_COLORS: Record<string, string> = {
   drums_sub: "#FF6B6B",
   bass_lowmid: "#FFB84D",
-  mid_vocals: "#7C5CFF",
-  highs_air: "#35D0FF",
+  mid_vocals: "#F25F5C",
+  highs_air: "#4CC9F0",
 };
 
 export interface StemTrackProps {
@@ -55,7 +55,7 @@ export function StemTrack({
   const [peakDb] = useState(stem.peakDb);
   const [rmsDb] = useState(stem.rmsDb);
   const [duration, setDuration] = useState(0);
-  const color = STEM_COLORS[stem.key] ?? "#7C5CFF";
+  const color = STEM_COLORS[stem.key] ?? "#F25F5C";
 
   useEffect(() => {
     if (!containerRef.current || !wavUrl) return;
@@ -63,7 +63,7 @@ export function StemTrack({
       container: containerRef.current,
       waveColor: color,
       progressColor: color,
-      cursorColor: "#35D0FF",
+      cursorColor: "#4CC9F0",
       height: 72,
       normalize: true,
       barWidth: 2,

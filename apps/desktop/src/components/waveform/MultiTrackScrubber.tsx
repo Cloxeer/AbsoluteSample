@@ -23,7 +23,7 @@ export function MultiTrackScrubber({ currentTime, durationSec }: MultiTrackScrub
     <Surface variant="inset" className="relative h-2 w-full overflow-hidden">
       <div
         ref={lineRef}
-        className="absolute top-0 bottom-0 w-[2px] bg-cyan shadow-[0_0_8px_#35D0FF]"
+        className="absolute top-0 bottom-0 w-[2px] bg-cyan shadow-[0_0_8px_#4CC9F0]"
         style={{ left: `${ratio * 100}%` }}
         aria-hidden
       />

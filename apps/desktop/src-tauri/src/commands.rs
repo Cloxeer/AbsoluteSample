@@ -2,6 +2,7 @@
 //! All blocking work runs via `tauri::async_runtime::spawn_blocking`;
 //! progress is emitted on the `"pipeline://progress"` event.
 
+use crate::audio::engine::{self, EngineStatus, InstrumentStem};
 use crate::audio::progress::Progress;
 use crate::audio::{analysis, downloader, slicer, workspace};
 use crate::pipeline;
@@ -13,10 +14,15 @@ struct TauriProgress {
 }
 
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct ProgressPayload {
     stage: String,
     percent: f32,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pass: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed: Option<bool>,
 }
 
 impl Progress for TauriProgress {
@@ -27,6 +33,25 @@ impl Progress for TauriProgress {
                 stage: stage.to_string(),
                 percent,
                 message: msg.to_string(),
+                pass: None,
+                failed: None,
+            },
+        );
+    }
+}
+
+impl TauriProgress {
+    /// Emits a progress event carrying the separation `pass` name and
+    /// whether that pass failed, for `separate_instruments`.
+    fn report_pass(&self, stage: &str, pass: &str, percent: f32, msg: &str, failed: bool) {
+        let _ = self.app.emit(
+            "pipeline://progress",
+            ProgressPayload {
+                stage: stage.to_string(),
+                percent,
+                message: msg.to_string(),
+                pass: Some(pass.to_string()),
+                failed: if failed { Some(true) } else { None },
             },
         );
     }
@@ -372,6 +397,75 @@ pub async fn slice_beats(
                 path: s.path.to_string_lossy().to_string(),
             })
             .collect())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn engine_status() -> EngineStatus {
+    tauri::async_runtime::spawn_blocking(engine::status)
+        .await
+        .unwrap_or_else(|_| EngineStatus {
+            installed: false,
+            python_found: false,
+            python_path: None,
+            venv_path: None,
+            torch_version: None,
+            cuda: false,
+            gpu_name: None,
+            models_present: Vec::new(),
+            engine_path: String::new(),
+        })
+}
+
+#[tauri::command]
+pub async fn engine_install(app: AppHandle) -> Result<EngineStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::install(|p| {
+            let _ = app.emit(
+                "engine://progress",
+                ProgressPayload {
+                    stage: p.stage,
+                    percent: p.percent,
+                    message: p.message,
+                    pass: None,
+                    failed: None,
+                },
+            );
+        })
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn separate_instruments(
+    app: AppHandle,
+    track_id: String,
+    passes: Option<Vec<String>>,
+) -> Result<Vec<InstrumentStem>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let progress = TauriProgress { app };
+        let dir = workspace::work_dir(&track_id)?;
+        let loop_wav = dir.join("loop.wav");
+        if !loop_wav.exists() {
+            return Err("loop.wav not found; call trim_loop first".to_string());
+        }
+        let passes = passes.unwrap_or_else(|| {
+            engine::DEFAULT_PASSES.iter().map(|s| s.to_string()).collect()
+        });
+        let (stems, _device, _failed_passes) =
+            engine::separate(&loop_wav, &dir, &passes, |p| {
+                progress.report_pass(
+                    &p.stage,
+                    p.pass.as_deref().unwrap_or(""),
+                    p.percent,
+                    &p.message,
+                    p.failed,
+                );
+            })?;
+        Ok(stems)
     })
     .await
     .map_err(|e| format!("task join error: {e}"))?

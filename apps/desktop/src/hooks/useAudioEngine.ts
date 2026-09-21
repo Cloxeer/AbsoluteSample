@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { backend } from "@/lib/backend";
 import { onProgress } from "@/lib/events";
-import type { LoopAnalysis, LoopInfo, ProgressPayload, StemInfo, TrackInfo } from "@/lib/types";
+import type { InstrumentStem, LoopAnalysis, LoopInfo, ProgressPayload, StemInfo, TrackInfo } from "@/lib/types";
 
 export type EngineState =
   | "idle"
@@ -19,6 +19,7 @@ export interface AudioEngineState {
   track: TrackInfo | null;
   loop: LoopInfo | null;
   stems: StemInfo[] | null;
+  instruments: InstrumentStem[] | null;
   analysis: LoopAnalysis | null;
   progress: ProgressPayload | null;
   error: string | null;
@@ -30,6 +31,7 @@ export function useAudioEngine() {
     track: null,
     loop: null,
     stems: null,
+    instruments: null,
     analysis: null,
     progress: null,
     error: null,
@@ -88,6 +90,18 @@ export function useAudioEngine() {
     }
   }, []);
 
+  const separateInstruments = useCallback(async (trackId: string) => {
+    setEngine((prev) => ({ ...prev, state: "separating", error: null }));
+    try {
+      const instruments = await backend.separateInstruments({ trackId });
+      setEngine((prev) => ({ ...prev, state: "ready", instruments }));
+      return instruments;
+    } catch (err) {
+      setEngine((prev) => ({ ...prev, state: "error", error: String(err) }));
+      throw err;
+    }
+  }, []);
+
   const analyzeLoop = useCallback(async (trackId: string) => {
     setEngine((prev) => ({ ...prev, state: "analyzing" }));
     try {
@@ -106,11 +120,12 @@ export function useAudioEngine() {
       track: null,
       loop: null,
       stems: null,
+      instruments: null,
       analysis: null,
       progress: null,
       error: null,
     });
   }, []);
 
-  return { engine, fetchAudio, trimLoop, separateStems, analyzeLoop, reset };
+  return { engine, fetchAudio, trimLoop, separateStems, separateInstruments, analyzeLoop, reset };
 }

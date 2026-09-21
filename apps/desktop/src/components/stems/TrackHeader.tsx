@@ -1,5 +1,6 @@
-import { Download, Pause, Play } from "lucide-react";
+import { Download } from "lucide-react";
 import { Button } from "@/components/neumorphic/Button";
+import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { Slider } from "@/components/neumorphic/Slider";
 import { formatDb } from "@/lib/format";
 import clsx from "clsx";
@@ -79,16 +80,13 @@ export function TrackHeader({
           <div className="text-sm font-semibold truncate">{name}</div>
           <div className="text-[11px] text-muted truncate">{band}</div>
         </div>
-        <Button
-          aria-label={isAuditioning ? `Pause ${name} only` : `Play ${name} only`}
-          aria-pressed={isAuditioning}
-          pressed={isAuditioning}
-          tone="accent"
-          onClick={onAudition}
+        <PlayPauseButton
+          playing={isAuditioning}
+          onToggle={onAudition}
+          label={`${name} only`}
+          size={14}
           className="!p-0 h-8 w-8 flex items-center justify-center shrink-0"
-        >
-          {isAuditioning ? <Pause size={14} /> : <Play size={14} />}
-        </Button>
+        />
       </div>
 
       {mute && (

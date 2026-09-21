@@ -3,20 +3,36 @@
 @tailwind utilities;
 
 :root {
-  --color-bg: #121316;
-  --color-surface: #18191e;
-  --color-text: #e6e7eb;
-  --color-muted: #8b8f9a;
-  --color-accent: #7c5cff;
-  --color-cyan: #35d0ff;
-  --color-stem-drums: #ff6b6b;
-  --color-stem-bass: #ffb84d;
-  --color-stem-mid: #7c5cff;
-  --color-stem-highs: #35d0ff;
+  --color-bg: #111214;
+  --color-surface: #1a1b1f;
+  --color-surface-2: #212327;
+  --color-line: rgba(255, 255, 255, 0.06);
+  --color-text: #ecedef;
+  --color-muted: #9a9ea8;
+  --color-accent: #f2b33d;
+  --color-accent-ink: #1a1300;
+  --color-danger: #e5484d;
+  --color-ok: #3dd68c;
+  --color-cyan: #4cc9f0;
 
-  --shadow-raised: 8px 8px 18px #0b0c0e, -6px -6px 14px #22242b;
-  --shadow-inset: inset 6px 6px 12px #0b0c0e, inset -4px -4px 10px #22242b;
-  --shadow-pressed: inset 4px 4px 10px #0b0c0e, inset -3px -3px 8px #22242b;
+  --color-stem-drums: #f2b33d;
+  --color-stem-bass: #4c8bf5;
+  --color-stem-mid: #f25f5c;
+  --color-stem-highs: #8a94a6;
+
+  --color-inst-vocals: #f25f5c;
+  --color-inst-drums: #f2b33d;
+  --color-inst-bass: #4c8bf5;
+  --color-inst-guitar: #3dd68c;
+  --color-inst-keys: #b692f6;
+  --color-inst-other: #8a94a6;
+
+  --shadow-raised: 4px 4px 10px rgba(0, 0, 0, 0.28), -3px -3px 8px rgba(255, 255, 255, 0.03);
+  --shadow-inset: inset 3px 3px 7px rgba(0, 0, 0, 0.3), inset -2px -2px 5px rgba(255, 255, 255, 0.03);
+  --shadow-pressed: inset 2px 2px 5px rgba(0, 0, 0, 0.32), inset -1px -1px 4px rgba(255, 255, 255, 0.03);
+
+  --font-ui: "Manrope", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 html,
@@ -28,23 +44,29 @@ body,
 body {
   background-color: var(--color-bg);
   color: var(--color-text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: var(--font-ui);
   margin: 0;
+}
+
+.font-mono,
+input[type="number"],
+kbd {
+  font-family: var(--font-mono);
 }
 
 .neu-surface-raised {
   box-shadow: var(--shadow-raised);
-  border: 1px solid rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--color-line);
 }
 
 .neu-surface-inset {
   box-shadow: var(--shadow-inset);
-  border: 1px solid rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--color-line);
 }
 
 .neu-surface-pressed {
   box-shadow: var(--shadow-pressed);
-  border: 1px solid rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--color-line);
 }
 
 ::-webkit-scrollbar {

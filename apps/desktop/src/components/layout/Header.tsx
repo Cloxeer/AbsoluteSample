@@ -1,6 +1,7 @@
-import { AudioWaveform, Pause, Play, Square } from "lucide-react";
+import { AudioWaveform, Square } from "lucide-react";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
+import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { formatTime } from "@/lib/format";
 import type { DependencyReport } from "@/lib/types";
 import clsx from "clsx";
@@ -43,9 +44,7 @@ export function Header({ deps, isPlaying, currentTime, onPlayPause, onStop }: He
       </div>
 
       <Surface variant="raised" className="flex items-center gap-3 px-4 py-2">
-        <Button aria-label={isPlaying ? "Pause" : "Play"} onClick={onPlayPause} className="!px-3 !py-2">
-          {isPlaying ? <Pause size={16} /> : <Play size={16} />}
-        </Button>
+        <PlayPauseButton playing={isPlaying} onToggle={onPlayPause} label="mix" className="!px-3 !py-2" />
         <Button aria-label="Stop" onClick={onStop} className="!px-3 !py-2">
           <Square size={16} />
         </Button>

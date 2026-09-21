@@ -20,6 +20,9 @@ pub fn run() {
             commands::save_all_stems,
             commands::open_work_dir,
             commands::slice_beats,
+            commands::engine_status,
+            commands::engine_install,
+            commands::separate_instruments,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

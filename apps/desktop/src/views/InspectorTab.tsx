@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
-import { Play } from "lucide-react";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
+import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { backend } from "@/lib/backend";
-import type { LoopAnalysis, SliceInfo, StemInfo, StemKey, TrackInfo, LoopInfo } from "@/lib/types";
+import type { InstrumentStem, LoopAnalysis, SliceInfo, StemInfo, StemKey, TrackInfo, LoopInfo } from "@/lib/types";
+import { groupInstruments } from "@/lib/instruments";
 import clsx from "clsx";
 
 const ROW_COLORS: Record<string, string> = {
   drums_sub: "#FF6B6B",
   bass_lowmid: "#FFB84D",
-  mid_vocals: "#7C5CFF",
-  highs_air: "#35D0FF",
+  mid_vocals: "#F25F5C",
+  highs_air: "#4CC9F0",
   loop: "#8B8F9A",
 };
 
@@ -19,9 +20,19 @@ export interface InspectorTabProps {
   track: TrackInfo | null;
   loop: LoopInfo | null;
   stems: StemInfo[] | null;
+  instruments?: InstrumentStem[] | null;
   analysis: LoopAnalysis | null;
   onAnalyze: () => Promise<LoopAnalysis>;
 }
+
+const INSTRUMENT_COLORS: Record<string, string> = {
+  vocals: "#F25F5C",
+  drums: "#F2B33D",
+  bass: "#4C8BF5",
+  guitar: "#3DD68C",
+  keys: "#B692F6",
+  other: "#8A94A6",
+};
 
 const ROW_KEYS: (StemKey | "loop")[] = ["drums_sub", "bass_lowmid", "mid_vocals", "highs_air", "loop"];
 const ROW_LABELS: Record<string, string> = {
@@ -46,7 +57,7 @@ function OnsetPlot({ analysis }: { analysis: LoopAnalysis }) {
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-32">
-      <polyline points={points} fill="none" stroke="#7C5CFF" strokeWidth={1.5} />
+      <polyline points={points} fill="none" stroke="#F25F5C" strokeWidth={1.5} />
       {analysis.beatGrid.map((t, i) => (
         <line
           key={`beat-${i}`}
@@ -54,7 +65,7 @@ function OnsetPlot({ analysis }: { analysis: LoopAnalysis }) {
           x2={(t / durationSec) * width}
           y1={0}
           y2={height}
-          stroke="#35D0FF"
+          stroke="#4CC9F0"
           strokeOpacity={0.35}
           strokeWidth={1}
         />
@@ -66,7 +77,7 @@ function OnsetPlot({ analysis }: { analysis: LoopAnalysis }) {
   );
 }
 
-export function InspectorTab({ track, loop, stems, analysis, onAnalyze }: InspectorTabProps) {
+export function InspectorTab({ track, loop, stems, instruments, analysis, onAnalyze }: InspectorTabProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
   const [loopWavUrl, setLoopWavUrl] = useState<string | null>(null);
@@ -88,9 +99,9 @@ export function InspectorTab({ track, loop, stems, analysis, onAnalyze }: Inspec
     if (!containerRef.current || !loopWavUrl) return;
     const ws = WaveSurfer.create({
       container: containerRef.current,
-      waveColor: "#7C5CFF",
-      progressColor: "#35D0FF",
-      cursorColor: "#35D0FF",
+      waveColor: "#F25F5C",
+      progressColor: "#4CC9F0",
+      cursorColor: "#4CC9F0",
       height: 80,
       url: loopWavUrl,
     });
@@ -100,6 +111,8 @@ export function InspectorTab({ track, loop, stems, analysis, onAnalyze }: Inspec
       wsRef.current = null;
     };
   }, [loopWavUrl]);
+
+  const instrumentRows = useMemo(() => (instruments ? groupInstruments(instruments).map((n) => n.stem) : null), [instruments]);
 
   const beatColumns = useMemo(() => {
     if (!analysis) return [];
@@ -187,33 +200,31 @@ export function InspectorTab({ track, loop, stems, analysis, onAnalyze }: Inspec
         <Surface variant="raised" className="p-4 flex flex-col gap-2 overflow-x-auto">
           <h2 className="text-sm font-semibold text-muted uppercase tracking-wide">Beat Matrix</h2>
           <div className="flex flex-col gap-1 min-w-max">
-            {ROW_KEYS.map((rowKey) => {
-              const stem = stems?.find((s) => s.key === rowKey);
-              if (rowKey !== "loop" && !stem) return null;
-              const color = ROW_COLORS[rowKey] ?? "#7C5CFF";
+            {(instrumentRows
+              ? instrumentRows.map((s) => ({ key: s.key, label: s.label, color: INSTRUMENT_COLORS[s.group] }))
+              : ROW_KEYS.map((k) => ({ key: k, label: ROW_LABELS[k], color: ROW_COLORS[k] ?? "#F25F5C" }))
+            ).map(({ key: rowKey, label: rowLabel, color }) => {
+              if (!instrumentRows && rowKey !== "loop" && !stems?.find((s) => s.key === rowKey)) return null;
               const rowPlaying = activeRow === rowKey;
               return (
                 <div
                   key={rowKey}
                   role="group"
-                  aria-label={`${ROW_LABELS[rowKey]} row`}
+                  aria-label={`${rowLabel} row`}
                   className={clsx(
                     "flex items-center gap-2 rounded-xl p-1",
                     rowPlaying && "border-l-4"
                   )}
                   style={rowPlaying ? { borderLeftColor: color } : undefined}
                 >
-                  <Button
-                    aria-label={`Audition ${ROW_LABELS[rowKey]}`}
-                    aria-pressed={rowPlaying}
-                    pressed={rowPlaying}
-                    tone="accent"
-                    onClick={() => handleAuditionRow(rowKey)}
+                  <PlayPauseButton
+                    playing={rowPlaying}
+                    onToggle={() => handleAuditionRow(rowKey)}
+                    label={rowLabel}
+                    size={10}
                     className="!p-0 h-6 w-6 flex items-center justify-center shrink-0"
-                  >
-                    <Play size={10} />
-                  </Button>
-                  <span className="w-28 text-xs text-muted shrink-0">{ROW_LABELS[rowKey]}</span>
+                  />
+                  <span className="w-28 text-xs text-muted shrink-0">{rowLabel}</span>
                   <div className="flex gap-1">
                     {beatColumns.map((beatTime, i) => {
                       const stepDur = beatColumns.length > 1 ? beatColumns[1] - beatColumns[0] : 0.25;

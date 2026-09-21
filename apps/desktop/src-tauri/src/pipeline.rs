@@ -1,10 +1,19 @@
 //! High-level fetch -> trim -> stems -> analyze pipeline shared by the CLI
 //! `run` subcommand and (indirectly) the Tauri commands.
 
+use crate::audio::engine::{EngineStatus, InstrumentStem};
 use crate::audio::progress::Progress;
-use crate::audio::{analysis, downloader, dsp_filters, slicer, workspace};
-use serde::Serialize;
+use crate::audio::{analysis, downloader, dsp_filters, engine, slicer, workspace};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+/// Which separation engine `run_full` should use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    Bands,
+    Ai,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +62,10 @@ pub struct Manifest {
     pub loop_info: LoopManifest,
     pub stems: Vec<StemManifest>,
     pub analysis: analysis::LoopAnalysis,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruments: Option<Vec<InstrumentStem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<EngineStatus>,
 }
 
 /// fetch: yt-dlp download + ffprobe + decode source.wav.
@@ -183,6 +196,7 @@ pub fn run_full(
     start_sec: f64,
     end_sec: f64,
     out_dir: &Path,
+    engine_choice: Engine,
     progress: &dyn Progress,
 ) -> Result<Manifest, String> {
     let track = run_fetch(url, progress)?;
@@ -193,14 +207,31 @@ pub fn run_full(
         end_sec,
         progress,
     )?;
+    // The band split is cheap, so it always runs regardless of engine choice.
     let stems = run_stems(&track.id, Path::new(&loop_info.wav_path), progress)?;
     let analysis = run_analyze(Path::new(&loop_info.wav_path), loop_info.duration_sec, progress)?;
+
+    let (instruments, engine_status) = if engine_choice == Engine::Ai {
+        let work_dir = workspace::work_dir(&track.id)?;
+        let passes: Vec<String> = engine::DEFAULT_PASSES.iter().map(|s| s.to_string()).collect();
+        let (stems, _device, _failed) = engine::separate(
+            Path::new(&loop_info.wav_path),
+            &work_dir,
+            &passes,
+            |p| progress.report(&p.stage, p.percent, &p.message),
+        )?;
+        (Some(stems), Some(engine::status()))
+    } else {
+        (None, None)
+    };
 
     let manifest = Manifest {
         track,
         loop_info,
         stems,
         analysis,
+        instruments,
+        engine: engine_status,
     };
 
     std::fs::create_dir_all(out_dir).map_err(|e| format!("failed to create out dir: {e}"))?;
@@ -220,6 +251,23 @@ pub fn run_full(
         std::fs::copy(src, &dest).map_err(|e| format!("failed to copy stem to out dir: {e}"))?;
     }
 
+    // Copy instruments/*.wav into out_dir/instruments/ (separate from the
+    // workspace instruments dir already produced by `engine::separate`).
+    if let Some(instruments) = &manifest.instruments {
+        let instruments_dest_dir = out_dir.join("instruments");
+        std::fs::create_dir_all(&instruments_dest_dir)
+            .map_err(|e| format!("failed to create out instruments dir: {e}"))?;
+        for stem in instruments {
+            let src = Path::new(&stem.path);
+            let filename = src
+                .file_name()
+                .ok_or_else(|| "instrument stem path has no filename".to_string())?;
+            let dest = instruments_dest_dir.join(filename);
+            std::fs::copy(src, &dest)
+                .map_err(|e| format!("failed to copy instrument stem to out dir: {e}"))?;
+        }
+    }
+
     let manifest_path = out_dir.join("manifest.json");
     let manifest_json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| format!("failed to serialize manifest: {e}"))?;
@@ -229,4 +277,17 @@ pub fn run_full(
     progress.report("analyze", 100.0, "pipeline complete");
 
     Ok(manifest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_enum_serializes_lowercase() {
+        assert_eq!(serde_json::to_string(&Engine::Bands).unwrap(), "\"bands\"");
+        assert_eq!(serde_json::to_string(&Engine::Ai).unwrap(), "\"ai\"");
+        let parsed: Engine = serde_json::from_str("\"ai\"").unwrap();
+        assert_eq!(parsed, Engine::Ai);
+    }
 }

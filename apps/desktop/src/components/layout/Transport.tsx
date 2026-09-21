@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { AudioWaveform, HelpCircle, Pause, Play, Repeat, Square } from "lucide-react";
+import { AudioWaveform, HelpCircle, Repeat, Square } from "lucide-react";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
+import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { Slider } from "@/components/neumorphic/Slider";
 import { formatTime } from "@/lib/format";
 import type { DependencyReport } from "@/lib/types";
@@ -73,17 +74,13 @@ export function Transport({
         </div>
 
         <Surface variant="raised" className="flex items-center gap-3 px-4 py-2">
-          <Button
-            aria-label={isPlaying ? "Pause" : "Play mix"}
-            aria-pressed={isPlaying && mode === "mix"}
-            pressed={isPlaying && mode === "mix"}
-            tone="accent"
-            onClick={onPlayPause}
+          <PlayPauseButton
+            playing={isPlaying && mode === "mix"}
+            onToggle={onPlayPause}
+            label="mix"
+            size={18}
             className="!px-3 !py-3 h-11 w-11 flex items-center justify-center"
-            title="Play mix"
-          >
-            {isPlaying ? <Pause size={18} /> : <Play size={18} />}
-          </Button>
+          />
           <Button aria-label="Stop" onClick={onStop} className="!px-3 !py-2">
             <Square size={16} />
           </Button>
@@ -160,7 +157,7 @@ export function Transport({
 
       {mode === "audition" && auditionLabel && (
         <div className="px-6 pb-2 -mt-2 text-xs text-muted">
-          Auditioning <span className="text-cyan font-medium">{auditionLabel}</span> only — press Play mix to hear
+          Auditioning <span className="text-cyan font-medium">{auditionLabel}</span> only, press Play mix to hear
           all stems.
         </div>
       )}

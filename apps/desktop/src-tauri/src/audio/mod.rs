@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod dsp_filters;
 pub mod downloader;
+pub mod engine;
 pub mod progress;
 pub mod slicer;
 pub mod workspace;

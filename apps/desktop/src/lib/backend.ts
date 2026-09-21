@@ -2,6 +2,8 @@ import { isTauri, mediaUrl } from "./mediaUrl";
 import * as mock from "./backend.mock";
 import type {
   DependencyReport,
+  EngineStatus,
+  InstrumentStem,
   LoopAnalysis,
   LoopInfo,
   SliceInfo,
@@ -64,6 +66,21 @@ export const backend = {
   async resolveWavUrl(path: string): Promise<string> {
     if (isTauri()) return mediaUrl(path);
     return mock.resolveWav(path);
+  },
+
+  async engineStatus(): Promise<EngineStatus> {
+    if (isTauri()) return invokeTauri<EngineStatus>("engine_status");
+    return mock.engineStatus();
+  },
+
+  async engineInstall(): Promise<EngineStatus> {
+    if (isTauri()) return invokeTauri<EngineStatus>("engine_install");
+    return mock.engineInstall();
+  },
+
+  async separateInstruments(args: { trackId: string; passes?: string[] }): Promise<InstrumentStem[]> {
+    if (isTauri()) return invokeTauri<InstrumentStem[]>("separate_instruments", args);
+    return mock.separateInstruments(args);
   },
 };
 

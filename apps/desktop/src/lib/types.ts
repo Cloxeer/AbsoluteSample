@@ -58,10 +58,49 @@ export interface SliceInfo {
   path: string;
 }
 
-export type ProgressStage = "download" | "decode" | "trim" | "stems" | "analyze" | "slice";
+export type ProgressStage = "download" | "decode" | "trim" | "stems" | "analyze" | "slice" | "separate";
 
 export interface ProgressPayload {
   stage: ProgressStage;
+  percent: number;
+  message: string;
+  pass?: string;
+  failed?: boolean;
+}
+
+// v2 addendum: AI instrument separation engine
+
+export interface EngineStatus {
+  installed: boolean;
+  pythonFound: boolean;
+  pythonPath: string | null;
+  venvPath: string | null;
+  torchVersion: string | null;
+  cuda: boolean;
+  gpuName: string | null;
+  modelsPresent: string[];
+  enginePath: string;
+}
+
+export type InstrumentGroup = "vocals" | "drums" | "bass" | "guitar" | "keys" | "other";
+
+export interface InstrumentStem {
+  key: string;
+  label: string;
+  group: InstrumentGroup;
+  parent: string | null;
+  path: string;
+  bytes: number;
+  peakDb: number;
+  rmsDb: number;
+  model: string;
+  order: number;
+}
+
+export type EnginePassStage = "python" | "venv" | "torch" | "separator" | "verify";
+
+export interface EngineProgressPayload {
+  stage: EnginePassStage;
   percent: number;
   message: string;
 }

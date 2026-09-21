@@ -99,3 +99,56 @@ Graph: `[0:a]asplit=4[a][b][c][d]; [a]LP130[s1]; [b]HP130,LP800[s2]; [c]HP800,LP
 
 ## CLI (for tests)
 `cargo run --bin absolutesample-cli -- run --url <url> --start 30 --end 45 --out <dir>` performs fetch→trim→stems→analyze and writes `manifest.json` (`{track, loop, stems, analysis}`) into `<dir>`; exit non-zero on any failure. Subcommands: `deps`, `fetch`, `trim`, `stems`, `analyze`, `run`.
+
+---
+
+# v2 addendum: AI instrument separation engine (authoritative)
+
+## Engine location
+`%LOCALAPPDATA%/AbsoluteSample/engine/` holds `venv/` (Python 3.12 virtualenv), `models/` (downloaded weights),
+and `separate.py` (the Rust binary embeds repo `engine/separate.py` via `include_str!` and writes it there before every run).
+
+## Python script protocol
+`<engine>/venv/Scripts/python.exe <engine>/separate.py --input <loop.wav> --out <workdir>/instruments --passes instruments,vocals,lead,drums --models-dir <engine>/models --device auto`
+stdout JSON lines: `device {device,gpu}`, `progress {pass,percent,message}` (percent -1 = indeterminate), `pass_done {pass,seconds}`,
+`pass_failed {pass,error}` (chain continues), `done {stems:[{key,label,group,parent,path,model,order}],device}`, `fatal {error}` (exit 1).
+Passes: instruments (Demucs htdemucs_6s, always), vocals (BS-Roformer ensemble), lead (lead/backing vocals), drums (kick/snare/toms/hihat/ride/crash).
+
+## Python discovery (engine_install)
+Order: env `ABSOLUTESAMPLE_PYTHON`; `py -3.12`; `py -0` listing any tag containing `3.12` (e.g. `-V:Astral\CPython3.12.14`, run as `py -V:<tag>`); `python3.12`/`python` on PATH whose `--version` starts with 3.12; else error "Python 3.12 not found" with an install hint (`winget install Python.Python.3.12`).
+Install steps (emit "engine://progress" {stage:'python'|'venv'|'torch'|'separator'|'verify', percent, message}):
+1. `<python> -m venv <engine>/venv`
+2. `<venv>/Scripts/python.exe -m pip install --upgrade pip`
+3. `pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124`
+4. `pip install "audio-separator[gpu]" soundfile`
+5. verify: `python -c "import torch,audio_separator,soundfile;print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"`
+Stream pip stdout lines as progress messages (percent -1). Long running: tens of minutes on first install; must run on a blocking thread.
+
+## New Tauri commands / types (camelCase JSON)
+```ts
+interface EngineStatus { installed: boolean; pythonFound: boolean; pythonPath: string|null; venvPath: string|null;
+  torchVersion: string|null; cuda: boolean; gpuName: string|null; modelsPresent: string[]; enginePath: string; }
+// engine_status() -> EngineStatus     never throws; installed = venv python exists AND verify import succeeds (cache result 60s)
+// engine_install() -> EngineStatus    long-running, progress on "engine://progress"
+// separate_instruments({ trackId, passes?: string[] }) -> InstrumentStem[]
+//   emits "pipeline://progress" { stage:'separate', pass:string, percent:number, message:string, failed?:boolean }
+interface InstrumentStem { key: string; label: string; group: 'vocals'|'drums'|'bass'|'guitar'|'keys'|'other';
+  parent: string|null; path: string; bytes: number; peakDb: number; rmsDb: number; model: string; order: number; }
+// Output: <workdir>/instruments/<key>.wav; manifest <workdir>/instruments.json ({stems, device, failedPasses:[{pass,error}]}).
+// peakDb/rmsDb via ffmpeg astats as for the band stems.
+// The 4-band split stays available as separate_stems (UI label "Quick EQ bands").
+```
+
+## CLI
+`absolutesample-cli engine status|install`, `absolutesample-cli instruments --track <id> [--passes a,b]`,
+`run --engine ai|bands` (default bands) runs the full chain; with `ai` the manifest gains `instruments: InstrumentStem[]` and `engine: EngineStatus`.
+
+## Frontend fixtures
+Mock backend serves `/fixtures/instruments/<key>.wav` listed in `/fixtures/manifest.json` `instruments`.
+
+## Home directory (overrides earlier %LOCALAPPDATA% paths, v2)
+All app data lives under `ABSOLUTESAMPLE_HOME` env if set, else `%USERPROFILE%\.absolutesample\`:
+`work\<track_id>\...` (was %LOCALAPPDATA%/AbsoluteSample/work) and `engine\` (venv, models, separate.py).
+Reason: `%LOCALAPPDATA%` is filesystem-virtualized for processes started from packaged (MSIX) apps, so files written there
+are invisible to the same program launched normally. `tauri.conf.json` assetProtocol scope must include `$HOME/.absolutesample/**`
+(keep the old entries too).
