@@ -243,3 +243,36 @@ export interface TrashEntry {
   deletedAt: string;
   bytes: number;
 }
+
+// v6 addendum: Notes (replaces Loop & Beat Matrix)
+
+export interface NoteEvent {
+  startSec: number;
+  endSec: number;
+  midi: number;
+  name: string;
+  velocity: number;
+}
+
+export interface ChordEvent {
+  startSec: number;
+  endSec: number;
+  name: string;
+  notes: string[];
+}
+
+export interface NotesKey {
+  tonic: string;
+  mode: "major" | "minor";
+  confidence: number;
+}
+
+export interface NotesResult {
+  notes: NoteEvent[];
+  key: NotesKey | null;
+  chords: ChordEvent[];
+  scale: string[];
+  bpm: number | null;
+  midPath: string;
+  elapsedSec: number;
+}

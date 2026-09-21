@@ -9,6 +9,7 @@ import type {
   LibrarySize,
   LoopAnalysis,
   LoopInfo,
+  NotesResult,
   RegionParams,
   Sample,
   SliceInfo,
@@ -155,9 +156,9 @@ export const backend = {
     return mock.emptyTrash();
   },
 
-  async clearScans(): Promise<void> {
-    if (isTauri()) return invokeTauri<void>("clear_scans");
-    return mock.clearScans();
+  async clearScans(args?: { except?: string }): Promise<void> {
+    if (isTauri()) return invokeTauri<void>("clear_scans", args);
+    return mock.clearScans(args);
   },
 
   async listSamples(): Promise<Sample[]> {
@@ -192,6 +193,25 @@ export const backend = {
   async revealSample(args: { id: string }): Promise<void> {
     if (isTauri()) return invokeTauri<void>("reveal_sample", args);
     return mock.revealSample(args);
+  },
+
+  async extractNotes(args: { path: string; bpm?: number }): Promise<NotesResult> {
+    if (isTauri()) return invokeTauri<NotesResult>("extract_notes", args);
+    return mock.extractNotes(args);
+  },
+
+  async exportMidi(args: { path: string; destPath?: string }): Promise<string | null> {
+    if (isTauri()) {
+      let destPath = args.destPath;
+      if (!destPath) {
+        const { save } = await import("@tauri-apps/plugin-dialog");
+        const picked = await save({ filters: [{ name: "MIDI", extensions: ["mid"] }] });
+        if (!picked) return null;
+        destPath = picked;
+      }
+      return invokeTauri<string>("export_midi", { path: args.path, destPath });
+    }
+    return mock.exportMidi(args);
   },
 };
 

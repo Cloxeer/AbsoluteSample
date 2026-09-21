@@ -1,5 +1,6 @@
 import { emitMockEngineProgress, emitMockProgress } from "./events";
 import type {
+  ChordEvent,
   CutRegionResult,
   DependencyReport,
   EngineStatus,
@@ -8,6 +9,8 @@ import type {
   LibraryEntry,
   LoopAnalysis,
   LoopInfo,
+  NoteEvent,
+  NotesResult,
   RegionParams,
   Sample,
   SliceInfo,
@@ -760,10 +763,10 @@ export async function emptyTrash(): Promise<void> {
   trashStore = [];
 }
 
-export async function clearScans(): Promise<void> {
+export async function clearScans(args?: { except?: string }): Promise<void> {
   const store = await getLibraryStore();
   for (const [id, rec] of Array.from(store.entries())) {
-    if (!rec.entry.kept) store.delete(id);
+    if (!rec.entry.kept && id !== args?.except) store.delete(id);
   }
 }
 
@@ -1235,4 +1238,59 @@ export async function exportSamples(args: { ids: string[]; destDir?: string }): 
 
 export async function revealSample(_args: { id: string }): Promise<void> {
   await delay(30);
+}
+
+// v6 addendum: Notes (Basic Pitch)
+
+const PITCH_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+function midiName(midi: number): string {
+  const name = PITCH_NAMES[((midi % 12) + 12) % 12];
+  const octave = Math.floor(midi / 12) - 1;
+  return `${name}${octave}`;
+}
+
+/** Deterministic fake notes: a C major arpeggio over 8 seconds, used by the Notes tab in mock/dev mode. */
+export async function extractNotes(args: { path: string; bpm?: number }): Promise<NotesResult> {
+  await delay(150);
+  const bpm = args.bpm ?? 120;
+  const step = 60 / bpm;
+  const arpeggio = [60, 64, 67, 72];
+  const durationSec = 8;
+  const notes: NoteEvent[] = [];
+  let t = 0;
+  let i = 0;
+  while (t < durationSec - 1e-6) {
+    const midi = arpeggio[i % arpeggio.length];
+    const endSec = Math.min(durationSec, t + step * 0.9);
+    notes.push({
+      startSec: Number(t.toFixed(3)),
+      endSec: Number(endSec.toFixed(3)),
+      midi,
+      name: midiName(midi),
+      velocity: 70 + (i % arpeggio.length) * 12,
+    });
+    t += step;
+    i++;
+  }
+  const third = durationSec / 3;
+  const chords: ChordEvent[] = [
+    { startSec: 0, endSec: Number(third.toFixed(3)), name: "C", notes: ["C", "E", "G"] },
+    { startSec: Number(third.toFixed(3)), endSec: Number((third * 2).toFixed(3)), name: "F", notes: ["F", "A", "C"] },
+    { startSec: Number((third * 2).toFixed(3)), endSec: durationSec, name: "G", notes: ["G", "B", "D"] },
+  ];
+  return {
+    notes,
+    key: { tonic: "C", mode: "major", confidence: 0.9 },
+    chords,
+    scale: ["C", "D", "E", "F", "G", "A", "B"],
+    bpm,
+    midPath: `mock/${hashString(args.path)}/notes.mid`,
+    elapsedSec: 0.4,
+  };
+}
+
+export async function exportMidi(args: { path: string; destPath?: string }): Promise<string> {
+  await delay(80);
+  return args.destPath ?? args.path.replace(/\.notes\.json$/, "").replace(/[^/\\]*$/, "notes.mid");
 }
