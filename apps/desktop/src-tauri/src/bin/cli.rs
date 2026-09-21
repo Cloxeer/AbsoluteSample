@@ -1,5 +1,6 @@
 use absolutesample_lib::audio::cuts;
 use absolutesample_lib::audio::engine::{self, EngineProgress};
+use absolutesample_lib::audio::notes;
 use absolutesample_lib::audio::progress::Stdout;
 use absolutesample_lib::audio::{downloader, library, samples, trash, workspace};
 use absolutesample_lib::pipeline::{self, Engine};
@@ -149,6 +150,13 @@ enum Commands {
         min_gap_ms: f64,
         #[arg(long, default_value_t = 64)]
         max_hits: u32,
+    },
+    /// Extract notes/key/chords from a wav via Basic Pitch (contract v6
+    /// "Notes"). Cached next to the wav under `notes/`.
+    Notes {
+        path: PathBuf,
+        #[arg(long)]
+        bpm: Option<f64>,
     },
 }
 
@@ -503,5 +511,12 @@ fn main() -> ExitCode {
                 Err(e) => print_err("hits", &e),
             }
         }
+        Commands::Notes { path, bpm } => match notes::extract_notes(&path, bpm) {
+            Ok(result) => {
+                print_json(&result);
+                ExitCode::SUCCESS
+            }
+            Err(e) => print_err("notes", &e),
+        },
     }
 }

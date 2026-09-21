@@ -8,9 +8,12 @@ pub mod commands;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     audio::trash::prune_trash(audio::trash::DEFAULT_RETENTION_DAYS);
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::init());
+    #[cfg(feature = "drag")]
+    let builder = builder.plugin(tauri_plugin_drag::init());
+    builder
         .invoke_handler(tauri::generate_handler![
             commands::check_dependencies,
             commands::fetch_audio,
@@ -43,6 +46,8 @@ pub fn run() {
             commands::list_trash,
             commands::restore_trash,
             commands::empty_trash,
+            commands::extract_notes,
+            commands::export_midi,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

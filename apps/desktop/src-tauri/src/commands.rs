@@ -762,3 +762,23 @@ pub async fn reveal_sample(id: String) -> Result<(), String> {
     .await
     .map_err(|e| format!("task join error: {e}"))?
 }
+
+// ---------------------------------------------------------------------
+// v6: Notes
+// ---------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn extract_notes(path: String, bpm: Option<f64>) -> Result<crate::audio::notes::NotesResult, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::audio::notes::extract_notes(std::path::Path::new(&path), bpm))
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn export_midi(path: String, dest_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::audio::notes::export_midi(std::path::Path::new(&path), std::path::Path::new(&dest_path))
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
