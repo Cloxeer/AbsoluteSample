@@ -7,12 +7,14 @@ import type { Sample } from "@/lib/types";
 vi.mock("@/lib/backend", () => ({
   backend: {
     saveSample: vi.fn(),
+    cutRegion: vi.fn(),
   },
 }));
 
 describe("SaveSampleButton", () => {
   beforeEach(() => {
     vi.mocked(backend.saveSample).mockReset();
+    vi.mocked(backend.cutRegion).mockReset();
   });
 
   it("opens a popover prefilled with the default name pattern, and saves on click", async () => {
@@ -112,5 +114,73 @@ describe("SaveSampleButton", () => {
       />
     );
     expect(screen.getByLabelText("Save Drums / Sub as sample")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("with a region, previews the snapped range/bars via cutRegion and passes the region to saveSample", async () => {
+    vi.mocked(backend.cutRegion).mockResolvedValue({
+      path: "mock/cut.wav",
+      startSec: 30,
+      endSec: 45.612,
+      bars: 6,
+      peaks: [],
+      durationSec: 15.612,
+    });
+    const sample: Sample = {
+      id: "s1",
+      name: "region sample",
+      path: "mock/path.wav",
+      bytes: 1000,
+      songId: "track1",
+      songTitle: "My song",
+      stemKey: "drums_sub",
+      stemLabel: "Drums / Sub",
+      group: "band",
+      startSec: 30,
+      endSec: 45.612,
+      durationSec: 15.612,
+      bpm: 120,
+      createdAt: new Date().toISOString(),
+    };
+    vi.mocked(backend.saveSample).mockResolvedValue(sample);
+
+    render(
+      <SaveSampleButton
+        trackId="track1"
+        stemKey="drums_sub"
+        stemLabel="Drums / Sub"
+        songTitle="My song"
+        startSec={30}
+        endSec={45}
+        samples={[]}
+        region={{ startSec: 29.9, endSec: 45.7, snap: "bar" }}
+      />
+    );
+
+    fireEvent.click(screen.getByLabelText("Save Drums / Sub as sample"));
+
+    expect(backend.cutRegion).toHaveBeenCalledWith({
+      trackId: "track1",
+      stemKey: "drums_sub",
+      startSec: 29.9,
+      endSec: 45.7,
+      snap: "bar",
+      fadeMs: 5,
+      trimLeadingSilence: true,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("00:30.000 to 00:45.612, 6 bars")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      expect(backend.saveSample).toHaveBeenCalledWith({
+        trackId: "track1",
+        stemKey: "drums_sub",
+        name: expect.any(String),
+        region: { startSec: 29.9, endSec: 45.7, snap: "bar", fadeMs: 5, trimLeadingSilence: true },
+      });
+    });
   });
 });
