@@ -67,6 +67,7 @@ unit tests build with `--no-default-features` so they only need ffmpeg and a lin
 | Vocals refine | BS-Roformer (viperx, SDR 12.97) | ensembled with the Demucs vocals; what leaves the vocals goes back into "other" so the stems still sum to the mix |
 | Lead and backing | Mel-Band Roformer karaoke | lead vocals, backing vocals |
 | Drum kit | MDX23C DrumSep | kick, snare, toms, hi-hat, ride, crash |
+| Tags | AudioSet AST classifier | what each stem actually sounds like; a stem labelled Guitar that scores Cello and Bowed string higher is shown as "sounds like Strings" |
 
 The engine is a Python 3.12 virtualenv the app installs on first use into `~/.absolutesample/engine`
 (PyTorch CUDA plus `audio-separator`, about 4.5 GB; model weights about 1.5 GB download once).
@@ -78,6 +79,13 @@ apps/desktop/src-tauri/target/release/absolutesample-cli.exe engine install
 
 Timings on an RTX 2070 Super: a 15 s loop in about 20 s, a full 3 minute song in about 2.5 minutes.
 The old crossover splitter is still available as "Quick EQ bands".
+
+## Songs, scans and samples
+
+- Every fetched song is a scan. The three most recent scans stay so you can flip between them (Songs panel, B); older unkept scans are deleted when you fetch a new link. Press Keep to hold a song, or delete it yourself.
+- Any track, including kit pieces and lead or backing vocals, can be saved as a sample (bookmark icon). Samples live in `~/.absolutesample/samples/<song>/` with their range and BPM and survive the song being pruned. The Samples panel (N) plays one sample at a time with a waveform, renames, reveals, deletes and exports.
+- Timers are measured, never estimated: the transport shows elapsed time while a job runs and the real per-pass durations after. Jobs belong to a song, so switching songs never cancels one.
+- Waveforms draw from precomputed peaks, so no audio is decoded until you press play.
 
 ## Using the stem view
 
