@@ -21,6 +21,8 @@ export interface InstrumentTrackListProps {
   onTimeUpdate: (id: string, time: number) => void;
   onFinish: (id: string) => void;
   onAudition: (id: string) => void;
+  /** Called after a save/export completes (backend marks the track kept automatically). */
+  onSaved?: () => void;
 }
 
 const KIT_LABEL = "kit";
@@ -38,6 +40,7 @@ export function InstrumentTrackList({
   onTimeUpdate,
   onFinish,
   onAudition,
+  onSaved,
 }: InstrumentTrackListProps) {
   const [wavUrls, setWavUrls] = useState<Record<string, string>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -70,6 +73,7 @@ export function InstrumentTrackList({
     const destPath = await save({ defaultPath: basename, filters: [{ name: "WAV", extensions: ["wav"] }] });
     if (!destPath) return;
     await backend.saveStem({ srcPath: stem.path, destPath });
+    onSaved?.();
   };
 
   const handleExportAll = async () => {
@@ -79,6 +83,7 @@ export function InstrumentTrackList({
       const basename = s.path.split(/[\\/]/).pop() ?? `${s.key}.wav`;
       await backend.saveStem({ srcPath: s.path, destPath: `${destDir}/${basename}` });
     }
+    onSaved?.();
   };
 
   const handleOpenFolder = async () => {
@@ -90,7 +95,7 @@ export function InstrumentTrackList({
     const isAuditioning = mode === "audition" && auditionId === stem.key;
     return (
       <InstrumentTrack
-        key={stem.key}
+        key={`${trackId}:${stem.key}`}
         stem={stem}
         wavUrl={wavUrls[stem.path] ?? null}
         solo={t.solo}
@@ -120,7 +125,7 @@ export function InstrumentTrackList({
           const isKit = node.stem.group === "drums" && node.children.length > 0;
           const childLabel = isKit ? KIT_LABEL : "lead & backing";
           return (
-            <div key={node.stem.key} className="flex flex-col gap-2">
+            <div key={`${trackId}:${node.stem.key}`} className="flex flex-col gap-2">
               {renderRow(node.stem, false, i === 0, true)}
               {node.children.length > 0 && (
                 <>

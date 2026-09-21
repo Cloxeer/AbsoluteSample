@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, CircleDashed, Loader2, XCircle } from "lucide-react";
+import { Bookmark, CheckCircle2, CircleDashed, Loader2, XCircle } from "lucide-react";
+import clsx from "clsx";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
 import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
@@ -15,7 +16,6 @@ import { formatTime } from "@/lib/format";
 import type { EngineStatus, ProgressPayload } from "@/lib/types";
 import WaveSurfer from "wavesurfer.js";
 import { useRef } from "react";
-import clsx from "clsx";
 
 const SEED_URL = "https://youtu.be/nRKgT3d6xoE";
 
@@ -141,11 +141,13 @@ export interface SlicerTabProps {
   engineApi?: ReturnType<typeof useAudioEngine>;
   /** Shared playback controller; App owns it so the header transport drives the stem tracks. */
   syncApi?: ReturnType<typeof useSyncPlayback>;
+  /** Called after any action that changes the song library (fetch, split, save/export). */
+  onLibraryChanged?: () => void;
 }
 
-export function SlicerTab({ engineApi, syncApi }: SlicerTabProps = {}) {
+export function SlicerTab({ engineApi, syncApi, onLibraryChanged }: SlicerTabProps = {}) {
   const ownEngine = useAudioEngine();
-  const { engine, fetchAudio, trimLoop, separateStems, separateInstruments } = engineApi ?? ownEngine;
+  const { engine, fetchAudio, trimLoop, separateStems, separateInstruments, newLink } = engineApi ?? ownEngine;
   const ownSync = useSyncPlayback();
   const sync = syncApi ?? ownSync;
   const [url, setUrl] = useState(SEED_URL);
@@ -153,6 +155,7 @@ export function SlicerTab({ engineApi, syncApi }: SlicerTabProps = {}) {
   const [sourceWavUrl, setSourceWavUrl] = useState<string | null>(null);
   const [splitSuccess, setSplitSuccess] = useState(false);
   const [useQuickEq, setUseQuickEq] = useState(false);
+  const [kept, setKept] = useState(false);
 
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
   const [installing, setInstalling] = useState(false);
@@ -162,6 +165,30 @@ export function SlicerTab({ engineApi, syncApi }: SlicerTabProps = {}) {
   useEffect(() => {
     backend.engineStatus().then(setEngineStatus);
   }, []);
+
+  // Keep the source waveform, range and Keep toggle in sync whenever a (different) track becomes current,
+  // e.g. after opening a song from the library.
+  useEffect(() => {
+    if (!engine.track) return;
+    let cancelled = false;
+    backend.resolveWavUrl(engine.track.wavPath).then((u) => {
+      if (!cancelled) setSourceWavUrl(u);
+    });
+    setRange(
+      engine.loop
+        ? { start: engine.loop.startSec, end: engine.loop.endSec }
+        : { start: 0, end: engine.track.durationSec }
+    );
+    backend.listLibrary().then((entries) => {
+      if (cancelled) return;
+      const found = entries.find((e) => e.id === engine.track!.id);
+      setKept(found?.kept ?? false);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engine.track?.id]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -192,6 +219,23 @@ export function SlicerTab({ engineApi, syncApi }: SlicerTabProps = {}) {
     const wavUrl = await backend.resolveWavUrl(track.wavPath);
     setSourceWavUrl(wavUrl);
     setRange({ start: 0, end: track.durationSec });
+    setKept(false);
+    onLibraryChanged?.();
+  };
+
+  const handleNewLinkFetch = async () => {
+    newLink(sync.stopAll);
+    setSourceWavUrl(null);
+    setUseQuickEq(false);
+    await handleFetch();
+  };
+
+  const handleToggleKept = async () => {
+    if (!engine.track) return;
+    const next = !kept;
+    setKept(next);
+    await backend.setKept(engine.track.id, next);
+    onLibraryChanged?.();
   };
 
   const handleCut = async () => {
@@ -215,6 +259,8 @@ export function SlicerTab({ engineApi, syncApi }: SlicerTabProps = {}) {
     setPassReasons({});
     await separateInstruments(engine.track.id);
     setSplitSuccess(true);
+    setKept(true);
+    onLibraryChanged?.();
     setTimeout(() => setSplitSuccess(false), 1500);
   };
 
@@ -223,6 +269,8 @@ export function SlicerTab({ engineApi, syncApi }: SlicerTabProps = {}) {
     setUseQuickEq(true);
     await separateStems(engine.track.id);
     setSplitSuccess(true);
+    setKept(true);
+    onLibraryChanged?.();
     setTimeout(() => setSplitSuccess(false), 1500);
   };
 
@@ -263,10 +311,13 @@ export function SlicerTab({ engineApi, syncApi }: SlicerTabProps = {}) {
             onChange={(e) => setUrl(e.target.value)}
             className="flex-1 bg-surface neu-surface-inset rounded-xl px-4 py-2 text-text text-sm outline-none"
           />
-          <Button variant="primary" busy={isFetching} busyLabel="Fetching" onClick={handleFetch} disabled={isBusy || !url}>
+          <Button variant="primary" busy={isFetching} busyLabel="Fetching" onClick={handleNewLinkFetch} disabled={isBusy || !url}>
             Fetch
           </Button>
         </div>
+        <p className="text-[11px] text-muted">
+          Fetching a new link keeps this song only if it was split, exported, or marked Keep.
+        </p>
         {engine.progress && (
           <div className="flex flex-col gap-1">
             <div className="h-2 rounded-full neu-surface-inset overflow-hidden">
@@ -278,10 +329,28 @@ export function SlicerTab({ engineApi, syncApi }: SlicerTabProps = {}) {
         {engine.error && <span className="text-xs text-danger">{engine.error}</span>}
       </Surface>
 
+      <div className="flex items-center gap-2 -mt-2">
+        <h3 className="text-sm font-medium truncate flex-1 min-w-0">{engine.track.title}</h3>
+        <button
+          type="button"
+          aria-pressed={kept}
+          title="Kept songs are never auto-removed"
+          onClick={handleToggleKept}
+          className={clsx(
+            "shrink-0 rounded-lg p-1.5 transition-colors flex items-center gap-1 text-xs",
+            kept ? "text-stem-bass" : "text-muted hover:text-text"
+          )}
+        >
+          <Bookmark size={16} fill={kept ? "currentColor" : "none"} />
+          Keep
+        </button>
+      </div>
+
       {sourceWavUrl && engine.track && !engine.loop && (
         <div className="flex flex-col gap-3" id="step-source">
           <h2 className="text-sm font-semibold text-muted uppercase tracking-wide">1. Source</h2>
           <RegionSelector
+            key={engine.track.id}
             wavUrl={sourceWavUrl}
             initialStart={range.start}
             initialEnd={range.end}
@@ -300,7 +369,7 @@ export function SlicerTab({ engineApi, syncApi }: SlicerTabProps = {}) {
       {engine.loop && (
         <div className="flex flex-col gap-3" id="step-loop">
           <h2 className="text-sm font-semibold text-muted uppercase tracking-wide">2. Loop</h2>
-          <LoopPreview wavPath={engine.loop.wavPath} startSec={engine.loop.startSec} endSec={engine.loop.endSec} onPlay={sync.stopAll} />
+          <LoopPreview key={engine.track.id} wavPath={engine.loop.wavPath} startSec={engine.loop.startSec} endSec={engine.loop.endSec} onPlay={sync.stopAll} />
 
           {!engine.stems && !engine.instruments && (
             <EngineStatusCard status={engineStatus} installing={installing} onInstall={handleInstallEngine} />
@@ -329,6 +398,7 @@ export function SlicerTab({ engineApi, syncApi }: SlicerTabProps = {}) {
         <div className="flex flex-col gap-3" id="step-stems">
           <h2 className="text-sm font-semibold text-muted uppercase tracking-wide">3. Instruments</h2>
           <InstrumentTrackList
+            key={engine.track.id}
             trackId={engine.track.id}
             stems={engine.instruments}
             tracks={sync.tracks}
@@ -341,6 +411,7 @@ export function SlicerTab({ engineApi, syncApi }: SlicerTabProps = {}) {
             onTimeUpdate={sync.handleTimeUpdate}
             onFinish={sync.handleFinish}
             onAudition={sync.auditionTrack}
+            onSaved={onLibraryChanged}
           />
         </div>
       )}
@@ -349,6 +420,7 @@ export function SlicerTab({ engineApi, syncApi }: SlicerTabProps = {}) {
         <div className="flex flex-col gap-3" id="step-stems-eq">
           <h2 className="text-sm font-semibold text-muted uppercase tracking-wide">3. Quick EQ bands</h2>
           <StemGroup
+            key={engine.track.id}
             trackId={engine.track.id}
             stems={engine.stems}
             tracks={sync.tracks}
@@ -362,6 +434,7 @@ export function SlicerTab({ engineApi, syncApi }: SlicerTabProps = {}) {
             onTimeUpdate={sync.handleTimeUpdate}
             onFinish={sync.handleFinish}
             onAudition={sync.auditionTrack}
+            onSaved={onLibraryChanged}
           />
         </div>
       )}

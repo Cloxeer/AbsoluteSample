@@ -4,12 +4,14 @@ import type {
   EngineStatus,
   InstrumentGroup,
   InstrumentStem,
+  LibraryEntry,
   LoopAnalysis,
   LoopInfo,
   SliceInfo,
   StemInfo,
   StemKey,
   TrackInfo,
+  TrackSession,
 } from "./types";
 
 const INSTRUMENT_DEFS: { key: string; label: string; group: InstrumentGroup; parent: string | null; order: number; freq: number }[] = [
@@ -92,7 +94,52 @@ function bufferToWavBlob(buffer: AudioBuffer): Blob {
   return new Blob([arrayBuffer], { type: "audio/wav" });
 }
 
+/** Fallback used when the Web Audio API (OfflineAudioContext) isn't available, e.g. in a jsdom test environment. */
+function fallbackSilentWavUrl(durationSec: number): string {
+  const sampleRate = 44100;
+  const numChannels = 2;
+  const length = Math.max(1, Math.floor(sampleRate * durationSec));
+  const dataBytes = length * numChannels * 2;
+  const arrayBuffer = new ArrayBuffer(44 + dataBytes);
+  const view = new DataView(arrayBuffer);
+  const writeString = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + dataBytes, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * numChannels * 2, true);
+  view.setUint16(32, numChannels * 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, "data");
+  view.setUint32(40, dataBytes, true);
+  if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+    const blob = new Blob([arrayBuffer], { type: "audio/wav" });
+    return URL.createObjectURL(blob);
+  }
+  // Environments without URL.createObjectURL (e.g. jsdom in tests): inline as a data URI.
+  let binary = "";
+  const bytes = new Uint8Array(arrayBuffer);
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  const base64 = btoa(binary);
+  return `data:audio/wav;base64,${base64}`;
+}
+
+function hasWebAudio(): boolean {
+  return (
+    typeof OfflineAudioContext !== "undefined" &&
+    typeof URL !== "undefined" &&
+    typeof URL.createObjectURL === "function"
+  );
+}
+
 async function synthesizeStemWav(freq: number, type: "lowpass" | "bandpass" | "highpass", durationSec = 15): Promise<string> {
+  if (!hasWebAudio()) return fallbackSilentWavUrl(durationSec);
   const sampleRate = 44100;
   const ctx = new OfflineAudioContext(2, Math.floor(sampleRate * durationSec), sampleRate);
   const bufferSize = ctx.length;
@@ -123,6 +170,7 @@ async function synthesizeStemWav(freq: number, type: "lowpass" | "bandpass" | "h
 }
 
 async function synthesizeSourceWav(durationSec = 45): Promise<string> {
+  if (!hasWebAudio()) return fallbackSilentWavUrl(durationSec);
   const sampleRate = 44100;
   const ctx = new OfflineAudioContext(2, Math.floor(sampleRate * durationSec), sampleRate);
   const noiseBuffer = ctx.createBuffer(2, ctx.length, sampleRate);
@@ -209,6 +257,173 @@ async function getManifest(): Promise<Manifest> {
   return cachedManifest;
 }
 
+// v3 addendum: in-memory song library
+
+interface LibraryRecord {
+  entry: LibraryEntry;
+  track: TrackInfo;
+  loop: LoopInfo | null;
+  stems: StemInfo[] | null;
+  instruments: InstrumentStem[] | null;
+  analysis: LoopAnalysis | null;
+}
+
+let libraryStore: Map<string, LibraryRecord> | null = null;
+
+function estimateBytes(durationSec: number, hasLoop: boolean, hasBands: boolean, hasInstruments: boolean): number {
+  const pcmBytesPerSec = 44100 * 2 * 2;
+  let bytes = durationSec * pcmBytesPerSec * 0.3; // compressed source approximation
+  if (hasLoop) bytes += 15 * pcmBytesPerSec;
+  if (hasBands) bytes += 4 * 15 * pcmBytesPerSec;
+  if (hasInstruments) bytes += 6 * 15 * pcmBytesPerSec;
+  return Math.round(bytes);
+}
+
+async function seedLibrary(): Promise<Map<string, LibraryRecord>> {
+  const manifest = await getManifest();
+  const now = Date.now();
+
+  const store = new Map<string, LibraryRecord>();
+
+  const seedTrack = manifest.track;
+  const seedEntry: LibraryEntry = {
+    id: seedTrack.id,
+    title: seedTrack.title,
+    url: seedTrack.url,
+    durationSec: seedTrack.durationSec,
+    fetchedAt: new Date(now - 60_000).toISOString(),
+    lastOpenedAt: new Date(now - 60_000).toISOString(),
+    kept: true,
+    hasLoop: true,
+    loopStartSec: manifest.loop.startSec,
+    loopEndSec: manifest.loop.endSec,
+    hasBands: true,
+    hasInstruments: false,
+    instrumentCount: 0,
+    bytes: estimateBytes(seedTrack.durationSec, true, true, false),
+  };
+  store.set(seedTrack.id, {
+    entry: seedEntry,
+    track: seedTrack,
+    loop: manifest.loop,
+    stems: manifest.stems,
+    instruments: null,
+    analysis: manifest.analysis,
+  });
+
+  // Extra fake entry: unkept, fetch-only (no loop, no bands, no instruments).
+  const songTwoId = "ZAz3rnLGthg";
+  const songTwoTrack: TrackInfo = {
+    id: songTwoId,
+    title: "Song two",
+    url: `https://youtu.be/${songTwoId}`,
+    sourcePath: `mock/${songTwoId}/source.opus`,
+    wavPath: `mock/${songTwoId}/source.wav`,
+    durationSec: 214,
+    sampleRate: 44100,
+    channels: 2,
+    codec: "opus",
+    workDir: `mock/${songTwoId}`,
+  };
+  store.set(songTwoId, {
+    entry: {
+      id: songTwoId,
+      title: "Song two",
+      url: songTwoTrack.url,
+      durationSec: songTwoTrack.durationSec,
+      fetchedAt: new Date(now - 40_000).toISOString(),
+      lastOpenedAt: new Date(now - 40_000).toISOString(),
+      kept: false,
+      hasLoop: false,
+      loopStartSec: null,
+      loopEndSec: null,
+      hasBands: false,
+      hasInstruments: false,
+      instrumentCount: 0,
+      bytes: estimateBytes(songTwoTrack.durationSec, false, false, false),
+    },
+    track: songTwoTrack,
+    loop: null,
+    stems: null,
+    instruments: null,
+    analysis: null,
+  });
+
+  // Extra fake entry: loop only, unkept (demonstrates pruning of loop-only songs with no split).
+  const songThreeId = "XEolg577-DA";
+  const songThreeTrack: TrackInfo = {
+    id: songThreeId,
+    title: "Song three",
+    url: `https://youtu.be/${songThreeId}`,
+    sourcePath: `mock/${songThreeId}/source.opus`,
+    wavPath: `mock/${songThreeId}/source.wav`,
+    durationSec: 198,
+    sampleRate: 44100,
+    channels: 2,
+    codec: "opus",
+    workDir: `mock/${songThreeId}`,
+  };
+  const songThreeLoop: LoopInfo = {
+    trackId: songThreeId,
+    startSec: 30,
+    endSec: 45,
+    durationSec: 15,
+    loopPath: `mock/${songThreeId}/loop.opus`,
+    wavPath: `mock/${songThreeId}/loop.wav`,
+  };
+  store.set(songThreeId, {
+    entry: {
+      id: songThreeId,
+      title: "Song three",
+      url: songThreeTrack.url,
+      durationSec: songThreeTrack.durationSec,
+      fetchedAt: new Date(now - 20_000).toISOString(),
+      lastOpenedAt: new Date(now - 20_000).toISOString(),
+      kept: false,
+      hasLoop: true,
+      loopStartSec: songThreeLoop.startSec,
+      loopEndSec: songThreeLoop.endSec,
+      hasBands: false,
+      hasInstruments: false,
+      instrumentCount: 0,
+      bytes: estimateBytes(songThreeTrack.durationSec, true, false, false),
+    },
+    track: songThreeTrack,
+    loop: songThreeLoop,
+    stems: null,
+    instruments: null,
+    analysis: null,
+  });
+
+  return store;
+}
+
+async function getLibraryStore(): Promise<Map<string, LibraryRecord>> {
+  if (!libraryStore) libraryStore = await seedLibrary();
+  return libraryStore;
+}
+
+/** Removes unkept entries with no split output, except the id currently being fetched/opened. */
+function pruneUnkept(store: Map<string, LibraryRecord>, exceptId: string): void {
+  for (const [id, rec] of Array.from(store.entries())) {
+    if (id === exceptId) continue;
+    const e = rec.entry;
+    if (!e.kept && !e.hasBands && !e.hasInstruments) {
+      store.delete(id);
+    }
+  }
+}
+
+function synthesizeSessionForEntry(rec: LibraryRecord): TrackSession {
+  return {
+    track: rec.track,
+    loop: rec.loop,
+    stems: rec.stems,
+    instruments: rec.instruments,
+    analysis: rec.analysis,
+  };
+}
+
 async function resolveWavUrl(path: string): Promise<string> {
   if (cachedWavUrls[path]) return cachedWavUrls[path];
   const manifest = await getManifest();
@@ -257,7 +472,33 @@ export async function checkDependencies(): Promise<DependencyReport> {
   return { ffmpeg: "ffmpeg (mock)", ffprobe: "ffprobe (mock)", ytdlp: "yt-dlp (mock)", ok: true };
 }
 
-export async function fetchAudio(_url: string): Promise<TrackInfo> {
+function extractVideoId(url: string): string {
+  const patterns = [
+    /youtu\.be\/([A-Za-z0-9_-]{11})/,
+    /[?&]v=([A-Za-z0-9_-]{11})/,
+    /\/shorts\/([A-Za-z0-9_-]{11})/,
+    /\/embed\/([A-Za-z0-9_-]{11})/,
+  ];
+  for (const re of patterns) {
+    const m = url.match(re);
+    if (m) return m[1];
+  }
+  // fallback: crude hash so repeated unknown urls resolve to the same fake id
+  let hash = 0;
+  for (let i = 0; i < url.length; i++) hash = (hash * 31 + url.charCodeAt(i)) | 0;
+  return `mock${Math.abs(hash)}`;
+}
+
+export async function fetchAudio(args: { url: string; force?: boolean }): Promise<TrackInfo> {
+  const store = await getLibraryStore();
+  const id = extractVideoId(args.url);
+
+  const cached = store.get(id);
+  if (cached && !args.force) {
+    pruneUnkept(store, id);
+    return cached.track;
+  }
+
   const stages: [string, number, string][] = [
     ["download", 20, "Downloading best audio..."],
     ["download", 60, "Downloading best audio..."],
@@ -268,8 +509,88 @@ export async function fetchAudio(_url: string): Promise<TrackInfo> {
     await delay(180);
     emitMockProgress({ stage: stage as any, percent, message });
   }
+
+  pruneUnkept(store, id);
+
+  if (cached) {
+    // force re-fetch of an existing entry: reset its split state per fresh download semantics.
+    const now = new Date().toISOString();
+    cached.entry = { ...cached.entry, fetchedAt: now, lastOpenedAt: now };
+    return cached.track;
+  }
+
   const manifest = await getManifest();
-  return manifest.track;
+  const now = new Date().toISOString();
+  const track: TrackInfo = {
+    id,
+    title: `Fetched track ${id}`,
+    url: args.url,
+    sourcePath: `mock/${id}/source.opus`,
+    wavPath: manifest.track.wavPath,
+    durationSec: manifest.track.durationSec,
+    sampleRate: 44100,
+    channels: 2,
+    codec: "opus",
+    workDir: `mock/${id}`,
+  };
+  store.set(id, {
+    entry: {
+      id,
+      title: track.title,
+      url: track.url,
+      durationSec: track.durationSec,
+      fetchedAt: now,
+      lastOpenedAt: now,
+      kept: false,
+      hasLoop: false,
+      loopStartSec: null,
+      loopEndSec: null,
+      hasBands: false,
+      hasInstruments: false,
+      instrumentCount: 0,
+      bytes: estimateBytes(track.durationSec, false, false, false),
+    },
+    track,
+    loop: null,
+    stems: null,
+    instruments: null,
+    analysis: null,
+  });
+  return track;
+}
+
+export async function listLibrary(): Promise<LibraryEntry[]> {
+  const store = await getLibraryStore();
+  return Array.from(store.values())
+    .map((r) => r.entry)
+    .sort((a, b) => (a.lastOpenedAt < b.lastOpenedAt ? 1 : -1));
+}
+
+export async function openTrack(trackId: string): Promise<TrackSession> {
+  const store = await getLibraryStore();
+  const rec = store.get(trackId);
+  if (!rec) throw new Error(`Unknown track: ${trackId}`);
+  rec.entry = { ...rec.entry, lastOpenedAt: new Date().toISOString() };
+  return synthesizeSessionForEntry(rec);
+}
+
+export async function setKept(trackId: string, kept: boolean): Promise<LibraryEntry> {
+  const store = await getLibraryStore();
+  const rec = store.get(trackId);
+  if (!rec) throw new Error(`Unknown track: ${trackId}`);
+  rec.entry = { ...rec.entry, kept };
+  return rec.entry;
+}
+
+export async function deleteTrack(trackId: string): Promise<void> {
+  const store = await getLibraryStore();
+  store.delete(trackId);
+}
+
+export async function librarySize(): Promise<{ bytes: number; tracks: number }> {
+  const store = await getLibraryStore();
+  const values = Array.from(store.values());
+  return { bytes: values.reduce((sum, r) => sum + r.entry.bytes, 0), tracks: values.length };
 }
 
 export async function trimLoop(_args: { trackId: string; startSec: number; endSec: number }): Promise<LoopInfo> {
@@ -277,7 +598,14 @@ export async function trimLoop(_args: { trackId: string; startSec: number; endSe
   await delay(200);
   emitMockProgress({ stage: "trim", percent: 100, message: "Loop trimmed" });
   const manifest = await getManifest();
-  return { ...manifest.loop, startSec: _args.startSec, endSec: _args.endSec, durationSec: _args.endSec - _args.startSec };
+  const loop = { ...manifest.loop, trackId: _args.trackId, startSec: _args.startSec, endSec: _args.endSec, durationSec: _args.endSec - _args.startSec };
+  const store = await getLibraryStore();
+  const rec = store.get(_args.trackId);
+  if (rec) {
+    rec.loop = loop;
+    rec.entry = { ...rec.entry, hasLoop: true, loopStartSec: loop.startSec, loopEndSec: loop.endSec };
+  }
+  return loop;
 }
 
 export async function separateStems(_args: { trackId: string }): Promise<StemInfo[]> {
@@ -287,7 +615,14 @@ export async function separateStems(_args: { trackId: string }): Promise<StemInf
     emitMockProgress({ stage: "stems", percent: Math.round((i / steps) * 100), message: `Rendering stem ${i}/4...` });
   }
   const manifest = await getManifest();
-  return manifest.stems;
+  const stems = manifest.stems;
+  const store = await getLibraryStore();
+  const rec = store.get(_args.trackId);
+  if (rec) {
+    rec.stems = stems;
+    rec.entry = { ...rec.entry, hasBands: true, kept: true };
+  }
+  return stems;
 }
 
 export async function analyzeLoop(_args: { trackId: string }): Promise<LoopAnalysis> {
@@ -298,7 +633,18 @@ export async function analyzeLoop(_args: { trackId: string }): Promise<LoopAnaly
   return manifest.analysis;
 }
 
+async function markKeptFromPath(srcPath: string): Promise<void> {
+  const store = await getLibraryStore();
+  for (const [id, rec] of store.entries()) {
+    if (srcPath.includes(`${id}${srcPath.includes("\\") ? "\\" : "/"}`) || srcPath.includes(`mock/${id}/`) || srcPath.includes(`mock\\${id}\\`)) {
+      rec.entry = { ...rec.entry, kept: true };
+      return;
+    }
+  }
+}
+
 export async function saveStem(args: { srcPath: string; destPath: string }): Promise<string> {
+  await markKeptFromPath(args.srcPath);
   const url = await resolveWavUrl(args.srcPath);
   const a = document.createElement("a");
   a.href = url;
@@ -310,6 +656,9 @@ export async function saveStem(args: { srcPath: string; destPath: string }): Pro
 }
 
 export async function saveAllStems(args: { trackId: string; destDir: string }): Promise<string[]> {
+  const store = await getLibraryStore();
+  const rec = store.get(args.trackId);
+  if (rec) rec.entry = { ...rec.entry, kept: true };
   const manifest = await getManifest();
   const paths: string[] = [];
   for (const stem of manifest.stems) {
@@ -468,5 +817,12 @@ export async function separateInstruments(args: { trackId: string }): Promise<In
     stems = synthesizeInstruments(args.trackId);
   }
   cachedInstruments = stems;
+
+  const store = await getLibraryStore();
+  const rec = store.get(args.trackId);
+  if (rec) {
+    rec.instruments = stems;
+    rec.entry = { ...rec.entry, hasInstruments: true, kept: true, instrumentCount: stems.length };
+  }
   return stems;
 }

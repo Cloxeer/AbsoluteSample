@@ -1,13 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Transport } from "@/components/layout/Transport";
 import { Stepper } from "@/components/layout/Stepper";
 import { Tabs } from "@/components/layout/Tabs";
 import { SlicerTab } from "@/views/SlicerTab";
 import { InspectorTab } from "@/views/InspectorTab";
+import { LibraryPanel } from "@/components/library/LibraryPanel";
 import { useAudioEngine } from "@/hooks/useAudioEngine";
 import { useSyncPlayback } from "@/hooks/useSyncPlayback";
 import { backend } from "@/lib/backend";
-import type { DependencyReport } from "@/lib/types";
+import type { DependencyReport, LibraryEntry } from "@/lib/types";
 
 const TABS = [
   { id: "slicer", label: "Stem Slicer" },
@@ -29,9 +30,56 @@ export default function App() {
   const engineApi = useAudioEngine();
   const { engine, analyzeLoop } = engineApi;
 
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [libraryEntries, setLibraryEntries] = useState<LibraryEntry[]>([]);
+  const [librarySizeBytes, setLibrarySizeBytes] = useState(0);
+
+  const refreshLibrary = useCallback(async () => {
+    const [entries, size] = await Promise.all([backend.listLibrary(), backend.librarySize()]);
+    setLibraryEntries(entries);
+    setLibrarySizeBytes(size.bytes);
+  }, []);
+
   useEffect(() => {
     backend.checkDependencies().then(setDeps);
+    refreshLibrary();
+  }, [refreshLibrary]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key.toLowerCase() === "b") {
+        setLibraryOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
+
+  const handleOpenTrack = useCallback(
+    async (id: string) => {
+      await engineApi.openTrack(id, sync.stopAll);
+      setLibraryOpen(false);
+      refreshLibrary();
+    },
+    [engineApi, sync.stopAll, refreshLibrary]
+  );
+
+  const handleSetKept = useCallback(
+    async (id: string, kept: boolean) => {
+      await backend.setKept(id, kept);
+      refreshLibrary();
+    },
+    [refreshLibrary]
+  );
+
+  const handleDeleteTrack = useCallback(
+    async (id: string) => {
+      await backend.deleteTrack(id);
+      refreshLibrary();
+    },
+    [refreshLibrary]
+  );
 
   const stemOrder = useMemo(() => (engine.stems ?? []).map((s) => s.key), [engine.stems]);
 
@@ -102,16 +150,28 @@ export default function App() {
         bpm={engine.analysis?.bpm ?? null}
         masterVolume={masterVolume}
         progress={engine.progress ? { message: engine.progress.message, percent: engine.progress.percent } : null}
+        librarySongCount={libraryEntries.length}
         onPlayPause={sync.togglePlay}
         onStop={sync.stopAll}
         onToggleLoop={sync.toggleLoop}
         onMasterVolumeChange={setMasterVolume}
+        onToggleLibrary={() => setLibraryOpen((v) => !v)}
       />
       <Stepper steps={PIPELINE_STEPS} currentId={currentStep} completedIds={completedSteps} onStepClick={handleStepClick} />
       <Tabs tabs={TABS} activeId={activeTab} onChange={setActiveTab} />
+      <LibraryPanel
+        open={libraryOpen}
+        entries={libraryEntries}
+        currentTrackId={engine.track?.id ?? null}
+        sizeBytes={librarySizeBytes}
+        onClose={() => setLibraryOpen(false)}
+        onOpenTrack={handleOpenTrack}
+        onSetKept={handleSetKept}
+        onDeleteTrack={handleDeleteTrack}
+      />
       <main className="flex-1 pb-10">
         {activeTab === "slicer" ? (
-          <SlicerTab engineApi={engineApi} syncApi={sync} />
+          <SlicerTab engineApi={engineApi} syncApi={sync} onLibraryChanged={refreshLibrary} />
         ) : (
           <InspectorTab
             track={engine.track}

@@ -152,3 +152,58 @@ All app data lives under `ABSOLUTESAMPLE_HOME` env if set, else `%USERPROFILE%\.
 Reason: `%LOCALAPPDATA%` is filesystem-virtualized for processes started from packaged (MSIX) apps, so files written there
 are invisible to the same program launched normally. `tauri.conf.json` assetProtocol scope must include `$HOME/.absolutesample/**`
 (keep the old entries too).
+
+---
+
+# v3 addendum: Song library (keep going through songs)
+
+Every fetched track keeps its work dir `~/.absolutesample/work/<id>/` and gets `track.json` (TrackInfo) written at fetch,
+plus `state.json`: `{ kept: bool, fetchedAt: rfc3339, lastOpenedAt: rfc3339, loop?: LoopInfo, analysis?: LoopAnalysis }`.
+`loop` is written by trim_loop, `analysis` by analyze_loop. Band stems live in `stems/`, AI stems in `instruments/` + `instruments.json` (already).
+
+Keep rule (no bloat): `kept` becomes true automatically when a split completes (separate_stems or separate_instruments) or a save/export
+happens (save_stem, save_all_stems), or when the user toggles Keep. `fetch_audio` first calls `prune_unkept(except: new id)` which deletes work dirs
+that are not kept AND have no split output; it never deletes the track being fetched. Re-fetching an id that already exists returns the cached
+TrackInfo without downloading (unless `force: true`).
+
+URL normalization: extract the 11-char video id from youtu.be/<id>, youtube.com/watch?v=<id>, /shorts/<id>, /embed/<id>; ignore list/si/start_radio params;
+pass `--no-playlist`. The work dir id is the video id.
+
+```ts
+interface LibraryEntry { id: string; title: string; url: string; durationSec: number; fetchedAt: string; lastOpenedAt: string;
+  kept: boolean; hasLoop: boolean; loopStartSec: number|null; loopEndSec: number|null; hasBands: boolean; hasInstruments: boolean;
+  instrumentCount: number; bytes: number; }
+interface TrackSession { track: TrackInfo; loop: LoopInfo|null; stems: StemInfo[]|null; instruments: InstrumentStem[]|null; analysis: LoopAnalysis|null; }
+// list_library() -> LibraryEntry[]  (sorted lastOpenedAt desc)
+// open_track({ trackId }) -> TrackSession   (touches lastOpenedAt; rebuilds StemInfo[] from stems/*.wav via astats cache in state.json if present)
+// set_kept({ trackId, kept }) -> LibraryEntry
+// delete_track({ trackId }) -> void          (removes the work dir)
+// library_size() -> { bytes: number, tracks: number }
+// fetch_audio({ url, force?: boolean })      (extended)
+```
+CLI: `library list|open <id>|keep <id> [--off]|delete <id>|size`.
+
+---
+
+# v4 addendum: scans vs kept songs, and samples
+
+## Keep semantics (replaces v3 keep rule)
+A fetched/split song is a *scan* by default (`kept: false`). Nothing auto-keeps. Prune (called at the start of every fetch_audio,
+except the id being fetched, and never the currently open track passed as `except`): delete unkept songs beyond the 3 most recently opened
+(`MAX_SCANS = 3`). `LibraryEntry.kept` is the stored flag only. `delete_track` is explicit and always allowed. Split/export/save no longer mark kept.
+`library_size()` also returns `scans: number` (unkept count) and `samplesBytes`.
+
+## Samples
+`~/.absolutesample/samples/<sanitized song title>/<sanitized sample name>.wav` and index `~/.absolutesample/samples/samples.json`:
+```ts
+interface Sample { id: string; name: string; path: string; bytes: number; songId: string; songTitle: string; stemKey: string; stemLabel: string;
+  group: string; startSec: number; endSec: number; durationSec: number; bpm: number|null; createdAt: string; }
+// save_sample({ trackId, stemKey, name? }) -> Sample    stemKey may be a band stem key (drums_sub...), an instrument key (kick...), or "loop"
+//   copies the wav (loop range from state.json; bpm from analysis if present); default name "<song> - <stem> <m:ss-m:ss>"; unique name suffix (2), (3)
+// list_samples() -> Sample[] (createdAt desc)
+// rename_sample({ id, name }) -> Sample (renames file too)
+// delete_sample({ id }) -> void
+// export_samples({ ids, destDir }) -> string[]   (copies to a user-chosen folder)
+// reveal_sample({ id }) -> void  (open containing folder)
+```
+CLI: `samples list|save <track> <stemKey> [--name]|delete <id>|export <dir> <ids...>`.

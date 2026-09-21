@@ -66,4 +66,22 @@ describe("SlicerTab", () => {
     expect(await screen.findByText("Split")).toBeInTheDocument();
     expect(screen.queryByText("Split into 4 stems")).not.toBeInTheDocument();
   });
+
+  it("shows the hero when no track is loaded", () => {
+    render(<SlicerTab />);
+    expect(screen.getByText("Paste a YouTube link")).toBeInTheDocument();
+  });
+
+  it("shows the New link bar (not the hero) once a track is loaded", async () => {
+    const { result: engineResult } = renderHook(() => useAudioEngine());
+    const { result: syncResult } = renderHook(() => useSyncPlayback());
+
+    await act(async () => {
+      await engineResult.current.fetchAudio("https://youtu.be/nRKgT3d6xoE");
+    });
+
+    render(<SlicerTab engineApi={engineResult.current} syncApi={syncResult.current} />);
+    expect(screen.queryByText("Paste a YouTube link")).not.toBeInTheDocument();
+    expect(await screen.findByText(/Fetching a new link keeps this song only if/)).toBeInTheDocument();
+  });
 });

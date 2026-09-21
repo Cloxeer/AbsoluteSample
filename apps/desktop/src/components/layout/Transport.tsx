@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AudioWaveform, HelpCircle, Repeat, Square } from "lucide-react";
+import { AudioWaveform, HelpCircle, ListMusic, Repeat, Square } from "lucide-react";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
 import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
@@ -19,10 +19,13 @@ export interface TransportProps {
   bpm: number | null;
   masterVolume: number;
   progress?: { message: string; percent: number } | null;
+  /** Number of songs in the library, shown on the "Songs (N)" toggle button. Omit to hide the button. */
+  librarySongCount?: number;
   onPlayPause: () => void;
   onStop: () => void;
   onToggleLoop: () => void;
   onMasterVolumeChange: (v: number) => void;
+  onToggleLibrary?: () => void;
 }
 
 const SHORTCUTS: [string, string][] = [
@@ -56,10 +59,12 @@ export function Transport({
   bpm,
   masterVolume,
   progress,
+  librarySongCount,
   onPlayPause,
   onStop,
   onToggleLoop,
   onMasterVolumeChange,
+  onToggleLibrary,
 }: TransportProps) {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
@@ -149,6 +154,12 @@ export function Transport({
         </Surface>
 
         <div className="flex items-center gap-2">
+          {onToggleLibrary && (
+            <Button aria-label="Toggle song library" onClick={onToggleLibrary} className="!px-3 !py-2 flex items-center gap-1.5">
+              <ListMusic size={16} />
+              Songs ({librarySongCount ?? 0})
+            </Button>
+          )}
           <Pill name="ffmpeg" ok={!!deps?.ffmpeg} />
           <Pill name="ffprobe" ok={!!deps?.ffprobe} />
           <Pill name="yt-dlp" ok={!!deps?.ytdlp} />

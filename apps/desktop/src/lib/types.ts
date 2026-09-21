@@ -104,3 +104,49 @@ export interface EngineProgressPayload {
   percent: number;
   message: string;
 }
+
+// v3 addendum: Song library
+
+export interface LibraryEntry {
+  id: string;
+  title: string;
+  url: string;
+  durationSec: number;
+  fetchedAt: string;
+  lastOpenedAt: string;
+  kept: boolean;
+  hasLoop: boolean;
+  loopStartSec: number | null;
+  loopEndSec: number | null;
+  hasBands: boolean;
+  hasInstruments: boolean;
+  instrumentCount: number;
+  bytes: number;
+}
+
+export interface TrackSession {
+  track: TrackInfo;
+  loop: LoopInfo | null;
+  stems: StemInfo[] | null;
+  instruments: InstrumentStem[] | null;
+  analysis: LoopAnalysis | null;
+}
+
+// v4 addendum: scans vs kept songs, and samples
+
+export interface Sample {
+  id: string;
+  name: string;
+  path: string;
+  bytes: number;
+  songId: string;
+  songTitle: string;
+  stemKey: string;
+  stemLabel: string;
+  group: string;
+  startSec: number;
+  endSec: number;
+  durationSec: number;
+  bpm: number | null;
+  createdAt: string;
+}

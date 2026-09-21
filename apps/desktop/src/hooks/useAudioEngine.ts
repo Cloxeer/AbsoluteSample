@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { backend } from "@/lib/backend";
 import { onProgress } from "@/lib/events";
-import type { InstrumentStem, LoopAnalysis, LoopInfo, ProgressPayload, StemInfo, TrackInfo } from "@/lib/types";
+import type { InstrumentStem, LoopAnalysis, LoopInfo, ProgressPayload, StemInfo, TrackInfo, TrackSession } from "@/lib/types";
 
 export type EngineState =
   | "idle"
@@ -23,6 +23,24 @@ export interface AudioEngineState {
   analysis: LoopAnalysis | null;
   progress: ProgressPayload | null;
   error: string | null;
+}
+
+/**
+ * Pure helper: maps a fetched TrackSession into the engine's internal state shape.
+ * Status becomes "ready" if instruments or stems exist, "trimmed" if only a loop exists,
+ * otherwise "fetched" (source downloaded but not yet trimmed or split).
+ */
+export function sessionToState(session: TrackSession): Pick<AudioEngineState, "state" | "track" | "loop" | "stems" | "instruments" | "analysis"> {
+  const hasSplit = !!(session.instruments && session.instruments.length) || !!(session.stems && session.stems.length);
+  const state: EngineState = hasSplit ? "ready" : session.loop ? "trimmed" : "fetched";
+  return {
+    state,
+    track: session.track,
+    loop: session.loop,
+    stems: session.stems,
+    instruments: session.instruments,
+    analysis: session.analysis,
+  };
 }
 
 export function useAudioEngine() {
@@ -54,16 +72,45 @@ export function useAudioEngine() {
     };
   }, []);
 
-  const fetchAudio = useCallback(async (url: string) => {
+  const fetchAudio = useCallback(async (url: string, force = false) => {
     setEngine((prev) => ({ ...prev, state: "fetching", error: null }));
     try {
-      const track = await backend.fetchAudio(url);
+      const track = await backend.fetchAudio({ url, force });
       setEngine((prev) => ({ ...prev, state: "fetched", track }));
       return track;
     } catch (err) {
       setEngine((prev) => ({ ...prev, state: "error", error: String(err) }));
       throw err;
     }
+  }, []);
+
+  /** Opens a previously fetched song from the library, tearing down current playback first. */
+  const openTrack = useCallback(async (id: string, teardown?: () => void) => {
+    teardown?.();
+    setEngine((prev) => ({ ...prev, state: "fetching", error: null }));
+    try {
+      const session = await backend.openTrack(id);
+      setEngine((prev) => ({ ...prev, ...sessionToState(session), error: null, progress: null }));
+      return session;
+    } catch (err) {
+      setEngine((prev) => ({ ...prev, state: "error", error: String(err) }));
+      throw err;
+    }
+  }, []);
+
+  /** Clears the current session back to the empty state without deleting any backend data. */
+  const newLink = useCallback((teardown?: () => void) => {
+    teardown?.();
+    setEngine({
+      state: "idle",
+      track: null,
+      loop: null,
+      stems: null,
+      instruments: null,
+      analysis: null,
+      progress: null,
+      error: null,
+    });
   }, []);
 
   const trimLoop = useCallback(async (trackId: string, startSec: number, endSec: number) => {
@@ -127,5 +174,5 @@ export function useAudioEngine() {
     });
   }, []);
 
-  return { engine, fetchAudio, trimLoop, separateStems, separateInstruments, analyzeLoop, reset };
+  return { engine, fetchAudio, trimLoop, separateStems, separateInstruments, analyzeLoop, reset, openTrack, newLink };
 }

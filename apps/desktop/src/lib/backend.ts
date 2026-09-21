@@ -4,12 +4,14 @@ import type {
   DependencyReport,
   EngineStatus,
   InstrumentStem,
+  LibraryEntry,
   LoopAnalysis,
   LoopInfo,
   SliceInfo,
   StemInfo,
   StemKey,
   TrackInfo,
+  TrackSession,
 } from "./types";
 
 async function invokeTauri<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -23,9 +25,9 @@ export const backend = {
     return mock.checkDependencies();
   },
 
-  async fetchAudio(url: string): Promise<TrackInfo> {
-    if (isTauri()) return invokeTauri<TrackInfo>("fetch_audio", { url });
-    return mock.fetchAudio(url);
+  async fetchAudio(args: { url: string; force?: boolean }): Promise<TrackInfo> {
+    if (isTauri()) return invokeTauri<TrackInfo>("fetch_audio", args);
+    return mock.fetchAudio(args);
   },
 
   async trimLoop(args: { trackId: string; startSec: number; endSec: number }): Promise<LoopInfo> {
@@ -81,6 +83,31 @@ export const backend = {
   async separateInstruments(args: { trackId: string; passes?: string[] }): Promise<InstrumentStem[]> {
     if (isTauri()) return invokeTauri<InstrumentStem[]>("separate_instruments", args);
     return mock.separateInstruments(args);
+  },
+
+  async listLibrary(): Promise<LibraryEntry[]> {
+    if (isTauri()) return invokeTauri<LibraryEntry[]>("list_library");
+    return mock.listLibrary();
+  },
+
+  async openTrack(trackId: string): Promise<TrackSession> {
+    if (isTauri()) return invokeTauri<TrackSession>("open_track", { trackId });
+    return mock.openTrack(trackId);
+  },
+
+  async setKept(trackId: string, kept: boolean): Promise<LibraryEntry> {
+    if (isTauri()) return invokeTauri<LibraryEntry>("set_kept", { trackId, kept });
+    return mock.setKept(trackId, kept);
+  },
+
+  async deleteTrack(trackId: string): Promise<void> {
+    if (isTauri()) return invokeTauri<void>("delete_track", { trackId });
+    return mock.deleteTrack(trackId);
+  },
+
+  async librarySize(): Promise<{ bytes: number; tracks: number }> {
+    if (isTauri()) return invokeTauri<{ bytes: number; tracks: number }>("library_size");
+    return mock.librarySize();
   },
 };
 

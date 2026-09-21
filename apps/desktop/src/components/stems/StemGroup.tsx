@@ -22,6 +22,8 @@ export interface StemGroupProps {
   onTimeUpdate: (id: string, time: number) => void;
   onFinish: (id: string) => void;
   onAudition: (id: string) => void;
+  /** Called after a save/export completes (backend marks the track kept automatically). */
+  onSaved?: () => void;
 }
 
 export function StemGroup({
@@ -38,6 +40,7 @@ export function StemGroup({
   onTimeUpdate,
   onFinish,
   onAudition,
+  onSaved,
 }: StemGroupProps) {
   const [wavUrls, setWavUrls] = useState<Record<string, string>>({});
 
@@ -71,12 +74,14 @@ export function StemGroup({
     const destPath = await save({ defaultPath: basename, filters: [{ name: "WAV", extensions: ["wav"] }] });
     if (!destPath) return;
     await backend.saveStem({ srcPath: stem.path, destPath });
+    onSaved?.();
   };
 
   const handleExportAll = async () => {
     const destDir = await open({ directory: true });
     if (!destDir || Array.isArray(destDir)) return;
     await backend.saveAllStems({ trackId, destDir });
+    onSaved?.();
   };
 
   const handleOpenFolder = async () => {
@@ -99,7 +104,7 @@ export function StemGroup({
           const isAuditioning = mode === "audition" && auditionId === stem.key;
           return (
             <StemTrack
-              key={stem.key}
+              key={`${trackId}:${stem.key}`}
               stem={stem}
               wavUrl={wavUrls[stem.path] ?? null}
               solo={t.solo}
