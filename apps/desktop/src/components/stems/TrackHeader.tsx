@@ -21,6 +21,8 @@ export interface TrackHeaderProps {
   onToggleMute: () => void;
   onVolumeChange: (v: number) => void;
   onDownload: () => void;
+  /** Optional extra icon action rendered next to Download, e.g. a Save-as-sample button. */
+  extraAction?: React.ReactNode;
   className?: string;
 }
 
@@ -60,6 +62,7 @@ export function TrackHeader({
   onToggleMute,
   onVolumeChange,
   onDownload,
+  extraAction,
   className,
 }: TrackHeaderProps) {
   return (
@@ -119,6 +122,7 @@ export function TrackHeader({
         <Button aria-label={`Download ${name} WAV`} onClick={onDownload} className="!px-2 !py-1 shrink-0">
           <Download size={14} />
         </Button>
+        {extraAction}
       </div>
 
       <div className="flex items-center gap-2">

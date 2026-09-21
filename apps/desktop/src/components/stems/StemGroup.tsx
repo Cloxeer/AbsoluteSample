@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import type WaveSurfer from "wavesurfer.js";
 import { StemTrack } from "./StemTrack";
+import { SaveSampleButton } from "./SaveSampleButton";
 import { Button } from "@/components/neumorphic/Button";
 import { Ruler } from "@/components/waveform/Ruler";
 import { backend } from "@/lib/backend";
-import type { LoopAnalysis, StemInfo } from "@/lib/types";
+import type { LoopAnalysis, Sample, StemInfo } from "@/lib/types";
 import type { TrackGainState } from "@/hooks/useSyncPlayback";
 
 export interface StemGroupProps {
@@ -24,6 +25,12 @@ export interface StemGroupProps {
   onAudition: (id: string) => void;
   /** Called after a save/export completes (backend marks the track kept automatically). */
   onSaved?: () => void;
+  /** Song title and loop range, for the "Save as sample" default name; samples list, to show already-saved state. */
+  songTitle?: string;
+  loopStartSec?: number;
+  loopEndSec?: number;
+  samples?: Sample[];
+  onSampleSaved?: () => void;
 }
 
 export function StemGroup({
@@ -41,6 +48,11 @@ export function StemGroup({
   onFinish,
   onAudition,
   onSaved,
+  songTitle,
+  loopStartSec,
+  loopEndSec,
+  samples = [],
+  onSampleSaved,
 }: StemGroupProps) {
   const [wavUrls, setWavUrls] = useState<Record<string, string>>({});
 
@@ -116,6 +128,20 @@ export function StemGroup({
               onToggleMute={() => onUpsertTrack({ ...t, mute: !t.mute })}
               onVolumeChange={(v) => onUpsertTrack({ ...t, volume: v })}
               onDownload={() => handleDownload(stem)}
+              extraAction={
+                songTitle && loopStartSec !== undefined && loopEndSec !== undefined ? (
+                  <SaveSampleButton
+                    trackId={trackId}
+                    stemKey={stem.key}
+                    stemLabel={stem.label}
+                    songTitle={songTitle}
+                    startSec={loopStartSec}
+                    endSec={loopEndSec}
+                    samples={samples}
+                    onSaved={onSampleSaved}
+                  />
+                ) : undefined
+              }
               onAudition={() => onAudition(stem.key)}
               onReady={(ws) => onRegisterInstance(stem.key, ws, stem.index === 1)}
               onTimeUpdate={(t) => onTimeUpdate(stem.key, t)}

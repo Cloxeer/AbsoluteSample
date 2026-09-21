@@ -150,3 +150,10 @@ export interface Sample {
   bpm: number | null;
   createdAt: string;
 }
+
+export interface LibrarySize {
+  bytes: number;
+  tracks: number;
+  scans: number;
+  samplesBytes: number;
+}

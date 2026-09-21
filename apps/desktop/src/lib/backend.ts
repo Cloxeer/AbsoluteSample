@@ -5,8 +5,10 @@ import type {
   EngineStatus,
   InstrumentStem,
   LibraryEntry,
+  LibrarySize,
   LoopAnalysis,
   LoopInfo,
+  Sample,
   SliceInfo,
   StemInfo,
   StemKey,
@@ -25,7 +27,7 @@ export const backend = {
     return mock.checkDependencies();
   },
 
-  async fetchAudio(args: { url: string; force?: boolean }): Promise<TrackInfo> {
+  async fetchAudio(args: { url: string; force?: boolean; currentTrackId?: string }): Promise<TrackInfo> {
     if (isTauri()) return invokeTauri<TrackInfo>("fetch_audio", args);
     return mock.fetchAudio(args);
   },
@@ -105,9 +107,48 @@ export const backend = {
     return mock.deleteTrack(trackId);
   },
 
-  async librarySize(): Promise<{ bytes: number; tracks: number }> {
-    if (isTauri()) return invokeTauri<{ bytes: number; tracks: number }>("library_size");
+  async librarySize(): Promise<LibrarySize> {
+    if (isTauri()) return invokeTauri<LibrarySize>("library_size");
     return mock.librarySize();
+  },
+
+  async saveSample(args: { trackId: string; stemKey: string; name?: string }): Promise<Sample> {
+    if (isTauri()) return invokeTauri<Sample>("save_sample", args);
+    return mock.saveSample(args);
+  },
+
+  async listSamples(): Promise<Sample[]> {
+    if (isTauri()) return invokeTauri<Sample[]>("list_samples");
+    return mock.listSamples();
+  },
+
+  async renameSample(args: { id: string; name: string }): Promise<Sample> {
+    if (isTauri()) return invokeTauri<Sample>("rename_sample", args);
+    return mock.renameSample(args);
+  },
+
+  async deleteSample(args: { id: string }): Promise<void> {
+    if (isTauri()) return invokeTauri<void>("delete_sample", args);
+    return mock.deleteSample(args);
+  },
+
+  async exportSamples(args: { ids: string[]; destDir?: string }): Promise<string[]> {
+    if (isTauri()) {
+      let destDir = args.destDir;
+      if (!destDir) {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const picked = await open({ directory: true });
+        if (!picked || Array.isArray(picked)) return [];
+        destDir = picked;
+      }
+      return invokeTauri<string[]>("export_samples", { ids: args.ids, destDir });
+    }
+    return mock.exportSamples(args);
+  },
+
+  async revealSample(args: { id: string }): Promise<void> {
+    if (isTauri()) return invokeTauri<void>("reveal_sample", args);
+    return mock.revealSample(args);
   },
 };
 

@@ -58,7 +58,29 @@ describe("LibraryPanel", () => {
     expect(screen.getByText("Loop 0:30 to 0:45")).toBeInTheDocument();
     expect(screen.getByText("Split (6)")).toBeInTheDocument();
     expect(screen.getByText("12.5 MB")).toBeInTheDocument();
-    expect(screen.getByText("12.5 MB in 1 song")).toBeInTheDocument();
+    expect(screen.getByText("1 song, 1 scan, 12.5 MB")).toBeInTheDocument();
+    expect(screen.getByText(/Songs are scans by default/)).toBeInTheDocument();
+  });
+
+  it("deletes all scans via the header button when confirmed", () => {
+    const onDeleteTrack = vi.fn();
+    render(
+      <LibraryPanel
+        open
+        entries={[makeEntry({ id: "a", kept: false }), makeEntry({ id: "b", kept: true })]}
+        currentTrackId={null}
+        sizeBytes={0}
+        onClose={vi.fn()}
+        onOpenTrack={vi.fn()}
+        onSetKept={vi.fn()}
+        onDeleteTrack={onDeleteTrack}
+      />
+    );
+    expect(screen.getByText("2 songs, 1 scan, 0.0 MB")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Delete all scans"));
+    fireEvent.click(screen.getByText("Yes"));
+    expect(onDeleteTrack).toHaveBeenCalledWith("a");
+    expect(onDeleteTrack).not.toHaveBeenCalledWith("b");
   });
 
   it("shows the empty-state text when there are no entries", () => {

@@ -25,6 +25,7 @@ export interface StemTrackProps {
   onToggleMute: () => void;
   onVolumeChange: (v: number) => void;
   onDownload: () => void;
+  extraAction?: React.ReactNode;
   onAudition?: () => void;
   onReady?: (ws: WaveSurfer) => void;
   onTimeUpdate?: (time: number) => void;
@@ -44,6 +45,7 @@ export function StemTrack({
   onToggleMute,
   onVolumeChange,
   onDownload,
+  extraAction,
   onAudition,
   onReady,
   onTimeUpdate,
@@ -102,6 +104,7 @@ export function StemTrack({
         onToggleMute={onToggleMute}
         onVolumeChange={onVolumeChange}
         onDownload={onDownload}
+        extraAction={extraAction}
       />
       <div
         className={clsx(

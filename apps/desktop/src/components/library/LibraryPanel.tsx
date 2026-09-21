@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { X } from "lucide-react";
 import { Surface } from "@/components/neumorphic/Surface";
 import { LibraryRow } from "./LibraryRow";
@@ -30,9 +31,19 @@ export function LibraryPanel({
   onSetKept,
   onDeleteTrack,
 }: LibraryPanelProps) {
+  const [confirmingDeleteAll, setConfirmingDeleteAll] = useState(false);
+
   if (!open) return null;
 
   const sorted = [...entries].sort((a, b) => (a.lastOpenedAt < b.lastOpenedAt ? 1 : -1));
+  const scanCount = entries.filter((e) => !e.kept).length;
+
+  const handleDeleteAllScans = () => {
+    for (const entry of entries) {
+      if (!entry.kept) onDeleteTrack(entry.id);
+    }
+    setConfirmingDeleteAll(false);
+  };
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end" role="dialog" aria-label="Song library">
@@ -62,13 +73,36 @@ export function LibraryPanel({
           )}
         </div>
 
-        <div className="border-t border-white/[0.06] pt-3 flex flex-col gap-1">
-          <span className="text-xs text-text font-medium">
-            {formatGBorMB(sizeBytes)} in {entries.length} {entries.length === 1 ? "song" : "songs"}
-          </span>
+        <div className="border-t border-white/[0.06] pt-3 flex flex-col gap-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-text font-medium">
+              {entries.length} {entries.length === 1 ? "song" : "songs"}, {scanCount} {scanCount === 1 ? "scan" : "scans"},{" "}
+              {formatGBorMB(sizeBytes)}
+            </span>
+            {confirmingDeleteAll ? (
+              <div className="flex items-center gap-1 text-xs shrink-0">
+                <span className="text-muted">Delete all scans?</span>
+                <button type="button" className="text-danger underline" onClick={handleDeleteAllScans}>
+                  Yes
+                </button>
+                <button type="button" className="text-muted underline" onClick={() => setConfirmingDeleteAll(false)}>
+                  No
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmingDeleteAll(true)}
+                disabled={scanCount === 0}
+                className="text-[11px] text-danger underline shrink-0 disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
+              >
+                Delete all scans
+              </button>
+            )}
+          </div>
           <p className="text-[11px] text-muted leading-snug">
-            Songs you split or export are kept automatically. Fetch-only songs are removed when you fetch the next
-            link.
+            Songs are scans by default. The 3 most recent scans stay; older unkept scans are removed when you fetch a
+            new link. Press Keep to hold a song, or save the stems you want as samples.
           </p>
         </div>
       </Surface>

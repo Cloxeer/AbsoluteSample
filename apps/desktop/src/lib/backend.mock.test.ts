@@ -6,12 +6,12 @@ async function freshMock() {
   return import("./backend.mock");
 }
 
-describe("backend.mock library pruning", () => {
+describe("backend.mock library pruning (v4: scans vs kept songs)", () => {
   beforeEach(() => {
     vi.resetModules();
   });
 
-  it("seeds the kept track and two extra fake entries", async () => {
+  it("seeds the kept track and two extra unkept scan entries", async () => {
     const mock = await freshMock();
     const entries = await mock.listLibrary();
     expect(entries.length).toBeGreaterThanOrEqual(3);
@@ -28,25 +28,25 @@ describe("backend.mock library pruning", () => {
     expect(songThree!.kept).toBe(false);
   });
 
-  it("prunes unkept, no-split entries when fetching a new id", async () => {
+  it("keeps the 3 most recently opened unkept scans and prunes the oldest beyond that", async () => {
     const mock = await freshMock();
-    const before = await mock.listLibrary();
-    expect(before.some((e) => e.id === "ZAz3rnLGthg")).toBe(true);
-
+    // Seed already has 2 unkept scans. Fetching 3 more distinct unkept videos pushes the
+    // unkept count past MAX_SCANS = 3, so the oldest unkept scan gets pruned.
     await mock.fetchAudio({ url: "https://youtu.be/newvideoid1" });
+    await mock.fetchAudio({ url: "https://youtu.be/newvideoid2" });
+    await mock.fetchAudio({ url: "https://youtu.be/newvideoid3" });
 
     const after = await mock.listLibrary();
-    // The unkept fetch-only and unkept loop-only entries should be gone.
     expect(after.some((e) => e.id === "ZAz3rnLGthg")).toBe(false);
-    expect(after.some((e) => e.id === "XEolg577-DA")).toBe(false);
-    // The new track and the kept seed track survive.
+    expect(after.some((e) => e.id === "XEolg577-DA")).toBe(true);
     expect(after.some((e) => e.id === "newvideoid1")).toBe(true);
+    expect(after.some((e) => e.id === "newvideoid2")).toBe(true);
+    expect(after.some((e) => e.id === "newvideoid3")).toBe(true);
   });
 
-  it("keeps kept and split entries across a prune", async () => {
+  it("keeps kept and split entries across a prune regardless of scan count", async () => {
     const mock = await freshMock();
-    // seed track is kept=true with bands, so it must survive.
-    await mock.fetchAudio({ url: "https://youtu.be/newvideoid2" });
+    await mock.fetchAudio({ url: "https://youtu.be/newvideoid4" });
     const after = await mock.listLibrary();
     expect(after.some((e) => e.id === "nRKgT3d6xoE")).toBe(true);
   });
@@ -59,5 +59,55 @@ describe("backend.mock library pruning", () => {
     expect(track.id).toBe("ZAz3rnLGthg");
     const after = await mock.listLibrary();
     expect(after.some((e) => e.id === "ZAz3rnLGthg")).toBe(true);
+  });
+
+  it("does not mark a track kept when stems, instruments or a save happen (v4: no auto-keep)", async () => {
+    const mock = await freshMock();
+    await mock.separateStems({ trackId: "nRKgT3d6xoE" });
+    const entries = await mock.listLibrary();
+    const seed = entries.find((e) => e.id === "nRKgT3d6xoE");
+    // Seed was already kept=true from seeding; verify split does not *newly* force it for an unkept one.
+    await mock.fetchAudio({ url: "https://youtu.be/newvideoid5" });
+    await mock.separateStems({ trackId: "newvideoid5" });
+    const after = await mock.listLibrary();
+    const fresh = after.find((e) => e.id === "newvideoid5");
+    expect(fresh!.kept).toBe(false);
+    expect(seed).toBeTruthy();
+  });
+});
+
+describe("backend.mock samples", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it("saves a sample with a default name derived from the song, stem and loop range", async () => {
+    const mock = await freshMock();
+    const sample = await mock.saveSample({ trackId: "nRKgT3d6xoE", stemKey: "drums_sub" });
+    expect(sample.songId).toBe("nRKgT3d6xoE");
+    expect(sample.stemKey).toBe("drums_sub");
+    expect(sample.name).toContain("Drums / Sub");
+  });
+
+  it("lists, renames and deletes samples", async () => {
+    const mock = await freshMock();
+    const sample = await mock.saveSample({ trackId: "nRKgT3d6xoE", stemKey: "drums_sub", name: "My take" });
+    let all = await mock.listSamples();
+    expect(all.some((s) => s.id === sample.id)).toBe(true);
+
+    const renamed = await mock.renameSample({ id: sample.id, name: "Renamed" });
+    expect(renamed.name).toBe("Renamed");
+
+    await mock.deleteSample({ id: sample.id });
+    all = await mock.listSamples();
+    expect(all.some((s) => s.id === sample.id)).toBe(false);
+  });
+
+  it("exports samples to fake destination paths", async () => {
+    const mock = await freshMock();
+    const sample = await mock.saveSample({ trackId: "nRKgT3d6xoE", stemKey: "drums_sub", name: "Export me" });
+    const paths = await mock.exportSamples({ ids: [sample.id], destDir: "D:/out" });
+    expect(paths).toHaveLength(1);
+    expect(paths[0]).toContain("D:/out");
   });
 });

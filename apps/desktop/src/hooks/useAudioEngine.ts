@@ -73,16 +73,17 @@ export function useAudioEngine() {
   }, []);
 
   const fetchAudio = useCallback(async (url: string, force = false) => {
+    const currentTrackId = engine.track?.id;
     setEngine((prev) => ({ ...prev, state: "fetching", error: null }));
     try {
-      const track = await backend.fetchAudio({ url, force });
+      const track = await backend.fetchAudio({ url, force, currentTrackId });
       setEngine((prev) => ({ ...prev, state: "fetched", track }));
       return track;
     } catch (err) {
       setEngine((prev) => ({ ...prev, state: "error", error: String(err) }));
       throw err;
     }
-  }, []);
+  }, [engine.track?.id]);
 
   /** Opens a previously fetched song from the library, tearing down current playback first. */
   const openTrack = useCallback(async (id: string, teardown?: () => void) => {

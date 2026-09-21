@@ -8,12 +8,13 @@ import { RegionSelector } from "@/components/waveform/RegionSelector";
 import { StemGroup } from "@/components/stems/StemGroup";
 import { InstrumentTrackList } from "@/components/stems/InstrumentTrackList";
 import { EngineStatusCard } from "@/components/stems/EngineStatusCard";
+import { SaveSampleButton } from "@/components/stems/SaveSampleButton";
 import { useAudioEngine } from "@/hooks/useAudioEngine";
 import { useSyncPlayback } from "@/hooks/useSyncPlayback";
 import { backend } from "@/lib/backend";
 import { onProgress } from "@/lib/events";
 import { formatTime } from "@/lib/format";
-import type { EngineStatus, ProgressPayload } from "@/lib/types";
+import type { EngineStatus, ProgressPayload, Sample } from "@/lib/types";
 import WaveSurfer from "wavesurfer.js";
 import { useRef } from "react";
 
@@ -49,7 +50,25 @@ function PassChecklist({ passStates, reasons }: { passStates: Record<string, Pas
 }
 
 /** Compact waveform of the copy-trimmed loop with its own play/pause transport (pauses the mix first). */
-function LoopPreview({ wavPath, startSec, endSec, onPlay }: { wavPath: string; startSec: number; endSec: number; onPlay: () => void }) {
+function LoopPreview({
+  wavPath,
+  startSec,
+  endSec,
+  onPlay,
+  trackId,
+  songTitle,
+  samples,
+  onSampleSaved,
+}: {
+  wavPath: string;
+  startSec: number;
+  endSec: number;
+  onPlay: () => void;
+  trackId: string;
+  songTitle: string;
+  samples: Sample[];
+  onSampleSaved: () => void;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
   const [url, setUrl] = useState<string | null>(null);
@@ -106,6 +125,16 @@ function LoopPreview({ wavPath, startSec, endSec, onPlay }: { wavPath: string; s
       <div className="font-mono text-xs text-muted whitespace-nowrap">
         {formatTime(startSec)} to {formatTime(endSec)}
       </div>
+      <SaveSampleButton
+        trackId={trackId}
+        stemKey="loop"
+        stemLabel="loop"
+        songTitle={songTitle}
+        startSec={startSec}
+        endSec={endSec}
+        samples={samples}
+        onSaved={onSampleSaved}
+      />
     </Surface>
   );
 }
@@ -143,9 +172,12 @@ export interface SlicerTabProps {
   syncApi?: ReturnType<typeof useSyncPlayback>;
   /** Called after any action that changes the song library (fetch, split, save/export). */
   onLibraryChanged?: () => void;
+  /** Saved samples, for showing which tracks already have a sample and refreshing the Samples drawer. */
+  samples?: Sample[];
+  onSampleSaved?: () => void;
 }
 
-export function SlicerTab({ engineApi, syncApi, onLibraryChanged }: SlicerTabProps = {}) {
+export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], onSampleSaved }: SlicerTabProps = {}) {
   const ownEngine = useAudioEngine();
   const { engine, fetchAudio, trimLoop, separateStems, separateInstruments, newLink } = engineApi ?? ownEngine;
   const ownSync = useSyncPlayback();
@@ -369,7 +401,17 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged }: SlicerTabPro
       {engine.loop && (
         <div className="flex flex-col gap-3" id="step-loop">
           <h2 className="text-sm font-semibold text-muted uppercase tracking-wide">2. Loop</h2>
-          <LoopPreview key={engine.track.id} wavPath={engine.loop.wavPath} startSec={engine.loop.startSec} endSec={engine.loop.endSec} onPlay={sync.stopAll} />
+          <LoopPreview
+            key={engine.track.id}
+            wavPath={engine.loop.wavPath}
+            startSec={engine.loop.startSec}
+            endSec={engine.loop.endSec}
+            onPlay={sync.stopAll}
+            trackId={engine.track.id}
+            songTitle={engine.track.title}
+            samples={samples}
+            onSampleSaved={() => onSampleSaved?.()}
+          />
 
           {!engine.stems && !engine.instruments && (
             <EngineStatusCard status={engineStatus} installing={installing} onInstall={handleInstallEngine} />
@@ -412,6 +454,11 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged }: SlicerTabPro
             onFinish={sync.handleFinish}
             onAudition={sync.auditionTrack}
             onSaved={onLibraryChanged}
+            songTitle={engine.track.title}
+            loopStartSec={engine.loop?.startSec}
+            loopEndSec={engine.loop?.endSec}
+            samples={samples}
+            onSampleSaved={onSampleSaved}
           />
         </div>
       )}
@@ -435,6 +482,11 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged }: SlicerTabPro
             onFinish={sync.handleFinish}
             onAudition={sync.auditionTrack}
             onSaved={onLibraryChanged}
+            songTitle={engine.track.title}
+            loopStartSec={engine.loop?.startSec}
+            loopEndSec={engine.loop?.endSec}
+            samples={samples}
+            onSampleSaved={onSampleSaved}
           />
         </div>
       )}

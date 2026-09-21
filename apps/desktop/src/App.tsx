@@ -5,10 +5,11 @@ import { Tabs } from "@/components/layout/Tabs";
 import { SlicerTab } from "@/views/SlicerTab";
 import { InspectorTab } from "@/views/InspectorTab";
 import { LibraryPanel } from "@/components/library/LibraryPanel";
+import { SamplesPanel } from "@/components/samples/SamplesPanel";
 import { useAudioEngine } from "@/hooks/useAudioEngine";
 import { useSyncPlayback } from "@/hooks/useSyncPlayback";
 import { backend } from "@/lib/backend";
-import type { DependencyReport, LibraryEntry } from "@/lib/types";
+import type { DependencyReport, LibraryEntry, Sample } from "@/lib/types";
 
 const TABS = [
   { id: "slicer", label: "Stem Slicer" },
@@ -34,26 +35,61 @@ export default function App() {
   const [libraryEntries, setLibraryEntries] = useState<LibraryEntry[]>([]);
   const [librarySizeBytes, setLibrarySizeBytes] = useState(0);
 
+  const [samplesOpen, setSamplesOpen] = useState(false);
+  const [samples, setSamples] = useState<Sample[]>([]);
+
   const refreshLibrary = useCallback(async () => {
     const [entries, size] = await Promise.all([backend.listLibrary(), backend.librarySize()]);
     setLibraryEntries(entries);
     setLibrarySizeBytes(size.bytes);
   }, []);
 
+  const refreshSamples = useCallback(async () => {
+    setSamples(await backend.listSamples());
+  }, []);
+
   useEffect(() => {
     backend.checkDependencies().then(setDeps);
     refreshLibrary();
-  }, [refreshLibrary]);
+    refreshSamples();
+  }, [refreshLibrary, refreshSamples]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.key.toLowerCase() === "b") {
         setLibraryOpen((v) => !v);
+      } else if (e.key.toLowerCase() === "n") {
+        setSamplesOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  const handleRenameSample = useCallback(
+    async (id: string, name: string) => {
+      await backend.renameSample({ id, name });
+      refreshSamples();
+    },
+    [refreshSamples]
+  );
+
+  const handleDeleteSample = useCallback(
+    async (id: string) => {
+      await backend.deleteSample({ id });
+      refreshSamples();
+      refreshLibrary();
+    },
+    [refreshSamples, refreshLibrary]
+  );
+
+  const handleRevealSample = useCallback(async (id: string) => {
+    await backend.revealSample({ id });
+  }, []);
+
+  const handleExportSamples = useCallback(async (ids: string[]) => {
+    await backend.exportSamples({ ids });
   }, []);
 
   const handleOpenTrack = useCallback(
@@ -151,11 +187,13 @@ export default function App() {
         masterVolume={masterVolume}
         progress={engine.progress ? { message: engine.progress.message, percent: engine.progress.percent } : null}
         librarySongCount={libraryEntries.length}
+        sampleCount={samples.length}
         onPlayPause={sync.togglePlay}
         onStop={sync.stopAll}
         onToggleLoop={sync.toggleLoop}
         onMasterVolumeChange={setMasterVolume}
         onToggleLibrary={() => setLibraryOpen((v) => !v)}
+        onToggleSamples={() => setSamplesOpen((v) => !v)}
       />
       <Stepper steps={PIPELINE_STEPS} currentId={currentStep} completedIds={completedSteps} onStepClick={handleStepClick} />
       <Tabs tabs={TABS} activeId={activeTab} onChange={setActiveTab} />
@@ -169,9 +207,24 @@ export default function App() {
         onSetKept={handleSetKept}
         onDeleteTrack={handleDeleteTrack}
       />
+      <SamplesPanel
+        open={samplesOpen}
+        samples={samples}
+        onClose={() => setSamplesOpen(false)}
+        onRename={handleRenameSample}
+        onDelete={handleDeleteSample}
+        onReveal={handleRevealSample}
+        onExport={handleExportSamples}
+      />
       <main className="flex-1 pb-10">
         {activeTab === "slicer" ? (
-          <SlicerTab engineApi={engineApi} syncApi={sync} onLibraryChanged={refreshLibrary} />
+          <SlicerTab
+            engineApi={engineApi}
+            syncApi={sync}
+            onLibraryChanged={refreshLibrary}
+            samples={samples}
+            onSampleSaved={refreshSamples}
+          />
         ) : (
           <InspectorTab
             track={engine.track}

@@ -58,6 +58,8 @@ export interface InstrumentTrackProps {
   onToggleMute: () => void;
   onVolumeChange: (v: number) => void;
   onDownload: () => void;
+  /** Optional extra icon action rendered next to Download, e.g. a Save-as-sample button. */
+  extraAction?: React.ReactNode;
   onReady?: (ws: WaveSurfer) => void;
   onTimeUpdate?: (time: number) => void;
   onFinish?: () => void;
@@ -78,6 +80,7 @@ export function InstrumentTrack({
   onToggleMute,
   onVolumeChange,
   onDownload,
+  extraAction,
   onReady,
   onTimeUpdate,
   onFinish,
@@ -161,6 +164,7 @@ export function InstrumentTrack({
           <Button aria-label={`Download ${stem.label} WAV`} onClick={onDownload} className="!px-2 !py-1 shrink-0">
             <Download size={14} />
           </Button>
+          {extraAction}
         </div>
 
         <div className="flex items-center gap-2">

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AudioWaveform, HelpCircle, ListMusic, Repeat, Square } from "lucide-react";
+import { AudioWaveform, Bookmark, HelpCircle, ListMusic, Repeat, Square } from "lucide-react";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
 import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
@@ -21,11 +21,14 @@ export interface TransportProps {
   progress?: { message: string; percent: number } | null;
   /** Number of songs in the library, shown on the "Songs (N)" toggle button. Omit to hide the button. */
   librarySongCount?: number;
+  /** Number of saved samples, shown on the "Samples (N)" toggle button. Omit to hide the button. */
+  sampleCount?: number;
   onPlayPause: () => void;
   onStop: () => void;
   onToggleLoop: () => void;
   onMasterVolumeChange: (v: number) => void;
   onToggleLibrary?: () => void;
+  onToggleSamples?: () => void;
 }
 
 const SHORTCUTS: [string, string][] = [
@@ -33,6 +36,7 @@ const SHORTCUTS: [string, string][] = [
   ["L", "Toggle loop"],
   ["1 - 4", "Audition stem 1-4"],
   ["M", "Mute focused track"],
+  ["N", "Toggle samples"],
   ["Esc", "Stop"],
 ];
 
@@ -60,11 +64,13 @@ export function Transport({
   masterVolume,
   progress,
   librarySongCount,
+  sampleCount,
   onPlayPause,
   onStop,
   onToggleLoop,
   onMasterVolumeChange,
   onToggleLibrary,
+  onToggleSamples,
 }: TransportProps) {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
@@ -158,6 +164,12 @@ export function Transport({
             <Button aria-label="Toggle song library" onClick={onToggleLibrary} className="!px-3 !py-2 flex items-center gap-1.5">
               <ListMusic size={16} />
               Songs ({librarySongCount ?? 0})
+            </Button>
+          )}
+          {onToggleSamples && (
+            <Button aria-label="Toggle samples" onClick={onToggleSamples} className="!px-3 !py-2 flex items-center gap-1.5">
+              <Bookmark size={16} />
+              Samples ({sampleCount ?? 0})
             </Button>
           )}
           <Pill name="ffmpeg" ok={!!deps?.ffmpeg} />

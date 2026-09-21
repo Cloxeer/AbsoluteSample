@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import type WaveSurfer from "wavesurfer.js";
 import { DisclosureToggle, InstrumentTrack } from "./InstrumentTrack";
+import { SaveSampleButton } from "./SaveSampleButton";
 import { Button } from "@/components/neumorphic/Button";
 import { backend } from "@/lib/backend";
 import { groupInstruments } from "@/lib/instruments";
-import type { InstrumentStem } from "@/lib/types";
+import type { InstrumentStem, Sample } from "@/lib/types";
 import type { TrackGainState } from "@/hooks/useSyncPlayback";
 
 export interface InstrumentTrackListProps {
@@ -23,6 +24,12 @@ export interface InstrumentTrackListProps {
   onAudition: (id: string) => void;
   /** Called after a save/export completes (backend marks the track kept automatically). */
   onSaved?: () => void;
+  /** Song title and loop range, for the "Save as sample" default name; samples list, to show already-saved state. */
+  songTitle?: string;
+  loopStartSec?: number;
+  loopEndSec?: number;
+  samples?: Sample[];
+  onSampleSaved?: () => void;
 }
 
 const KIT_LABEL = "kit";
@@ -41,6 +48,11 @@ export function InstrumentTrackList({
   onFinish,
   onAudition,
   onSaved,
+  songTitle,
+  loopStartSec,
+  loopEndSec,
+  samples = [],
+  onSampleSaved,
 }: InstrumentTrackListProps) {
   const [wavUrls, setWavUrls] = useState<Record<string, string>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -109,6 +121,20 @@ export function InstrumentTrackList({
         onToggleMute={() => onUpsertTrack({ ...t, mute: !t.mute })}
         onVolumeChange={(v) => onUpsertTrack({ ...t, volume: v })}
         onDownload={() => handleDownload(stem)}
+        extraAction={
+          songTitle && loopStartSec !== undefined && loopEndSec !== undefined ? (
+            <SaveSampleButton
+              trackId={trackId}
+              stemKey={stem.key}
+              stemLabel={stem.label}
+              songTitle={songTitle}
+              startSec={loopStartSec}
+              endSec={loopEndSec}
+              samples={samples}
+              onSaved={onSampleSaved}
+            />
+          ) : undefined
+        }
         onReady={(ws) => onRegisterInstance(stem.key, ws, isMaster, inMix)}
         onTimeUpdate={(time) => onTimeUpdate(stem.key, time)}
         onFinish={() => onFinish(stem.key)}

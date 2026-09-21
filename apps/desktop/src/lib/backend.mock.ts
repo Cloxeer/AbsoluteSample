@@ -7,6 +7,7 @@ import type {
   LibraryEntry,
   LoopAnalysis,
   LoopInfo,
+  Sample,
   SliceInfo,
   StemInfo,
   StemKey,
@@ -269,6 +270,8 @@ interface LibraryRecord {
 }
 
 let libraryStore: Map<string, LibraryRecord> | null = null;
+let sampleStore: Sample[] = [];
+const MAX_SCANS = 3;
 
 function estimateBytes(durationSec: number, hasLoop: boolean, hasBands: boolean, hasInstruments: boolean): number {
   const pcmBytesPerSec = 44100 * 2 * 2;
@@ -403,14 +406,12 @@ async function getLibraryStore(): Promise<Map<string, LibraryRecord>> {
   return libraryStore;
 }
 
-/** Removes unkept entries with no split output, except the id currently being fetched/opened. */
-function pruneUnkept(store: Map<string, LibraryRecord>, exceptId: string): void {
-  for (const [id, rec] of Array.from(store.entries())) {
-    if (id === exceptId) continue;
-    const e = rec.entry;
-    if (!e.kept && !e.hasBands && !e.hasInstruments) {
-      store.delete(id);
-    }
+/** v4: keeps only the MAX_SCANS most recently opened unkept ("scan") entries; kept entries are never pruned. */
+function pruneUnkept(store: Map<string, LibraryRecord>, exceptIds: string[]): void {
+  const unkept = Array.from(store.entries()).filter(([id, rec]) => !rec.entry.kept && !exceptIds.includes(id));
+  unkept.sort((a, b) => (a[1].entry.lastOpenedAt < b[1].entry.lastOpenedAt ? 1 : -1));
+  for (const [id] of unkept.slice(MAX_SCANS)) {
+    store.delete(id);
   }
 }
 
@@ -489,13 +490,14 @@ function extractVideoId(url: string): string {
   return `mock${Math.abs(hash)}`;
 }
 
-export async function fetchAudio(args: { url: string; force?: boolean }): Promise<TrackInfo> {
+export async function fetchAudio(args: { url: string; force?: boolean; currentTrackId?: string }): Promise<TrackInfo> {
   const store = await getLibraryStore();
   const id = extractVideoId(args.url);
+  const exceptIds = [id, ...(args.currentTrackId ? [args.currentTrackId] : [])];
 
   const cached = store.get(id);
   if (cached && !args.force) {
-    pruneUnkept(store, id);
+    pruneUnkept(store, exceptIds);
     return cached.track;
   }
 
@@ -510,7 +512,7 @@ export async function fetchAudio(args: { url: string; force?: boolean }): Promis
     emitMockProgress({ stage: stage as any, percent, message });
   }
 
-  pruneUnkept(store, id);
+  pruneUnkept(store, exceptIds);
 
   if (cached) {
     // force re-fetch of an existing entry: reset its split state per fresh download semantics.
@@ -587,10 +589,15 @@ export async function deleteTrack(trackId: string): Promise<void> {
   store.delete(trackId);
 }
 
-export async function librarySize(): Promise<{ bytes: number; tracks: number }> {
+export async function librarySize(): Promise<{ bytes: number; tracks: number; scans: number; samplesBytes: number }> {
   const store = await getLibraryStore();
   const values = Array.from(store.values());
-  return { bytes: values.reduce((sum, r) => sum + r.entry.bytes, 0), tracks: values.length };
+  return {
+    bytes: values.reduce((sum, r) => sum + r.entry.bytes, 0),
+    tracks: values.length,
+    scans: values.filter((r) => !r.entry.kept).length,
+    samplesBytes: sampleStore.reduce((sum, s) => sum + s.bytes, 0),
+  };
 }
 
 export async function trimLoop(_args: { trackId: string; startSec: number; endSec: number }): Promise<LoopInfo> {
@@ -620,7 +627,7 @@ export async function separateStems(_args: { trackId: string }): Promise<StemInf
   const rec = store.get(_args.trackId);
   if (rec) {
     rec.stems = stems;
-    rec.entry = { ...rec.entry, hasBands: true, kept: true };
+    rec.entry = { ...rec.entry, hasBands: true };
   }
   return stems;
 }
@@ -633,18 +640,7 @@ export async function analyzeLoop(_args: { trackId: string }): Promise<LoopAnaly
   return manifest.analysis;
 }
 
-async function markKeptFromPath(srcPath: string): Promise<void> {
-  const store = await getLibraryStore();
-  for (const [id, rec] of store.entries()) {
-    if (srcPath.includes(`${id}${srcPath.includes("\\") ? "\\" : "/"}`) || srcPath.includes(`mock/${id}/`) || srcPath.includes(`mock\\${id}\\`)) {
-      rec.entry = { ...rec.entry, kept: true };
-      return;
-    }
-  }
-}
-
 export async function saveStem(args: { srcPath: string; destPath: string }): Promise<string> {
-  await markKeptFromPath(args.srcPath);
   const url = await resolveWavUrl(args.srcPath);
   const a = document.createElement("a");
   a.href = url;
@@ -656,9 +652,6 @@ export async function saveStem(args: { srcPath: string; destPath: string }): Pro
 }
 
 export async function saveAllStems(args: { trackId: string; destDir: string }): Promise<string[]> {
-  const store = await getLibraryStore();
-  const rec = store.get(args.trackId);
-  if (rec) rec.entry = { ...rec.entry, kept: true };
   const manifest = await getManifest();
   const paths: string[] = [];
   for (const stem of manifest.stems) {
@@ -822,7 +815,92 @@ export async function separateInstruments(args: { trackId: string }): Promise<In
   const rec = store.get(args.trackId);
   if (rec) {
     rec.instruments = stems;
-    rec.entry = { ...rec.entry, hasInstruments: true, kept: true, instrumentCount: stems.length };
+    rec.entry = { ...rec.entry, hasInstruments: true, instrumentCount: stems.length };
   }
   return stems;
+}
+
+// v4 addendum: samples
+
+function formatMmSs(totalSec: number): string {
+  const s = Math.max(0, Math.round(totalSec));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function findSampleSource(rec: LibraryRecord, stemKey: string): { path: string; label: string; group: string } | null {
+  if (stemKey === "loop") {
+    if (!rec.loop) return null;
+    return { path: rec.loop.wavPath, label: "Loop", group: "loop" };
+  }
+  const band = rec.stems?.find((s) => s.key === stemKey);
+  if (band) return { path: band.path, label: band.label, group: "band" };
+  const instrument = rec.instruments?.find((s) => s.key === stemKey);
+  if (instrument) return { path: instrument.path, label: instrument.label, group: instrument.group };
+  return null;
+}
+
+export async function saveSample(args: { trackId: string; stemKey: string; name?: string }): Promise<Sample> {
+  const store = await getLibraryStore();
+  const rec = store.get(args.trackId);
+  if (!rec) throw new Error(`Unknown track: ${args.trackId}`);
+  const source = findSampleSource(rec, args.stemKey);
+  if (!source) throw new Error(`Unknown stem: ${args.stemKey}`);
+
+  const startSec = rec.loop?.startSec ?? 0;
+  const endSec = rec.loop?.endSec ?? rec.track.durationSec;
+  const defaultName = `${rec.entry.title} - ${source.label} ${formatMmSs(startSec)}-${formatMmSs(endSec)}`;
+  let name = (args.name ?? "").trim() || defaultName;
+  let suffix = 2;
+  const base = name;
+  while (sampleStore.some((s) => s.name === name)) {
+    name = `${base} (${suffix})`;
+    suffix += 1;
+  }
+
+  const sample: Sample = {
+    id: `sample_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    name,
+    path: source.path,
+    bytes: 900_000,
+    songId: args.trackId,
+    songTitle: rec.entry.title,
+    stemKey: args.stemKey,
+    stemLabel: source.label,
+    group: source.group,
+    startSec,
+    endSec,
+    durationSec: endSec - startSec,
+    bpm: rec.analysis?.bpm ?? null,
+    createdAt: new Date().toISOString(),
+  };
+  sampleStore = [sample, ...sampleStore];
+  return sample;
+}
+
+export async function listSamples(): Promise<Sample[]> {
+  return [...sampleStore].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+}
+
+export async function renameSample(args: { id: string; name: string }): Promise<Sample> {
+  const sample = sampleStore.find((s) => s.id === args.id);
+  if (!sample) throw new Error(`Unknown sample: ${args.id}`);
+  sample.name = args.name;
+  return sample;
+}
+
+export async function deleteSample(args: { id: string }): Promise<void> {
+  sampleStore = sampleStore.filter((s) => s.id !== args.id);
+}
+
+export async function exportSamples(args: { ids: string[]; destDir?: string }): Promise<string[]> {
+  const destDir = args.destDir ?? "mock/exports";
+  return args.ids.map((id) => {
+    const sample = sampleStore.find((s) => s.id === id);
+    const basename = (sample?.name ?? id).replace(/[\\/:*?"<>|]/g, "_");
+    return `${destDir}/${basename}.wav`;
+  });
+}
+
+export async function revealSample(_args: { id: string }): Promise<void> {
+  await delay(30);
 }
