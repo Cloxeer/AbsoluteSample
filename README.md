@@ -80,6 +80,16 @@ apps/desktop/src-tauri/target/release/absolutesample-cli.exe engine install
 Timings on an RTX 2070 Super: a 15 s loop in about 20 s, a full 3 minute song in about 2.5 minutes.
 The old crossover splitter is still available as "Quick EQ bands".
 
+## What changed in v6
+
+- Drop a WAV, FLAC or MP3 first; YouTube is the small secondary input. Local files give the models cleaner input than YouTube's 130 kbps Opus.
+- Split runs once on the whole song. Selections are cut afterwards from the already separated stems, instantly, snapped to bar or beat, with 5 ms fades and leading silence trimmed.
+- Tracks are named by what they sound like ("Strings", "Synth", "Accordion") with the detected instruments listed under the name and a confidence score explained on hover. Silent stems are collapsed, never dropped.
+- Samples: drag-select on any lane, "Save selection as sample", "Download selection", "Slice into hits" (one-shots from onsets). Names carry BPM, key and bars. Rows drag straight into other apps. Deletes go to a trash with 7 day retention and an Undo toast.
+- The top transport controls whatever is playing (mix, one track, a sample, a pad, the source, the loop); the playhead is corrected for audio output latency.
+- Notes tab: MIDI extraction with Basic Pitch, key and camelot, chords in time, a piano roll, plain-words theory, MIDI export.
+- Storage chip with Clear scans and Empty trash; GPU busy chip; Low priority toggle for splits.
+
 ## Songs, scans and samples
 
 - Every fetched song is a scan. The three most recent scans stay so you can flip between them (Songs panel, B); older unkept scans are deleted when you fetch a new link. Press Keep to hold a song, or delete it yourself.

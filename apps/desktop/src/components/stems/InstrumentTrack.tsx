@@ -174,7 +174,7 @@ export function InstrumentTrack({
   }, [wavUrl]);
 
   return (
-    <div role="group" aria-label={`${stem.label} track`} className={clsx("flex items-stretch gap-3", indented && "ml-9")}>
+    <div role="group" aria-label={`${stem.displayLabel ?? stem.label} track`} className={clsx("flex items-stretch gap-3", indented && "ml-9")}>
       <div
         className={clsx(
           "shrink-0 flex flex-col gap-2 p-3 rounded-2xl bg-surface neu-surface-raised",

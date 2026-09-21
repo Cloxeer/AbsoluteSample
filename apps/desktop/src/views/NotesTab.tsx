@@ -31,7 +31,7 @@ function buildSourceOptions(instruments: InstrumentStem[] | null | undefined, sa
     for (const node of groupInstruments(instruments)) {
       options.push({ key: node.stem.key, label: node.stem.displayLabel ?? node.stem.label, path: node.stem.path, group: "Instrument stems" });
       for (const child of node.children) {
-        options.push({ key: child.key, label: `${node.stem.displayLabel ?? node.stem.label} – ${child.label}`, path: child.path, group: "Instrument stems" });
+        options.push({ key: child.key, label: `${node.stem.displayLabel ?? node.stem.label}  /  ${child.label}`, path: child.path, group: "Instrument stems" });
       }
     }
   }
