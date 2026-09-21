@@ -3,9 +3,9 @@
 
 use crate::audio::engine::{EngineStatus, InstrumentStem};
 use crate::audio::progress::Progress;
-use crate::audio::{analysis, downloader, dsp_filters, engine, slicer, workspace};
+use crate::audio::{analysis, downloader, dsp_filters, engine, library, slicer, workspace};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Which separation engine `run_full` should use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,7 +15,7 @@ pub enum Engine {
     Ai,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackManifest {
     pub id: String,
@@ -30,7 +30,7 @@ pub struct TrackManifest {
     pub work_dir: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoopManifest {
     pub track_id: String,
@@ -41,7 +41,7 @@ pub struct LoopManifest {
     pub wav_path: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StemManifest {
     pub index: u32,
@@ -68,16 +68,62 @@ pub struct Manifest {
     pub engine: Option<EngineStatus>,
 }
 
-/// fetch: yt-dlp download + ffprobe + decode source.wav.
-pub fn run_fetch(url: &str, progress: &dyn Progress) -> Result<TrackManifest, String> {
+/// Looks for an existing `source.<ext>` (non-wav) + `source.wav` pair in
+/// `dir`, returning the non-wav source's path if both are present.
+fn existing_source_pair(dir: &Path) -> Option<PathBuf> {
+    let wav = dir.join("source.wav");
+    if !wav.exists() {
+        return None;
+    }
+    std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
+        p.file_stem().and_then(|s| s.to_str()) == Some("source")
+            && p.extension().and_then(|e| e.to_str()) != Some("wav")
+    })
+}
+
+/// fetch: normalizes the URL (YouTube forms), prunes unkept/unsplit work
+/// dirs, and returns the cached `track.json` if `dir/source.<ext>` +
+/// `dir/source.wav` already exist (unless `force`). Otherwise runs yt-dlp
+/// download + ffprobe + decode source.wav, then writes `track.json` and
+/// `state.json`.
+pub fn run_fetch(
+    url: &str,
+    force: bool,
+    current_track_id: Option<&str>,
+    progress: &dyn Progress,
+) -> Result<TrackManifest, String> {
+    let normalized = library::normalize_youtube_url(url);
+    let (fetch_url, known_id) = match &normalized {
+        Some((id, canonical)) => (canonical.clone(), Some(id.clone())),
+        None => (url.to_string(), None),
+    };
+
+    // Never deletes `known_id`'s dir (the one being fetched) or the
+    // currently open track's dir, even if either would otherwise qualify.
+    let except: Vec<&str> = [known_id.as_deref(), current_track_id].into_iter().flatten().collect();
+    let _ = library::prune_unkept(&except);
+
+    if !force {
+        if let Some(id) = &known_id {
+            let dir = workspace::work_dir(id)?;
+            if existing_source_pair(&dir).is_some() {
+                if let Some(cached) = library::read_track(id)? {
+                    progress.report("download", 100.0, "using cached track");
+                    progress.report("decode", 100.0, "fetch complete (cached)");
+                    return Ok(cached);
+                }
+            }
+        }
+    }
+
     progress.report("download", 0.0, "starting yt-dlp download");
 
     // Download into a temp-ish workdir keyed by a url hash first; we relocate
     // once we know the real id (yt-dlp gives it back in the JSON).
-    let tmp_id = downloader::hash_id(url);
+    let tmp_id = downloader::hash_id(&fetch_url);
     let tmp_dir = workspace::work_dir(&tmp_id)?;
 
-    let dl = downloader::download(url, &tmp_dir)?;
+    let dl = downloader::download(&fetch_url, &tmp_dir)?;
     progress.report("download", 60.0, &format!("downloaded: {}", dl.title));
 
     // Move into the final workdir named by the real id (if different).
@@ -87,6 +133,7 @@ pub fn run_fetch(url: &str, progress: &dyn Progress) -> Result<TrackManifest, St
         std::fs::rename(&dl.source_path, &final_source)
             .or_else(|_| std::fs::copy(&dl.source_path, &final_source).map(|_| ()))
             .map_err(|e| format!("failed to relocate downloaded file: {e}"))?;
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
     progress.report("decode", 70.0, "probing metadata");
@@ -98,10 +145,10 @@ pub fn run_fetch(url: &str, progress: &dyn Progress) -> Result<TrackManifest, St
 
     progress.report("decode", 100.0, "fetch complete");
 
-    Ok(TrackManifest {
+    let track = TrackManifest {
         id: dl.id,
         title: dl.title,
-        url: url.to_string(),
+        url: fetch_url,
         source_path: final_source.to_string_lossy().to_string(),
         wav_path: wav_path.to_string_lossy().to_string(),
         duration_sec: probe.duration_sec,
@@ -109,7 +156,21 @@ pub fn run_fetch(url: &str, progress: &dyn Progress) -> Result<TrackManifest, St
         channels: probe.channels,
         codec: probe.codec,
         work_dir: final_dir.to_string_lossy().to_string(),
-    })
+    };
+
+    library::write_track(&track.id, &track)?;
+    let mut state = library::load_state(&track.id);
+    let now = library::now_rfc3339();
+    if !force {
+        // Preserve the original fetchedAt on a fresh (non-forced) fetch of a
+        // brand-new id; load_state's default already set it to `now`.
+    } else {
+        state.fetched_at = now.clone();
+    }
+    state.last_opened_at = now;
+    library::write_state(&track.id, &state)?;
+
+    Ok(track)
 }
 
 /// trim: copy-trim source.<ext> -> loop.<ext>, then decode loop.wav.
@@ -135,14 +196,20 @@ pub fn run_trim(
 
     progress.report("trim", 100.0, "trim complete");
 
-    Ok(LoopManifest {
+    let loop_info = LoopManifest {
         track_id: track_id.to_string(),
         start_sec,
         end_sec,
         duration_sec: end_sec - start_sec,
         loop_path: loop_path.to_string_lossy().to_string(),
         wav_path: wav_path.to_string_lossy().to_string(),
-    })
+    };
+
+    let mut state = library::load_state(track_id);
+    state.loop_info = Some(loop_info.clone());
+    library::write_state(track_id, &state)?;
+
+    Ok(loop_info)
 }
 
 /// stems: single ffmpeg filter_complex pass over loop.wav -> 4 wavs + astats.
@@ -177,8 +244,10 @@ pub fn run_stems(
     Ok(result)
 }
 
-/// analyze: pure-Rust onset/BPM analysis over loop.wav.
+/// analyze: pure-Rust onset/BPM analysis over loop.wav. Persists the result
+/// into `state.json`'s `analysis` field.
 pub fn run_analyze(
+    track_id: &str,
     loop_wav: &Path,
     duration_sec: f64,
     progress: &dyn Progress,
@@ -186,6 +255,11 @@ pub fn run_analyze(
     progress.report("analyze", 0.0, "analyzing loop");
     let result = analysis::analyze(loop_wav, duration_sec)?;
     progress.report("analyze", 100.0, "analysis complete");
+
+    let mut state = library::load_state(track_id);
+    state.analysis = Some(result.clone());
+    library::write_state(track_id, &state)?;
+
     Ok(result)
 }
 
@@ -199,7 +273,7 @@ pub fn run_full(
     engine_choice: Engine,
     progress: &dyn Progress,
 ) -> Result<Manifest, String> {
-    let track = run_fetch(url, progress)?;
+    let track = run_fetch(url, false, None, progress)?;
     let loop_info = run_trim(
         &track.id,
         Path::new(&track.source_path),
@@ -209,7 +283,7 @@ pub fn run_full(
     )?;
     // The band split is cheap, so it always runs regardless of engine choice.
     let stems = run_stems(&track.id, Path::new(&loop_info.wav_path), progress)?;
-    let analysis = run_analyze(Path::new(&loop_info.wav_path), loop_info.duration_sec, progress)?;
+    let analysis = run_analyze(&track.id, Path::new(&loop_info.wav_path), loop_info.duration_sec, progress)?;
 
     let (instruments, engine_status) = if engine_choice == Engine::Ai {
         let work_dir = workspace::work_dir(&track.id)?;

@@ -23,6 +23,17 @@ pub fn run() {
             commands::engine_status,
             commands::engine_install,
             commands::separate_instruments,
+            commands::list_library,
+            commands::open_track,
+            commands::set_kept,
+            commands::delete_track,
+            commands::library_size,
+            commands::save_sample,
+            commands::list_samples,
+            commands::rename_sample,
+            commands::delete_sample,
+            commands::export_samples,
+            commands::reveal_sample,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,14 +1,14 @@
 //! Pure-Rust onset detection, BPM estimation, and beat-grid generation.
 
 use super::silent_command;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const SAMPLE_RATE: u32 = 22050;
 pub const FRAME_SIZE: usize = 1024;
 pub const HOP_SIZE: usize = 256;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoopAnalysis {
     pub bpm: f64,

@@ -236,8 +236,9 @@ fn dir_entry_to_library_entry(id: &str, dir: &Path) -> Result<Option<LibraryEntr
         duration_sec: track.duration_sec,
         fetched_at: state.fetched_at,
         last_opened_at: state.last_opened_at,
-        // A song with split output is effectively kept: prune never removes it.
-        kept: state.kept || has_bands || has_instruments,
+        // `kept` is purely the stored flag (v4): nothing implicitly keeps a
+        // song anymore. See `prune_unkept` for the actual retention rule.
+        kept: state.kept,
         has_loop: state.loop_info.is_some(),
         loop_start_sec: state.loop_info.as_ref().map(|l| l.start_sec),
         loop_end_sec: state.loop_info.as_ref().map(|l| l.end_sec),
@@ -406,34 +407,50 @@ pub fn dir_size(path: &Path) -> Result<u64, String> {
     Ok(total)
 }
 
-/// Total size (bytes) and track count across the whole library.
-pub fn size() -> Result<(u64, usize), String> {
+/// Total size (bytes), track count, and unkept ("scan") track count across
+/// the whole library.
+pub fn size() -> Result<(u64, usize, usize), String> {
     let root = workspace::work_root()?;
     if !root.exists() {
-        return Ok((0, 0));
+        return Ok((0, 0, 0));
     }
     let mut bytes = 0u64;
     let mut tracks = 0usize;
+    let mut scans = 0usize;
     for entry in std::fs::read_dir(&root).map_err(|e| format!("failed to read work root: {e}"))? {
         let entry = entry.map_err(|e| format!("failed to read work root entry: {e}"))?;
         let path = entry.path();
         if path.is_dir() {
             tracks += 1;
             bytes += dir_size(&path)?;
+            let state = load_state_at(&path).unwrap_or_default();
+            if !state.kept {
+                scans += 1;
+            }
         }
     }
-    Ok((bytes, tracks))
+    Ok((bytes, tracks, scans))
 }
 
-/// Deletes work dirs that are not kept AND have no split output (no band
-/// stems, no instrument stems). Never deletes `except` (the track currently
-/// being fetched), even if it would otherwise qualify.
-pub fn prune_unkept(except: &str) -> Result<(), String> {
+/// Maximum number of unkept ("scan") songs retained by `prune_unkept`,
+/// beyond the most recently opened.
+pub const MAX_SCANS: usize = 3;
+
+/// Deletes unkept ("scan") songs beyond the `MAX_SCANS` most recently opened
+/// (sorted by `lastOpenedAt`, falling back to `fetchedAt`), regardless of
+/// whether they have split output. Kept songs always survive. Never deletes
+/// any id in `except` (e.g. the id currently being fetched, and the
+/// currently open track), even if it would otherwise qualify.
+pub fn prune_unkept(except: &[&str]) -> Result<(), String> {
     let root = workspace::work_root()?;
     if !root.exists() {
         return Ok(());
     }
-    let except_sanitized = workspace::sanitize_id(except);
+    let except_sanitized: Vec<String> =
+        except.iter().filter(|s| !s.is_empty()).map(|s| workspace::sanitize_id(s)).collect();
+
+    // Collect all unkept, non-excepted candidates with their sort key.
+    let mut candidates: Vec<(String, PathBuf, String)> = Vec::new();
     for entry in std::fs::read_dir(&root).map_err(|e| format!("failed to read work root: {e}"))? {
         let entry = entry.map_err(|e| format!("failed to read work root entry: {e}"))?;
         let path = entry.path();
@@ -441,7 +458,7 @@ pub fn prune_unkept(except: &str) -> Result<(), String> {
             continue;
         }
         let id = entry.file_name().to_string_lossy().to_string();
-        if !except_sanitized.is_empty() && id == except_sanitized {
+        if except_sanitized.iter().any(|e| *e == id) {
             continue;
         }
 
@@ -450,12 +467,15 @@ pub fn prune_unkept(except: &str) -> Result<(), String> {
             continue;
         }
 
-        let has_split = has_band_stem_files(&path)
-            || instruments_manifest_at(&path).is_some_and(|m| !m.stems.is_empty());
-        if has_split {
-            continue;
-        }
+        // Sort key: lastOpenedAt, falling back to fetchedAt (RFC3339 strings
+        // sort lexicographically in chronological order).
+        let key = if state.last_opened_at.is_empty() { state.fetched_at.clone() } else { state.last_opened_at.clone() };
+        candidates.push((id, path, key));
+    }
 
+    // Most-recently-opened first; keep the first MAX_SCANS, delete the rest.
+    candidates.sort_by(|a, b| b.2.cmp(&a.2));
+    for (_, path, _) in candidates.into_iter().skip(MAX_SCANS) {
         let _ = std::fs::remove_dir_all(&path);
     }
     Ok(())
@@ -539,9 +559,7 @@ mod tests {
     // `ABSOLUTESAMPLE_HOME` is process-global state; serialize the tests that
     // mutate it so they don't race with each other under the default
     // parallel test runner.
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn temp_dir(name: &str) -> PathBuf {
+        fn temp_dir(name: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
         dir.push(format!("absolutesample_library_test_{name}_{:?}", std::thread::current().id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -617,95 +635,14 @@ mod tests {
         assert_eq!(parsed.loop_info.unwrap().start_sec, 1.0);
     }
 
-    #[test]
-    fn prune_removes_unkept_dirs_without_split_output() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let root = temp_dir("prune");
-        std::env::set_var("ABSOLUTESAMPLE_HOME", &root);
-
-        // kept: survives.
-        let kept_dir = workspace::work_dir("kept_track").unwrap();
+    /// Writes a minimal `track.json` for `id`, creating its work dir.
+    fn make_track(id: &str) -> PathBuf {
+        let dir = workspace::work_dir(id).unwrap();
         write_track(
-            "kept_track",
+            id,
             &TrackManifest {
-                id: "kept_track".to_string(),
-                title: "Kept".to_string(),
-                url: "https://example.com".to_string(),
-                source_path: "".to_string(),
-                wav_path: "".to_string(),
-                duration_sec: 1.0,
-                sample_rate: 44100,
-                channels: 2,
-                codec: "opus".to_string(),
-                work_dir: kept_dir.to_string_lossy().to_string(),
-            },
-        )
-        .unwrap();
-        mark_kept("kept_track").unwrap();
-
-        // unkept, no split output: pruned.
-        let unkept_dir = workspace::work_dir("unkept_track").unwrap();
-        write_track(
-            "unkept_track",
-            &TrackManifest {
-                id: "unkept_track".to_string(),
-                title: "Unkept".to_string(),
-                url: "https://example.com".to_string(),
-                source_path: "".to_string(),
-                wav_path: "".to_string(),
-                duration_sec: 1.0,
-                sample_rate: 44100,
-                channels: 2,
-                codec: "opus".to_string(),
-                work_dir: unkept_dir.to_string_lossy().to_string(),
-            },
-        )
-        .unwrap();
-
-        // unkept, but has split output (band stems present): survives.
-        let split_dir = workspace::work_dir("split_track").unwrap();
-        write_track(
-            "split_track",
-            &TrackManifest {
-                id: "split_track".to_string(),
-                title: "Split".to_string(),
-                url: "https://example.com".to_string(),
-                source_path: "".to_string(),
-                wav_path: "".to_string(),
-                duration_sec: 1.0,
-                sample_rate: 44100,
-                channels: 2,
-                codec: "opus".to_string(),
-                work_dir: split_dir.to_string_lossy().to_string(),
-            },
-        )
-        .unwrap();
-        let stems_dir = split_dir.join("stems");
-        std::fs::create_dir_all(&stems_dir).unwrap();
-        std::fs::write(stems_dir.join("01_drums_sub.wav"), b"fake").unwrap();
-
-        prune_unkept("").unwrap();
-
-        assert!(kept_dir.exists());
-        assert!(!unkept_dir.exists());
-        assert!(split_dir.exists());
-
-        std::env::remove_var("ABSOLUTESAMPLE_HOME");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn prune_never_deletes_the_excepted_id() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let root = temp_dir("prune_except");
-        std::env::set_var("ABSOLUTESAMPLE_HOME", &root);
-
-        let dir = workspace::work_dir("in_progress").unwrap();
-        write_track(
-            "in_progress",
-            &TrackManifest {
-                id: "in_progress".to_string(),
-                title: "In progress".to_string(),
+                id: id.to_string(),
+                title: id.to_string(),
                 url: "https://example.com".to_string(),
                 source_path: "".to_string(),
                 wav_path: "".to_string(),
@@ -717,9 +654,86 @@ mod tests {
             },
         )
         .unwrap();
+        dir
+    }
 
-        prune_unkept("in_progress").unwrap();
+    /// Sets `lastOpenedAt` (and, for realism, `fetchedAt`) on `id`'s
+    /// `state.json` to an explicit RFC3339 timestamp, without touching
+    /// `kept`.
+    fn set_last_opened(id: &str, when: &str) {
+        let mut state = load_state(id);
+        state.last_opened_at = when.to_string();
+        write_state(id, &state).unwrap();
+    }
+
+    #[test]
+    fn prune_keeps_kept_songs_and_max_scans_most_recent_unkept() {
+        let _guard = workspace::ENV_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let root = temp_dir("prune");
+        std::env::set_var("ABSOLUTESAMPLE_HOME", &root);
+
+        // kept: always survives, regardless of recency.
+        let kept_dir = make_track("kept_track");
+        mark_kept("kept_track").unwrap();
+        set_last_opened("kept_track", "2020-01-01T00:00:00Z");
+
+        // 5 unkept songs at different lastOpenedAt times, plus one with split
+        // output (band stems) that is still old enough to be pruned, since
+        // split output no longer protects a scan under the v4 rule.
+        let dirs: Vec<(&str, PathBuf, &str)> = vec![
+            ("scan_1", PathBuf::new(), "2024-01-05T00:00:00Z"), // most recent: kept
+            ("scan_2", PathBuf::new(), "2024-01-04T00:00:00Z"), // 2nd most recent: kept
+            ("scan_3", PathBuf::new(), "2024-01-03T00:00:00Z"), // 3rd most recent: kept
+            ("scan_4_with_split", PathBuf::new(), "2024-01-02T00:00:00Z"), // pruned despite split output
+            ("scan_5_oldest", PathBuf::new(), "2024-01-01T00:00:00Z"), // pruned
+        ];
+        let mut created = Vec::new();
+        for (id, _, when) in &dirs {
+            let dir = make_track(id);
+            set_last_opened(id, when);
+            created.push((*id, dir));
+        }
+        // Give scan_4 band-stem split output; it should be pruned anyway.
+        let split_stems_dir = created[3].1.join("stems");
+        std::fs::create_dir_all(&split_stems_dir).unwrap();
+        std::fs::write(split_stems_dir.join("01_drums_sub.wav"), b"fake").unwrap();
+
+        prune_unkept(&[]).unwrap();
+
+        assert!(kept_dir.exists());
+        assert!(created[0].1.exists(), "scan_1 (most recent) should survive");
+        assert!(created[1].1.exists(), "scan_2 should survive");
+        assert!(created[2].1.exists(), "scan_3 should survive");
+        assert!(!created[3].1.exists(), "scan_4 (has split output but old) should be pruned");
+        assert!(!created[4].1.exists(), "scan_5 (oldest) should be pruned");
+
+        std::env::remove_var("ABSOLUTESAMPLE_HOME");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prune_never_deletes_excepted_ids() {
+        let _guard = workspace::ENV_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let root = temp_dir("prune_except");
+        std::env::set_var("ABSOLUTESAMPLE_HOME", &root);
+
+        let dir = make_track("in_progress");
+        let current_dir = make_track("currently_open");
+        // Make both old enough that, absent the `except` list, they'd be
+        // pruned in favor of nothing (they're the only 2 songs, so recency
+        // alone wouldn't prune them) — instead exercise `except` directly by
+        // adding 4 more unkept songs newer than both.
+        for i in 0..4 {
+            let id = format!("newer_{i}");
+            make_track(&id);
+            set_last_opened(&id, &format!("2030-01-0{}T00:00:00Z", i + 1));
+        }
+        set_last_opened("in_progress", "2020-01-01T00:00:00Z");
+        set_last_opened("currently_open", "2020-01-02T00:00:00Z");
+
+        prune_unkept(&["in_progress", "currently_open"]).unwrap();
         assert!(dir.exists());
+        assert!(current_dir.exists());
 
         std::env::remove_var("ABSOLUTESAMPLE_HOME");
         let _ = std::fs::remove_dir_all(&root);

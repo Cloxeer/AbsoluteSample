@@ -64,6 +64,12 @@ pub fn slices_dir(track_id: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Shared across `library`'s and `samples`' test modules: `ABSOLUTESAMPLE_HOME`
+/// is process-global state, so tests that set it must not run concurrently
+/// with each other, regardless of which module they live in.
+#[cfg(test)]
+pub static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;

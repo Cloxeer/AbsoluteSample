@@ -1,7 +1,7 @@
 //! Linkwitz-Riley 4th-order stem-splitting filter graph + astats loudness.
 
 use super::silent_command;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const STEM_KEYS: [&str; 4] = ["drums_sub", "bass_lowmid", "mid_vocals", "highs_air"];
@@ -42,7 +42,7 @@ pub fn build_filter_graph() -> String {
     )
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StemLoudness {
     pub peak_db: f64,

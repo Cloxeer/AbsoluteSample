@@ -4,7 +4,7 @@
 
 use crate::audio::engine::{self, EngineStatus, InstrumentStem};
 use crate::audio::progress::Progress;
-use crate::audio::{analysis, downloader, slicer, workspace};
+use crate::audio::{analysis, downloader, library, samples, slicer, workspace};
 use crate::pipeline;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -117,10 +117,15 @@ impl From<pipeline::TrackManifest> for TrackInfo {
 }
 
 #[tauri::command]
-pub async fn fetch_audio(app: AppHandle, url: String) -> Result<TrackInfo, String> {
+pub async fn fetch_audio(
+    app: AppHandle,
+    url: String,
+    force: Option<bool>,
+    current_track_id: Option<String>,
+) -> Result<TrackInfo, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let progress = TauriProgress { app };
-        let track = pipeline::run_fetch(&url, &progress)?;
+        let track = pipeline::run_fetch(&url, force.unwrap_or(false), current_track_id.as_deref(), &progress)?;
         Ok(track.into())
     })
     .await
@@ -273,7 +278,7 @@ pub async fn analyze_loop(app: AppHandle, track_id: String) -> Result<LoopAnalys
             return Err("loop.wav not found; call trim_loop first".to_string());
         }
         let probe = downloader::probe(&loop_wav)?;
-        let result = pipeline::run_analyze(&loop_wav, probe.duration_sec, &progress)?;
+        let result = pipeline::run_analyze(&track_id, &loop_wav, probe.duration_sec, &progress)?;
         Ok(result.into())
     })
     .await
@@ -466,6 +471,133 @@ pub async fn separate_instruments(
                 );
             })?;
         Ok(stems)
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+// ---------------------------------------------------------------------
+// v3: Song library
+// ---------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackSessionOut {
+    pub track: TrackInfo,
+    #[serde(rename = "loop")]
+    pub loop_info: Option<LoopInfo>,
+    pub stems: Option<Vec<StemInfo>>,
+    pub instruments: Option<Vec<InstrumentStem>>,
+    pub analysis: Option<LoopAnalysisOut>,
+}
+
+#[tauri::command]
+pub async fn list_library() -> Result<Vec<library::LibraryEntry>, String> {
+    tauri::async_runtime::spawn_blocking(library::list)
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn open_track(track_id: String) -> Result<TrackSessionOut, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = library::open(&track_id)?;
+        Ok(TrackSessionOut {
+            track: session.track.into(),
+            loop_info: session.loop_info.map(LoopInfo::from),
+            stems: session
+                .stems
+                .map(|stems| stems.into_iter().map(StemInfo::from).collect()),
+            instruments: session.instruments,
+            analysis: session.analysis.map(LoopAnalysisOut::from),
+        })
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn set_kept(track_id: String, kept: bool) -> Result<library::LibraryEntry, String> {
+    tauri::async_runtime::spawn_blocking(move || library::set_kept(&track_id, kept))
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn delete_track(track_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || library::delete(&track_id))
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySize {
+    pub bytes: u64,
+    pub tracks: usize,
+    pub scans: usize,
+    pub samples_bytes: u64,
+}
+
+#[tauri::command]
+pub async fn library_size() -> Result<LibrarySize, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let (bytes, tracks, scans) = library::size()?;
+        let samples_bytes = samples::samples_dir_size()?;
+        Ok(LibrarySize { bytes, tracks, scans, samples_bytes })
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+// ---------------------------------------------------------------------
+// v4: Sample library
+// ---------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn save_sample(track_id: String, stem_key: String, name: Option<String>) -> Result<samples::Sample, String> {
+    tauri::async_runtime::spawn_blocking(move || samples::save_sample(&track_id, &stem_key, name.as_deref()))
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn list_samples() -> Result<Vec<samples::Sample>, String> {
+    tauri::async_runtime::spawn_blocking(samples::list)
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn rename_sample(id: String, name: String) -> Result<samples::Sample, String> {
+    tauri::async_runtime::spawn_blocking(move || samples::rename(&id, &name))
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn delete_sample(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || samples::delete(&id))
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn export_samples(ids: Vec<String>, dest_dir: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || samples::export(&ids, std::path::Path::new(&dest_dir)))
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn reveal_sample(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = samples::path_for_reveal(&id)?;
+        crate::audio::silent_command("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+            .map_err(|e| format!("failed to open explorer: {e}"))?;
+        Ok(())
     })
     .await
     .map_err(|e| format!("task join error: {e}"))?

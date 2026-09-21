@@ -23,6 +23,6 @@ impl Progress for Stdout {
             "percent": percent,
             "message": msg,
         });
-        println!("{}", payload);
+        eprintln!("{}", payload);
     }
 }

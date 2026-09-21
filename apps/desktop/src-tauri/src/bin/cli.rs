@@ -1,6 +1,6 @@
 use absolutesample_lib::audio::engine::{self, EngineProgress};
 use absolutesample_lib::audio::progress::Stdout;
-use absolutesample_lib::audio::{downloader, workspace};
+use absolutesample_lib::audio::{downloader, library, samples, workspace};
 use absolutesample_lib::pipeline::{self, Engine};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -28,10 +28,16 @@ struct Cli {
 enum Commands {
     /// Check ffmpeg/ffprobe/yt-dlp availability.
     Deps,
-    /// Download bestaudio for a URL.
+    /// Download bestaudio for a URL (any youtu.be/watch/shorts/embed form).
     Fetch {
         #[arg(long)]
         url: String,
+        /// Re-download even if a cached source.<ext>+source.wav pair exists.
+        #[arg(long)]
+        force: bool,
+        /// The currently open track's id, if any; never pruned by this fetch.
+        #[arg(long)]
+        current: Option<String>,
     },
     /// Trim a previously fetched track.
     Trim {
@@ -79,6 +85,56 @@ enum Commands {
         #[arg(long)]
         passes: Option<String>,
     },
+    /// Song library management.
+    Library {
+        #[command(subcommand)]
+        action: LibraryAction,
+    },
+    /// Sample library management.
+    Samples {
+        #[command(subcommand)]
+        action: SamplesAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SamplesAction {
+    /// List every saved sample.
+    List,
+    /// Save a clip from a track's stem/instrument/loop wav as a named sample.
+    Save {
+        track_id: String,
+        stem_key: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Delete a saved sample.
+    Delete { id: String },
+    /// Export samples to a destination directory.
+    Export { dest_dir: String, ids: Vec<String> },
+}
+
+#[derive(Subcommand)]
+enum LibraryAction {
+    /// List every fetched track.
+    List,
+    /// Open a track (rebuilds stem/instrument info, touches lastOpenedAt).
+    Open {
+        track_id: String,
+    },
+    /// Toggle (or set) a track's `kept` flag.
+    Keep {
+        track_id: String,
+        /// Turn `kept` off instead of on.
+        #[arg(long)]
+        off: bool,
+    },
+    /// Delete a track's entire work dir.
+    Delete {
+        track_id: String,
+    },
+    /// Total library size (bytes + track count).
+    Size,
 }
 
 #[derive(Subcommand)]
@@ -124,7 +180,7 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         }
-        Commands::Fetch { url } => match pipeline::run_fetch(&url, &progress) {
+        Commands::Fetch { url, force, current } => match pipeline::run_fetch(&url, force, current.as_deref(), &progress) {
             Ok(track) => {
                 print_json(&track);
                 ExitCode::SUCCESS
@@ -189,7 +245,7 @@ fn main() -> ExitCode {
                 Ok(p) => p,
                 Err(e) => return print_err("analyze", &e),
             };
-            match pipeline::run_analyze(&loop_wav, probe.duration_sec, &progress) {
+            match pipeline::run_analyze(&track_id, &loop_wav, probe.duration_sec, &progress) {
                 Ok(analysis) => {
                     print_json(&analysis);
                     ExitCode::SUCCESS
@@ -246,5 +302,80 @@ fn main() -> ExitCode {
                 Err(e) => print_err("instruments", &e),
             }
         }
+        Commands::Library { action } => match action {
+            LibraryAction::List => match library::list() {
+                Ok(entries) => {
+                    print_json(&entries);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("library list", &e),
+            },
+            LibraryAction::Open { track_id } => match library::open(&track_id) {
+                Ok(session) => {
+                    print_json(&session);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("library open", &e),
+            },
+            LibraryAction::Keep { track_id, off } => match library::set_kept(&track_id, !off) {
+                Ok(entry) => {
+                    print_json(&entry);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("library keep", &e),
+            },
+            LibraryAction::Delete { track_id } => match library::delete(&track_id) {
+                Ok(()) => {
+                    print_json(&serde_json::json!({ "deleted": track_id }));
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("library delete", &e),
+            },
+            LibraryAction::Size => match library::size() {
+                Ok((bytes, tracks, scans)) => {
+                    let samples_bytes = samples::samples_dir_size().unwrap_or(0);
+                    print_json(&serde_json::json!({
+                        "bytes": bytes,
+                        "tracks": tracks,
+                        "scans": scans,
+                        "samplesBytes": samples_bytes,
+                    }));
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("library size", &e),
+            },
+        },
+        Commands::Samples { action } => match action {
+            SamplesAction::List => match samples::list() {
+                Ok(list) => {
+                    print_json(&list);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("samples list", &e),
+            },
+            SamplesAction::Save { track_id, stem_key, name } => {
+                match samples::save_sample(&track_id, &stem_key, name.as_deref()) {
+                    Ok(sample) => {
+                        print_json(&sample);
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => print_err("samples save", &e),
+                }
+            }
+            SamplesAction::Delete { id } => match samples::delete(&id) {
+                Ok(()) => {
+                    print_json(&serde_json::json!({ "deleted": id }));
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("samples delete", &e),
+            },
+            SamplesAction::Export { dest_dir, ids } => match samples::export(&ids, PathBuf::from(&dest_dir).as_path()) {
+                Ok(paths) => {
+                    print_json(&paths);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("samples export", &e),
+            },
+        },
     }
 }
