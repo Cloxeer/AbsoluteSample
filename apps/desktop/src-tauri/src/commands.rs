@@ -696,6 +696,30 @@ pub async fn cut_region(
 }
 
 #[tauri::command]
+pub async fn cut_sample(
+    sample_id: String,
+    start_sec: f64,
+    end_sec: f64,
+    fade_ms: Option<f64>,
+) -> Result<cuts::CutResult, String> {
+    tauri::async_runtime::spawn_blocking(move || cuts::cut_sample(&sample_id, start_sec, end_sec, fade_ms.unwrap_or(5.0)))
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn save_sample_part(
+    sample_id: String,
+    start_sec: f64,
+    end_sec: f64,
+    name: Option<String>,
+) -> Result<samples::Sample, String> {
+    tauri::async_runtime::spawn_blocking(move || samples::save_sample_part(&sample_id, start_sec, end_sec, name.as_deref()))
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
 pub async fn slice_hits(
     track_id: String,
     stem_key: String,

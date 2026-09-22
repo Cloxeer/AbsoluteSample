@@ -312,6 +312,7 @@ export default function App() {
         onDelete={handleDeleteSample}
         onReveal={handleRevealSample}
         onExport={handleExportSamples}
+        onSaved={refreshSamples}
       />
       <Toast />
       <main className="flex-1 pb-10">

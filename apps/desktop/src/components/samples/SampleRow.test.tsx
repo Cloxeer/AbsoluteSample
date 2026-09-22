@@ -1,13 +1,44 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { SampleRow } from "./SampleRow";
 import type { Sample } from "@/lib/types";
+
+const cutSample = vi.fn().mockResolvedValue({ path: "mock/cut.wav", startSec: 1, endSec: 2, bars: null, peaks: [], durationSec: 1 });
+const saveStem = vi.fn().mockResolvedValue("mock/cut.wav");
 
 vi.mock("@/lib/backend", () => ({
   backend: {
     resolveWavUrl: vi.fn().mockResolvedValue("blob:mock"),
+    cutSample: (...args: unknown[]) => cutSample(...args),
+    saveStem: (...args: unknown[]) => saveStem(...args),
+    saveSamplePart: vi.fn().mockResolvedValue({}),
   },
 }));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  save: vi.fn().mockResolvedValue("dest.wav"),
+}));
+
+vi.mock("wavesurfer.js", () => ({
+  default: {
+    create: vi.fn(() => ({
+      on: vi.fn(),
+      destroy: vi.fn(),
+      seekTo: vi.fn(),
+    })),
+  },
+}));
+
+// SampleRow's regions selection is real drag-to-select and can't be driven from jsdom, so this
+// mocks the hook entirely and lets tests control the reported selection.
+let mockSelection: { start: number; end: number } | null = null;
+vi.mock("@/components/waveform/LaneSelection", async () => {
+  const actual = await vi.importActual<typeof import("@/components/waveform/LaneSelection")>("@/components/waveform/LaneSelection");
+  return {
+    ...actual,
+    useLaneSelection: () => ({ regionsPlugin: {}, selection: mockSelection, clear: vi.fn() }),
+  };
+});
 
 function makeSample(overrides: Partial<Sample> = {}): Sample {
   return {
@@ -93,5 +124,27 @@ describe("SampleRow", () => {
     const setData = vi.fn();
     fireEvent.dragStart(row, { dataTransfer: { setData } });
     expect(setData).toHaveBeenCalledWith("text/plain", "My song - Drums 0:30-0:45");
+  });
+
+  it("shows the selection row only when there is a selection", async () => {
+    mockSelection = null;
+    const { rerender } = render(
+      <SampleRow sample={makeSample()} selected={false} onToggleSelect={vi.fn()} onRename={vi.fn()} onDelete={vi.fn()} onReveal={vi.fn()} />
+    );
+    await waitFor(() => expect(screen.queryByTestId("sample-selection-s1")).not.toBeInTheDocument());
+
+    mockSelection = { start: 1, end: 2 };
+    rerender(<SampleRow sample={makeSample()} selected={false} onToggleSelect={vi.fn()} onRename={vi.fn()} onDelete={vi.fn()} onReveal={vi.fn()} />);
+    expect(screen.getByTestId("sample-selection-s1")).toBeInTheDocument();
+  });
+
+  it("downloading the selection calls backend.cutSample with the selection range", async () => {
+    mockSelection = { start: 1, end: 2 };
+    render(<SampleRow sample={makeSample()} selected={false} onToggleSelect={vi.fn()} onRename={vi.fn()} onDelete={vi.fn()} onReveal={vi.fn()} />);
+
+    fireEvent.click(screen.getByLabelText("Download My song - Drums 0:30-0:45 selection"));
+
+    await waitFor(() => expect(cutSample).toHaveBeenCalledWith({ sampleId: "s1", startSec: 1, endSec: 2 }));
+    await waitFor(() => expect(saveStem).toHaveBeenCalledWith({ srcPath: "mock/cut.wav", destPath: "dest.wav" }));
   });
 });

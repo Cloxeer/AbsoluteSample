@@ -1,7 +1,10 @@
+// Fixture URLs respect Vite's base path so the GitHub Pages demo works under /AbsoluteSample/.
+const FIXTURES_BASE = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/fixtures`;
 import { emitMockEngineProgress, emitMockProgress } from "./events";
 import type {
   ChordEvent,
   CutRegionResult,
+  CutSampleResult,
   DependencyReport,
   EngineStatus,
   InstrumentGroup,
@@ -84,7 +87,7 @@ function synthesizePeaks(key: string, points = 1000): number[] {
 
 async function loadManifest(): Promise<Manifest | null> {
   try {
-    const res = await fetch("/fixtures/manifest.json");
+    const res = await fetch(`${FIXTURES_BASE}/manifest.json`);
     if (!res.ok) return null;
     return (await res.json()) as Manifest;
   } catch {
@@ -551,7 +554,7 @@ async function resolveWavUrl(path: string): Promise<string> {
 
   if (fromFixtures) {
     // Instrument stems live under /fixtures/instruments/<key>.wav, everything else at the top level.
-    const candidates = [`/fixtures/${basename}`, `/fixtures/instruments/${basename}`];
+    const candidates = [`${FIXTURES_BASE}/${basename}`, `${FIXTURES_BASE}/instruments/${basename}`];
     for (const url of candidates) {
       if (await fixtureExists(url)) {
         cachedWavUrls[path] = url;
@@ -1101,6 +1104,52 @@ export async function sliceHits(args: { trackId: string; stemKey: string; minGap
   }
   sampleStore = [...hits, ...sampleStore];
   return hits;
+}
+
+// Highlight-a-saved-sample addendum: cut/save a part of an already-saved sample.
+
+export async function cutSample(args: { sampleId: string; startSec: number; endSec: number; fadeMs?: number }): Promise<CutSampleResult> {
+  const sample = sampleStore.find((s) => s.id === args.sampleId);
+  if (!sample) throw new Error(`Unknown sample: ${args.sampleId}`);
+  if (args.endSec <= args.startSec) throw new Error("cut region end must be after start");
+  await delay(60);
+  return {
+    path: `${sample.path}#cut_${args.startSec}-${args.endSec}`,
+    startSec: args.startSec,
+    endSec: args.endSec,
+    bars: null,
+    peaks: synthesizePeaks(`${sample.path}|cut|${args.startSec}|${args.endSec}`),
+    durationSec: args.endSec - args.startSec,
+  };
+}
+
+export async function saveSamplePart(args: { sampleId: string; startSec: number; endSec: number; name?: string }): Promise<Sample> {
+  const source = sampleStore.find((s) => s.id === args.sampleId);
+  if (!source) throw new Error(`Unknown sample: ${args.sampleId}`);
+  if (args.endSec <= args.startSec) throw new Error("cut region end must be after start");
+  const name = (args.name ?? "").trim() || `${source.name} ${formatMmSs(args.startSec)}-${formatMmSs(args.endSec)}`;
+  const sample: Sample = {
+    id: `sample_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    name,
+    path: `${source.path}#part_${args.startSec}-${args.endSec}`,
+    bytes: Math.max(1, Math.round((source.bytes * (args.endSec - args.startSec)) / Math.max(source.durationSec, 0.001))),
+    songId: source.songId,
+    songTitle: source.songTitle,
+    stemKey: source.stemKey,
+    stemLabel: source.stemLabel,
+    group: source.group,
+    startSec: args.startSec,
+    endSec: args.endSec,
+    durationSec: args.endSec - args.startSec,
+    bpm: source.bpm,
+    createdAt: new Date().toISOString(),
+    peaks: synthesizePeaks(`${source.path}|part|${args.startSec}|${args.endSec}`),
+    kind: "region",
+    keyShort: source.keyShort,
+    bars: null,
+  };
+  sampleStore = [sample, ...sampleStore];
+  return sample;
 }
 
 export async function importLocal(args: { path: string }): Promise<TrackInfo> {

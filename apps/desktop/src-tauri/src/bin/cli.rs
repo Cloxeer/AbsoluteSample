@@ -175,6 +175,16 @@ enum SamplesAction {
     Delete { id: String },
     /// Export samples to a destination directory.
     Export { dest_dir: String, ids: Vec<String> },
+    /// Cut a part out of an already-saved sample's wav.
+    Cut {
+        id: String,
+        #[arg(long)]
+        start: f64,
+        #[arg(long)]
+        end: f64,
+        #[arg(long, default_value_t = 5.0)]
+        fade_ms: f64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -461,6 +471,13 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(e) => print_err("samples export", &e),
+            },
+            SamplesAction::Cut { id, start, end, fade_ms } => match cuts::cut_sample(&id, start, end, fade_ms) {
+                Ok(result) => {
+                    print_json(&result);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("samples cut", &e),
             },
         },
         Commands::Trash { action } => match action {

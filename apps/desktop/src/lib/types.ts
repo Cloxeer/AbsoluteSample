@@ -236,6 +236,10 @@ export interface CutRegionResult {
   durationSec: number;
 }
 
+// Highlight-a-saved-sample addendum: cutting/saving a part of an already-saved sample.
+
+export type CutSampleResult = CutRegionResult;
+
 export interface TrashEntry {
   id: string;
   kind: "track" | "sample";

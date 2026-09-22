@@ -98,7 +98,7 @@ pub fn samples_dir_size() -> Result<u64, String> {
 /// Sanitizes a name/title for use as a path component: keeps alnum, space,
 /// dash, underscore, parens; replaces everything else with `_`; collapses
 /// surrounding whitespace; falls back to `sample`/`song` if empty.
-fn sanitize_component(name: &str, fallback: &str) -> String {
+pub(crate) fn sanitize_component(name: &str, fallback: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for c in name.trim().chars() {
         if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '(' || c == ')' {
@@ -170,7 +170,7 @@ fn generate_id(seed_path: &Path) -> String {
 
 /// Picks a filename (without directory) that doesn't collide with existing
 /// files in `dir`, appending ` (2)`, ` (3)`, ... before the extension.
-fn unique_filename(dir: &Path, base: &str, ext: &str) -> String {
+pub(crate) fn unique_filename(dir: &Path, base: &str, ext: &str) -> String {
     let mut candidate = format!("{base}.{ext}");
     let mut n = 2;
     while dir.join(&candidate).exists() {
@@ -216,7 +216,7 @@ fn build_default_name(song: &str, stem_label: &str, bpm: Option<f64>, key_short:
 
 /// Copies `src` into the song's samples dir as a uniquely-named `sample_name`
 /// wav, returning `(dest_path, bytes, peaks)`.
-fn copy_into_samples_dir(track_title: &str, sample_name: &str, src: &Path) -> Result<(PathBuf, u64, Vec<f32>), String> {
+pub(crate) fn copy_into_samples_dir(track_title: &str, sample_name: &str, src: &Path) -> Result<(PathBuf, u64, Vec<f32>), String> {
     let song_dir_name = sanitize_component(track_title, "song");
     let song_dir = samples_root()?.join(&song_dir_name);
     std::fs::create_dir_all(&song_dir).map_err(|e| format!("failed to create song samples dir: {e}"))?;
@@ -563,6 +563,58 @@ pub fn path_for_reveal(id: &str) -> Result<PathBuf, String> {
     let index = load_index()?;
     let sample = index.iter().find(|s| s.id == id).ok_or_else(|| format!("sample '{id}' not found"))?;
     Ok(PathBuf::from(&sample.path))
+}
+
+/// Looks up a saved sample by id.
+pub fn find(id: &str) -> Result<Sample, String> {
+    let index = load_index()?;
+    index.into_iter().find(|s| s.id == id).ok_or_else(|| format!("sample '{id}' not found"))
+}
+
+/// `save_sample_part` (highlight-a-saved-sample addendum): cuts `[start_sec,
+/// end_sec]` out of an already-saved sample's wav (via `cuts::cut_sample`)
+/// and registers the result as a new `kind: "region"` sample, inheriting the
+/// source sample's song/stem/bpm/key (`bars` is always `None`, since this
+/// isn't grid-snapped).
+pub fn save_sample_part(id: &str, start_sec: f64, end_sec: f64, name: Option<&str>) -> Result<Sample, String> {
+    let source = find(id)?;
+    let cut = cuts::cut_sample(id, start_sec, end_sec, 5.0)?;
+
+    let sample_name = name
+        .filter(|n| !n.trim().is_empty())
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| format!("{} {}-{}", source.name, format_mmss(cut.start_sec), format_mmss(cut.end_sec)));
+
+    let (dest_path, bytes, peaks) = copy_into_samples_dir(&source.song_title, &sample_name, Path::new(&cut.path))?;
+    // Remove the intermediate _cuts/ file now that it's copied into the samples dir.
+    let _ = std::fs::remove_file(&cut.path);
+
+    let duration_sec = (cut.end_sec - cut.start_sec).max(0.0);
+    let sample = Sample {
+        id: generate_id(&dest_path),
+        name: sample_name,
+        path: dest_path.to_string_lossy().to_string(),
+        bytes,
+        song_id: source.song_id,
+        song_title: source.song_title,
+        stem_key: source.stem_key,
+        stem_label: source.stem_label,
+        group: source.group,
+        start_sec: cut.start_sec,
+        end_sec: cut.end_sec,
+        duration_sec,
+        bpm: source.bpm,
+        created_at: library::now_rfc3339(),
+        peaks,
+        kind: "region".to_string(),
+        key_short: source.key_short,
+        bars: None,
+    };
+
+    let mut index = load_index()?;
+    index.push(sample.clone());
+    save_index(&index)?;
+    Ok(sample)
 }
 
 #[cfg(test)]

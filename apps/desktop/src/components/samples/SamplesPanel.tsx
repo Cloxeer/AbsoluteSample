@@ -19,9 +19,11 @@ export interface SamplesPanelProps {
   onDelete: (id: string) => void;
   onReveal: (id: string) => void;
   onExport: (ids: string[]) => void;
+  /** Called after "Save as new sample" (from a row's highlighted selection) registers a new sample. */
+  onSaved?: () => void;
 }
 
-export function SamplesPanel({ open, samples, onClose, onRename, onDelete, onReveal, onExport }: SamplesPanelProps) {
+export function SamplesPanel({ open, samples, onClose, onRename, onDelete, onReveal, onExport, onSaved }: SamplesPanelProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const sorted = useMemo(() => [...samples].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)), [samples]);
@@ -79,6 +81,7 @@ export function SamplesPanel({ open, samples, onClose, onRename, onDelete, onRev
                 onRename={(name) => onRename(sample.id, name)}
                 onDelete={() => onDelete(sample.id)}
                 onReveal={() => onReveal(sample.id)}
+                onSaved={onSaved}
               />
             ))
           )}

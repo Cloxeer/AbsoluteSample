@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderOpen, Pause, Pencil, Play, Trash2 } from "lucide-react";
+import { Bookmark, Download, FolderOpen, Pause, Pencil, Play, Trash2, X } from "lucide-react";
 import WaveSurfer from "wavesurfer.js";
 import { backend } from "@/lib/backend";
 import { samplePlayer } from "@/lib/samplePlayer";
 import { peaksOptions } from "@/lib/wavePeaks";
 import { isTauri } from "@/lib/mediaUrl";
+import { useLaneSelection } from "@/components/waveform/LaneSelection";
+import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
+import { Button } from "@/components/neumorphic/Button";
+import { formatTime } from "@/lib/format";
 import type { Sample, SampleKind } from "@/lib/types";
 
 const GROUP_COLORS: Record<string, string> = {
@@ -49,9 +53,11 @@ export interface SampleRowProps {
   onRename: (name: string) => void;
   onDelete: () => void;
   onReveal: () => void;
+  /** Called after "Save as new sample" registers a new sample, so the caller can refresh its list. */
+  onSaved?: () => void;
 }
 
-export function SampleRow({ sample, selected, onToggleSelect, onRename, onDelete, onReveal }: SampleRowProps) {
+export function SampleRow({ sample, selected, onToggleSelect, onRename, onDelete, onReveal, onSaved }: SampleRowProps) {
   const [url, setUrl] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -59,8 +65,28 @@ export function SampleRow({ sample, selected, onToggleSelect, onRename, onDelete
   const [confirmDelete, setConfirmDelete] = useState(false);
   const waveContainerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
+  const [ws, setWs] = useState<WaveSurfer | null>(null);
   /** Seconds into this sample where the next play() call should start, set by clicking the waveform. */
   const startAtRef = useRef(0);
+
+  const { regionsPlugin, selection, clear: clearSelection } = useLaneSelection(ws);
+  const [selPlaying, setSelPlaying] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [savePartName, setSavePartName] = useState("");
+  const [savingPart, setSavingPart] = useState(false);
+  const selPlayId = `${sample.id}:selection`;
+
+  useEffect(() => {
+    return samplePlayer.subscribe((state) => setSelPlaying(state.id === selPlayId));
+  }, [selPlayId]);
+
+  // Selection clears whenever this row's url changes (new sample/source).
+  useEffect(() => {
+    clearSelection();
+    setSaveOpen(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url]);
 
   useEffect(() => {
     let alive = true;
@@ -79,7 +105,7 @@ export function SampleRow({ sample, selected, onToggleSelect, onRename, onDelete
   // Peaks waveform: never decodes audio, uses the sample's precomputed peaks + duration.
   useEffect(() => {
     if (!waveContainerRef.current || !url) return;
-    const ws = WaveSurfer.create({
+    const instance = WaveSurfer.create({
       container: waveContainerRef.current,
       waveColor: colorForGroup(sample.group),
       progressColor: colorForGroup(sample.group),
@@ -89,15 +115,18 @@ export function SampleRow({ sample, selected, onToggleSelect, onRename, onDelete
       interact: true,
       cursorWidth: 1,
       url,
+      plugins: [regionsPlugin],
       ...peaksOptions(sample.peaks, sample.durationSec),
     });
-    ws.on("interaction", (newTime) => {
+    instance.on("interaction", (newTime) => {
       startAtRef.current = newTime;
     });
-    wsRef.current = ws;
+    wsRef.current = instance;
+    setWs(instance);
     return () => {
-      ws.destroy();
+      instance.destroy();
       wsRef.current = null;
+      setWs(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url]);
@@ -121,6 +150,53 @@ export function SampleRow({ sample, selected, onToggleSelect, onRename, onDelete
       samplePlayer.stop();
     } else {
       samplePlayer.play(sample, url, { start: startAtRef.current });
+    }
+  };
+
+  const handleToggleSelPlay = () => {
+    if (!url || !selection) return;
+    if (samplePlayer.isPlaying(selPlayId)) {
+      samplePlayer.stop();
+    } else {
+      samplePlayer.playPath(selPlayId, url, { start: selection.start, end: selection.end, kind: "pad", label: `${sample.name} selection` });
+    }
+  };
+
+  const handleDownloadSelection = async () => {
+    if (!selection) return;
+    setDownloading(true);
+    try {
+      const cut = await backend.cutSample({ sampleId: sample.id, startSec: selection.start, endSec: selection.end });
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const basename = cut.path.split(/[\\/]/).pop() ?? `${sample.name}-selection.wav`;
+      const destPath = await save({ defaultPath: basename, filters: [{ name: "WAV", extensions: ["wav"] }] });
+      if (!destPath) return;
+      await backend.saveStem({ srcPath: cut.path, destPath });
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const openSavePart = () => {
+    if (!selection) return;
+    setSavePartName(`${sample.name} ${formatMinSec(selection.start)}-${formatMinSec(selection.end)}`);
+    setSaveOpen(true);
+  };
+
+  const handleSavePart = async () => {
+    if (!selection) return;
+    setSavingPart(true);
+    try {
+      await backend.saveSamplePart({
+        sampleId: sample.id,
+        startSec: selection.start,
+        endSec: selection.end,
+        name: savePartName.trim() || undefined,
+      });
+      setSaveOpen(false);
+      onSaved?.();
+    } finally {
+      setSavingPart(false);
     }
   };
 
@@ -199,6 +275,63 @@ export function SampleRow({ sample, selected, onToggleSelect, onRename, onDelete
         )}
         <div className="text-[11px] text-muted truncate">{sample.songTitle}</div>
         <div ref={waveContainerRef} data-testid={`sample-wave-${sample.id}`} className="mt-1" />
+        {selection && (
+          <div className="flex items-center gap-1.5 mt-1" data-testid={`sample-selection-${sample.id}`}>
+            <PlayPauseButton
+              playing={selPlaying}
+              onToggle={handleToggleSelPlay}
+              label={`${sample.name} selection`}
+              size={11}
+              className="!p-1 h-6 w-6 flex items-center justify-center shrink-0"
+            />
+            <span className="text-[10px] text-muted font-mono tabular-nums">
+              {formatTime(selection.start)}–{formatTime(selection.end)}
+            </span>
+            <Button
+              aria-label={`Download ${sample.name} selection`}
+              onClick={handleDownloadSelection}
+              busy={downloading}
+              className="!px-1.5 !py-0.5"
+            >
+              <Download size={12} />
+            </Button>
+            <div className="relative">
+              <Button aria-label={`Save ${sample.name} selection as new sample`} onClick={openSavePart} className="!px-1.5 !py-0.5">
+                <Bookmark size={12} />
+              </Button>
+              {saveOpen && (
+                <div
+                  className="absolute left-0 top-full mt-1 w-56 rounded-xl bg-surface neu-surface-raised p-2 flex flex-col gap-1.5 z-50"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <input
+                    autoFocus
+                    value={savePartName}
+                    onChange={(e) => setSavePartName(e.target.value)}
+                    aria-label="New sample name"
+                    className="bg-surface neu-surface-inset rounded px-1.5 py-0.5 text-xs outline-none"
+                  />
+                  <div className="flex justify-end gap-1.5">
+                    <Button className="!px-1.5 !py-0.5 text-[11px]" onClick={() => setSaveOpen(false)}>
+                      Cancel
+                    </Button>
+                    <Button variant="primary" className="!px-1.5 !py-0.5 text-[11px]" busy={savingPart} onClick={handleSavePart}>
+                      Save
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              aria-label={`Clear ${sample.name} selection`}
+              onClick={clearSelection}
+              className="text-muted hover:text-text p-0.5"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        )}
       </div>
       <span
         className="text-[10px] px-2 py-0.5 rounded-full border shrink-0"

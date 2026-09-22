@@ -2,6 +2,7 @@ import { isTauri, mediaUrl } from "./mediaUrl";
 import * as mock from "./backend.mock";
 import type {
   CutRegionResult,
+  CutSampleResult,
   DependencyReport,
   EngineStatus,
   InstrumentsResult,
@@ -134,6 +135,16 @@ export const backend = {
   async sliceHits(args: { trackId: string; stemKey: string; minGapMs?: number; maxHits?: number }): Promise<Sample[]> {
     if (isTauri()) return invokeTauri<Sample[]>("slice_hits", args);
     return mock.sliceHits(args);
+  },
+
+  async cutSample(args: { sampleId: string; startSec: number; endSec: number; fadeMs?: number }): Promise<CutSampleResult> {
+    if (isTauri()) return invokeTauri<CutSampleResult>("cut_sample", args);
+    return mock.cutSample(args);
+  },
+
+  async saveSamplePart(args: { sampleId: string; startSec: number; endSec: number; name?: string }): Promise<Sample> {
+    if (isTauri()) return invokeTauri<Sample>("save_sample_part", args);
+    return mock.saveSamplePart(args);
   },
 
   async importLocal(args: { path: string }): Promise<TrackInfo> {

@@ -41,6 +41,8 @@ pub fn run() {
             commands::reveal_sample,
             commands::analyze_file,
             commands::cut_region,
+            commands::cut_sample,
+            commands::save_sample_part,
             commands::slice_hits,
             commands::clear_scans,
             commands::list_trash,

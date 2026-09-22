@@ -175,6 +175,55 @@ pub fn cut_region(
     })
 }
 
+/// `m-ss` time label for filenames (colon isn't filename-safe), e.g.
+/// `125.4` -> `"2-05"`.
+fn mm_ss_dash(sec: f64) -> String {
+    let sec = sec.max(0.0);
+    let total = sec.round() as u64;
+    format!("{}-{:02}", total / 60, total % 60)
+}
+
+/// The `<samples root>/_cuts/` directory, created if missing.
+fn sample_cuts_dir() -> Result<PathBuf, String> {
+    let dir = samples::samples_root()?.join("_cuts");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create cuts dir: {e}"))?;
+    Ok(dir)
+}
+
+/// `cut_sample` (highlight-a-saved-sample addendum): cuts `[start, end]` out
+/// of an already-saved sample's wav, with `fade_ms` in/out fades (no
+/// snapping, no leading-silence trim — the source is already a finished
+/// sample), into `<samples root>/_cuts/<sample name> <m-ss>-<m-ss>.wav`.
+pub fn cut_sample(sample_id: &str, start: f64, end: f64, fade_ms: f64) -> Result<CutResult, String> {
+    let sample = samples::find(sample_id)?;
+    let src_path = Path::new(&sample.path);
+    if !src_path.exists() {
+        return Err(format!("sample source not found: {}", src_path.display()));
+    }
+    if end <= start {
+        return Err("cut region end must be after start".to_string());
+    }
+
+    let out_dir = sample_cuts_dir()?;
+    let base = format!("{} {}-{}", samples::sanitize_component(&sample.name, "sample"), mm_ss_dash(start), mm_ss_dash(end));
+    let filename = samples::unique_filename(&out_dir, &base, "wav");
+    let out_path = out_dir.join(filename);
+
+    ffmpeg_cut(src_path, &out_path, start, end, fade_ms, false)?;
+
+    let cut_peaks = peaks::compute_peaks_for_path(&out_path).unwrap_or_default();
+    let duration_sec = super::downloader::probe(&out_path).map(|p| p.duration_sec).unwrap_or(end - start);
+
+    Ok(CutResult {
+        path: out_path.to_string_lossy().to_string(),
+        start_sec: start,
+        end_sec: end,
+        bars: None,
+        peaks: cut_peaks,
+        duration_sec,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +282,13 @@ mod tests {
         assert_eq!(s, 0.37);
         assert_eq!(e, 1.91);
         assert_eq!(bars, None);
+    }
+
+    #[test]
+    fn sample_cut_filename_uses_name_and_mm_ss_dash() {
+        let name = samples::sanitize_component("Kick Loop", "sample");
+        let base = format!("{} {}-{}", name, mm_ss_dash(65.0), mm_ss_dash(90.4));
+        assert_eq!(base, "Kick Loop 1-05-1-30");
     }
 
     #[test]
