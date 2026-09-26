@@ -1,0 +1,1 @@
+import{C as t,i}from"./index-BLKLwXv_.js";async function m(a,n){const e=new t;n&&(e.onmessage=n),await i("plugin:drag|start_drag",{item:a.item,image:a.icon,options:{mode:a.mode},onEvent:e})}export{m as startDrag};
