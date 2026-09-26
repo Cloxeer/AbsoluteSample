@@ -6,3 +6,5 @@ apps/desktop/public/fixtures/*.wav
 *.log
 .DS_Store
 .claude/
+__pycache__/
+*.pyc
