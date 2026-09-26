@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build --base=/",
     "preview": "vite preview",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:web": "tsc --noEmit && vite build --base=/AbsoluteSample/"
   },
   "dependencies": {
     "@crabnebula/tauri-plugin-drag": "^2.1.0",
