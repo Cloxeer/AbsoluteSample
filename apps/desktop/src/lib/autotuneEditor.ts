@@ -1,5 +1,11 @@
 import type { AutotuneNoteEdit, PitchNote, PitchPoint } from "./types";
 
+/** A single (x, y) pixel coordinate on the pitch editor's SVG canvas. */
+export interface Vec2 {
+  x: number;
+  y: number;
+}
+
 export interface AutotuneLayout {
   minMidi: number;
   maxMidi: number;
@@ -221,6 +227,52 @@ export function setNoteTarget(notes: EditableNote[], index: number, targetMidi: 
 /** Converts the edit-model notes into the AutotuneEdits.notes payload sent to the backend. */
 export function toAutotuneNoteEdits(notes: EditableNote[]): AutotuneNoteEdit[] {
   return notes.map((n) => ({ startSec: n.startSec, endSec: n.endSec, targetMidi: n.targetMidi }));
+}
+
+/** Median gap (seconds) between consecutive f0 points, used as the "one hop" unit when a hop isn't given explicitly. */
+function inferHopSec(points: PitchPoint[]): number {
+  const gaps: number[] = [];
+  for (let i = 1; i < points.length; i++) gaps.push(points[i].t - points[i - 1].t);
+  if (gaps.length === 0) return 0;
+  gaps.sort((a, b) => a - b);
+  return gaps[Math.floor(gaps.length / 2)];
+}
+
+/**
+ * Splits a PitchResult's f0 contour into drawable polyline segments (as pixel coordinates via the
+ * given layout), breaking the line wherever a point is unvoiced or wherever consecutive voiced
+ * points are separated by more than ~2 analysis hops (a gap in the contour, not continuous pitch).
+ * Unvoiced points are excluded entirely so the rendered line never bridges a silent/unpitched gap.
+ */
+export function buildF0Segments(
+  points: PitchPoint[],
+  layout: AutotuneLayout,
+  opts?: { xOffset?: number; hopSec?: number }
+): Vec2[][] {
+  const xOffset = opts?.xOffset ?? 0;
+  const hopSec = opts?.hopSec ?? inferHopSec(points);
+  const maxGapSec = hopSec > 0 ? hopSec * 2 : Infinity;
+
+  const segments: Vec2[][] = [];
+  let current: Vec2[] = [];
+  let lastT: number | null = null;
+
+  for (const p of points) {
+    if (!p.voiced || p.midi === null || p.midi === undefined) {
+      if (current.length > 1) segments.push(current);
+      current = [];
+      lastT = null;
+      continue;
+    }
+    if (lastT !== null && p.t - lastT > maxGapSec) {
+      if (current.length > 1) segments.push(current);
+      current = [];
+    }
+    current.push({ x: xOffset + layout.xForSec(p.t), y: layout.yForMidi(p.midi) });
+    lastT = p.t;
+  }
+  if (current.length > 1) segments.push(current);
+  return segments;
 }
 
 /** Maps a y-coordinate (px) from a pointer drag to the nearest whole-semitone MIDI pitch, clamped to [minMidi, maxMidi]. */

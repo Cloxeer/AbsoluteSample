@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { AutotuneTab } from "./AutotuneTab";
 import { backend } from "@/lib/backend";
+import { samplePlayer } from "@/lib/samplePlayer";
 import type { InstrumentStem, Sample, TrackInfo } from "@/lib/types";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -175,6 +176,25 @@ describe("AutotuneTab", () => {
 
     fireEvent.change(screen.getByRole("combobox", { name: /^scale$/i }), { target: { value: "chromatic" } });
     expect(screen.getByRole("button", { name: /tune to scale/i })).toBeDisabled();
+  });
+
+  it("renders a Play button for the loaded source and plays it via samplePlayer", async () => {
+    const playSpy = vi.spyOn(samplePlayer, "playPath");
+    render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
+    pickSongSource("Vocals");
+    fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+    await waitFor(() => expect(screen.getByTestId("autotune-editor")).toBeInTheDocument());
+
+    const playButton = screen.getByRole("button", { name: /play source/i });
+    expect(playButton).not.toBeDisabled();
+
+    fireEvent.click(playButton);
+
+    expect(playSpy).toHaveBeenCalledWith(
+      "autotune-source",
+      expect.any(String),
+      expect.objectContaining({ kind: "sample", label: "Autotune source" })
+    );
   });
 
   it("changing Retune Speed updates the edits sent to backend.applyAutotune", async () => {

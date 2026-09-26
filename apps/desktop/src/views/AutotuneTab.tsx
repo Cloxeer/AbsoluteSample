@@ -13,6 +13,7 @@ import { samplePlayer, type SamplePlayerState } from "@/lib/samplePlayer";
 import {
   applyHumanize,
   buildEditableNotes,
+  buildF0Segments,
   buildScalePitchClasses,
   computeAutotuneLayout,
   isBlackKey,
@@ -50,26 +51,12 @@ function tuningColor(cents: number): string {
   }
 }
 
-/** Builds an SVG path for a polyline through voiced f0 points, breaking the line across unvoiced gaps. */
-function f0PolylinePaths(
-  f0: PitchResult["f0"],
-  xForSec: (sec: number) => number,
-  yForMidi: (midi: number) => number,
-  xOffset: number
-): string[] {
-  const paths: string[] = [];
-  let current: string[] = [];
-  for (const p of f0) {
-    if (!p.voiced) {
-      if (current.length > 1) paths.push(current.join(" "));
-      current = [];
-      continue;
-    }
-    current.push(`${current.length === 0 ? "M" : "L"}${xOffset + xForSec(p.t)},${yForMidi(p.midi)}`);
-  }
-  if (current.length > 1) paths.push(current.join(" "));
-  return paths;
+/** Turns a buildF0Segments() point-array into an SVG path "d" string. */
+function segmentToPath(points: { x: number; y: number }[]): string {
+  return points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
 }
+
+const SOURCE_PLAYER_ID = "autotune-source";
 
 /** Antares Auto-Tune Pro Graph Mode-style pitch editor: analyze a vocal (the user's own file, or one from the song), drag notes onto pitch, apply. */
 export function AutotuneTab({ track: _track, instruments, samples = [] }: AutotuneTabProps) {
@@ -94,6 +81,8 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
   const [comparing, setComparing] = useState<"original" | "tuned">("original");
 
   const [playerState, setPlayerState] = useState<SamplePlayerState>(() => samplePlayer.getState());
+  /** Where the next Play (or resumed drag-seek) should start from, in seconds; set by clicking the waveform/grid. */
+  const [seekSec, setSeekSec] = useState(0);
 
   const waveContainerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
@@ -102,7 +91,12 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
 
   useEffect(() => {
     return () => {
-      if (samplePlayer.isPlaying("autotune-original") || samplePlayer.isPlaying("autotune-tuned")) samplePlayer.stop();
+      if (
+        samplePlayer.isPlaying(SOURCE_PLAYER_ID) ||
+        samplePlayer.isPlaying("autotune-original") ||
+        samplePlayer.isPlaying("autotune-tuned")
+      )
+        samplePlayer.stop();
     };
   }, []);
 
@@ -145,7 +139,10 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
   for (let m = layout.maxMidi; m >= layout.minMidi; m--) rows.push(m);
 
   const f0Paths = useMemo(
-    () => (pitch ? f0PolylinePaths(pitch.f0, layout.xForSec, layout.yForMidi, KEYBOARD_WIDTH) : []),
+    () =>
+      pitch
+        ? buildF0Segments(pitch.f0, layout, { xOffset: KEYBOARD_WIDTH, hopSec: pitch.hopSec }).map(segmentToPath)
+        : [],
     [pitch, layout]
   );
 
@@ -222,6 +219,48 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
     }
   };
 
+  /** URL for the currently loaded source (before or after Apply); same resolution used by the waveform and Compare's Original. */
+  const sourceUrl = analyzedPath
+    ? source?.kind === "own" && source.fileUrl
+      ? source.fileUrl
+      : mediaUrl(analyzedPath)
+    : null;
+
+  const isPlayingSource = playerState.id === SOURCE_PLAYER_ID;
+
+  /** Plays the currently loaded source from the start, or from `fromSec` when given (e.g. a grid/waveform click). */
+  const handlePlaySource = (fromSec?: number) => {
+    if (!sourceUrl) return;
+    if (fromSec === undefined && samplePlayer.isPlaying(SOURCE_PLAYER_ID)) {
+      samplePlayer.stop();
+      return;
+    }
+    samplePlayer.playPath(SOURCE_PLAYER_ID, sourceUrl, {
+      start: fromSec ?? seekSec,
+      kind: "sample",
+      label: "Autotune source",
+    });
+  };
+
+  /** Converts a click's x-coordinate (relative to the grid, i.e. past the piano keyboard column) into a time and
+   * stores it as the next play position, restarting playback there if the source is already playing. */
+  const handleSeekAtX = (xInGrid: number) => {
+    const sec = Math.max(0, Math.min(layout.durationSec, layout.secForX(xInGrid)));
+    setSeekSec(sec);
+    if (samplePlayer.isPlaying(SOURCE_PLAYER_ID)) handlePlaySource(sec);
+  };
+
+  const handleGridClick = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (dragIndex !== null) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    handleSeekAtX(e.clientX - rect.left - KEYBOARD_WIDTH);
+  };
+
+  const handleWaveformClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    handleSeekAtX(e.clientX - rect.left);
+  };
+
   const handlePlayOriginal = () => {
     if (!analyzedPath) return;
     setComparing("original");
@@ -271,9 +310,12 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
 
   const isPlayingOriginal = playerState.id === "autotune-original";
   const isPlayingTuned = playerState.id === "autotune-tuned";
-  const playheadTime = isPlayingOriginal || isPlayingTuned ? playerState.currentTime : 0;
+  // One playhead sweeps the waveform and the pitch grid together, driven by whichever of the three
+  // players (source / original / tuned) is currently active; otherwise it sits at the seek position.
+  const isAnyAutotunePlaying = isPlayingSource || isPlayingOriginal || isPlayingTuned;
+  const playheadTime = isAnyAutotunePlaying ? playerState.currentTime : seekSec;
   const playheadX = KEYBOARD_WIDTH + layout.xForSec(playheadTime);
-  const showPlayhead = (isPlayingOriginal || isPlayingTuned) && pitch !== null;
+  const showPlayhead = pitch !== null;
 
   return (
     <div className="flex flex-col gap-6 px-6 py-4 max-w-5xl mx-auto w-full">
@@ -385,12 +427,26 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
           </Surface>
 
           <Surface variant="raised" className="p-4 flex flex-col gap-2 bg-[#1b2230] neu-surface-raised">
-            <div className="text-xs text-muted uppercase tracking-wide">Vocal waveform</div>
+            <div className="flex items-center gap-3">
+              <PlayPauseButton
+                playing={isPlayingSource}
+                onToggle={() => handlePlaySource()}
+                label="source"
+                tone="accent"
+                disabled={!sourceUrl}
+              />
+              <span className="text-xs text-muted uppercase tracking-wide">Vocal waveform</span>
+            </div>
             <div className="overflow-x-auto">
               <div className="flex" style={{ width: layout.width + KEYBOARD_WIDTH }}>
                 <div style={{ width: KEYBOARD_WIDTH }} className="shrink-0" />
                 <div className="relative flex-1 min-w-0">
-                  <div ref={waveContainerRef} data-testid="autotune-waveform" style={{ width: layout.width }} />
+                  <div
+                    ref={waveContainerRef}
+                    data-testid="autotune-waveform"
+                    style={{ width: layout.width, cursor: "pointer" }}
+                    onClick={handleWaveformClick}
+                  />
                   {showPlayhead && (
                     <div
                       className="pointer-events-none absolute top-0 bottom-0 w-px bg-white/70"
@@ -410,8 +466,9 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
                 viewBox={`0 0 ${layout.width + KEYBOARD_WIDTH} ${layout.height}`}
                 onPointerMove={handleNotePointerMove}
                 onPointerUp={handleNotePointerUp}
+                onClick={handleGridClick}
                 className="rounded-lg"
-                style={{ background: "#161b26" }}
+                style={{ background: "#161b26", cursor: "pointer" }}
               >
                 {rows.map((midi) => {
                   const inScale = scalePcs ? scalePcs.includes(((midi % 12) + 12) % 12) : false;

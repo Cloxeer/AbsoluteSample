@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyHumanize,
   buildEditableNotes,
+  buildF0Segments,
   buildScalePitchClasses,
   computeAutotuneLayout,
   isBlackKey,
@@ -23,6 +24,11 @@ function note(startSec: number, endSec: number, midi: number, cents = 0): PitchN
 
 function point(t: number, midi: number, voiced = true): PitchPoint {
   return { t, hz: 440 * Math.pow(2, (midi - 69) / 12), midi, cents: 0, voiced };
+}
+
+/** An unvoiced f0 sample, as the analyzer emits them: hz 0, voiced false, midi null. */
+function unvoicedPoint(t: number): PitchPoint {
+  return { t, hz: 0, midi: null as unknown as number, cents: 0, voiced: false };
 }
 
 describe("isBlackKey", () => {
@@ -197,6 +203,52 @@ describe("editable note helpers", () => {
       { startSec: 0, endSec: 1, targetMidi: 60 },
       { startSec: 1, endSec: 2, targetMidi: 65 },
     ]);
+  });
+});
+
+describe("buildF0Segments", () => {
+  it("draws one segment through a single unbroken voiced run", () => {
+    const layout = computeAutotuneLayout([note(0, 1, 60)], [], { pxPerSec: 100, rowHeight: 10 });
+    const points = [point(0, 60), point(0.02, 60), point(0.04, 61)];
+    const segments = buildF0Segments(points, layout, { hopSec: 0.02 });
+    expect(segments).toHaveLength(1);
+    expect(segments[0]).toHaveLength(3);
+  });
+
+  it("breaks the line at an unvoiced point and excludes it from any segment", () => {
+    const layout = computeAutotuneLayout([note(0, 1, 60)], [], { pxPerSec: 100, rowHeight: 10 });
+    const points = [point(0, 60), point(0.02, 60), unvoicedPoint(0.04), point(0.06, 62), point(0.08, 62)];
+    const segments = buildF0Segments(points, layout, { hopSec: 0.02 });
+    expect(segments).toHaveLength(2);
+    expect(segments[0]).toHaveLength(2);
+    expect(segments[1]).toHaveLength(2);
+  });
+
+  it("drops a lone voiced point that isn't part of a run (no line to draw)", () => {
+    const layout = computeAutotuneLayout([note(0, 1, 60)], [], { pxPerSec: 100, rowHeight: 10 });
+    const points = [unvoicedPoint(0), point(0.02, 60), unvoicedPoint(0.04)];
+    const segments = buildF0Segments(points, layout, { hopSec: 0.02 });
+    expect(segments).toHaveLength(0);
+  });
+
+  it("splits a voiced run when consecutive points are separated by more than ~2 hops, even without an explicit unvoiced point", () => {
+    const layout = computeAutotuneLayout([note(0, 1, 60)], [], { pxPerSec: 100, rowHeight: 10 });
+    const points = [point(0, 60), point(0.02, 60), point(0.5, 64), point(0.52, 64)];
+    const segments = buildF0Segments(points, layout, { hopSec: 0.02 });
+    expect(segments).toHaveLength(2);
+  });
+
+  it("maps points through the layout's time/pitch scales, offset by xOffset", () => {
+    const layout = computeAutotuneLayout([note(0, 1, 60)], [], { pxPerSec: 100, rowHeight: 10 });
+    const points = [point(0, 60), point(0.02, 60)];
+    const segments = buildF0Segments(points, layout, { hopSec: 0.02, xOffset: 44 });
+    expect(segments[0][0]).toEqual({ x: 44 + layout.xForSec(0), y: layout.yForMidi(60) });
+    expect(segments[0][1].x).toBeGreaterThan(segments[0][0].x);
+  });
+
+  it("returns no segments for an empty contour", () => {
+    const layout = computeAutotuneLayout([], []);
+    expect(buildF0Segments([], layout)).toEqual([]);
   });
 });
 
