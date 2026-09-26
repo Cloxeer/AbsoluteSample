@@ -292,3 +292,40 @@ export function snapYToMidi(y: number, layout: AutotuneLayout): number {
   const raw = Math.round(layout.midiForY(y));
   return Math.max(layout.minMidi, Math.min(layout.maxMidi, raw));
 }
+
+// v8 addendum: fast region preview
+
+/** A time range (seconds) to render for a live preview. */
+export interface PreviewRegion {
+  startSec: number;
+  endSec: number;
+}
+
+/** Padding (seconds) added around the changed note(s) so the render includes a little context on each side. */
+const REGION_PAD_SEC = 0.3;
+
+/**
+ * Above this span, rendering just the region no longer buys much (and it usually means many notes
+ * changed at once, e.g. "Tune to scale" over the whole song), so the caller should fall back to a
+ * full-file render instead.
+ */
+export const REGION_FALLBACK_SPAN_SEC = 20;
+
+/**
+ * Computes the [start, end] region to render for a live preview, from the note(s) that changed
+ * since the last render. Pads each side by REGION_PAD_SEC and clamps to [0, durationSec]. Returns
+ * null (meaning: render the whole file instead) when no specific note(s) are tracked, or when the
+ * resulting span is too large to be worth region-limiting.
+ */
+export function computePreviewRegion(
+  changedNotes: { startSec: number; endSec: number }[] | null,
+  durationSec: number
+): PreviewRegion | null {
+  if (!changedNotes || changedNotes.length === 0) return null;
+  const rawStart = Math.min(...changedNotes.map((n) => n.startSec)) - REGION_PAD_SEC;
+  const rawEnd = Math.max(...changedNotes.map((n) => n.endSec)) + REGION_PAD_SEC;
+  const startSec = Math.max(0, rawStart);
+  const endSec = Math.max(startSec, Math.min(Math.max(durationSec, 0), rawEnd));
+  if (endSec - startSec > REGION_FALLBACK_SPAN_SEC) return null;
+  return { startSec: Number(startSec.toFixed(3)), endSec: Number(endSec.toFixed(3)) };
+}

@@ -2,6 +2,7 @@
 const FIXTURES_BASE = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/fixtures`;
 import { emitMockEngineProgress, emitMockProgress } from "./events";
 import type {
+  ApplyAutotuneArgs,
   AutotuneEdits,
   AutotuneResult,
   ChordEvent,
@@ -1536,12 +1537,25 @@ export async function analyzePitch(args: { path: string }): Promise<PitchResult>
     f0,
     notes,
     key: { tonic: "A", mode: "minor", confidence: 0.8 },
+    cachePath: args.path.replace(/\.[^./\\]+$/, "") + ".pitch.json",
+    // Fake metrics matching the real engine's ballpark (see docs/CONTRACT.md v8 addendum) so the
+    // Performance readout has something plausible to show in the mock/demo build.
+    seconds: 12.4,
+    peakRssMb: 1070,
   };
 }
 
-export async function applyAutotune(args: { path: string; edits: AutotuneEdits }): Promise<AutotuneResult> {
-  await delay(200);
+export async function applyAutotune(args: ApplyAutotuneArgs): Promise<AutotuneResult> {
+  const isRegion = args.regionStartSec !== undefined && args.regionEndSec !== undefined;
+  await delay(isRegion ? 60 : 200);
   const path = args.path.replace(/\.[^./\\]+$/, "") + "_tuned.wav";
-  const peaks = synthesizePeaks(`${args.path}|autotune|${JSON.stringify(args.edits)}`);
-  return { path, peaks, durationSec: 4.2 };
+  const peaks = synthesizePeaks(`${args.path}|autotune|${JSON.stringify(args.edits)}|${args.regionStartSec ?? ""}|${args.regionEndSec ?? ""}`);
+  const durationSec = isRegion ? Math.max(0.1, args.regionEndSec! - args.regionStartSec!) : 4.2;
+  return {
+    path,
+    peaks,
+    durationSec,
+    seconds: isRegion ? 2.1 : 40.3,
+    peakRssMb: isRegion ? 60 : 1000,
+  };
 }

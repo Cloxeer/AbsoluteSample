@@ -279,6 +279,43 @@ describe("AutotuneTab", () => {
     }
   });
 
+  it("shows a Performance readout from the analyze/apply results' seconds and peakRssMb", async () => {
+    render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
+    pickSongSource("Vocals");
+    fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+    await waitFor(() => expect(screen.getByTestId("autotune-editor")).toBeInTheDocument());
+
+    await waitFor(() => expect(screen.getByText(/^Performance:/i)).toBeInTheDocument());
+    expect(screen.getByText(/analyzed in 12\.4 s/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() => expect(screen.getByText(/apply 40\.3 s, 1000 mb/i)).toBeInTheDocument());
+  });
+
+  it("drags a single note and renders only the region around it, using the cached pitch", async () => {
+    const applySpy = vi.spyOn(backend, "applyAutotune");
+    const { container } = render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
+    pickSongSource("Vocals");
+    fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+    await waitFor(() => expect(screen.getByTestId("autotune-editor")).toBeInTheDocument());
+
+    applySpy.mockClear();
+    const editor = screen.getByTestId("autotune-editor");
+    const noteRect = container.querySelector('rect.cursor-grab') as SVGRectElement;
+    expect(noteRect).toBeTruthy();
+
+    fireEvent.pointerDown(noteRect, { pointerId: 1 });
+    fireEvent.pointerMove(editor, { clientY: 10 });
+    fireEvent.pointerUp(editor);
+
+    await waitFor(() => expect(applySpy).toHaveBeenCalled(), { timeout: 2000 });
+    const call = applySpy.mock.calls[applySpy.mock.calls.length - 1][0];
+    expect(call.regionStartSec).toBeDefined();
+    expect(call.regionEndSec).toBeDefined();
+    expect(call.regionEndSec! - call.regionStartSec!).toBeLessThan(2);
+    expect(call.pitchCachePath).toMatch(/\.pitch\.json$/);
+  });
+
   it("cancels a stale in-flight preview render when a newer edit supersedes it", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

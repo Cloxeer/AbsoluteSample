@@ -361,6 +361,11 @@ export interface PitchResult {
   f0: PitchPoint[];
   notes: PitchNote[];
   key: NotesKey | null;
+  /** Path to the cached pitch analysis (<stem>.pitch.json); pass to applyAutotune to skip CREPE on preview renders. */
+  cachePath: string;
+  /** Perf metrics from the engine's final "metrics" line, when available. */
+  seconds?: number;
+  peakRssMb?: number;
 }
 
 export interface AutotuneNoteEdit {
@@ -380,4 +385,20 @@ export interface AutotuneResult {
   path: string;
   peaks: number[];
   durationSec: number;
+  /** Perf metrics from the engine's final "metrics" line, when available. */
+  seconds?: number;
+  peakRssMb?: number;
+}
+
+// v8 addendum: fast region preview + perf metrics
+
+/** Args accepted by applyAutotune; the region/cache fields enable a fast, cached-pitch, region-only render. */
+export interface ApplyAutotuneArgs {
+  path: string;
+  edits: AutotuneEdits;
+  /** Render only this slice of the source (seconds); omit for a full-file render. */
+  regionStartSec?: number;
+  regionEndSec?: number;
+  /** Cached pitch analysis path (PitchResult.cachePath) to skip CREPE on preview renders. */
+  pitchCachePath?: string;
 }

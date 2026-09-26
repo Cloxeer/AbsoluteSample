@@ -5,11 +5,13 @@ import {
   buildF0Segments,
   buildScalePitchClasses,
   computeAutotuneLayout,
+  computePreviewRegion,
   isBlackKey,
   KEYBOARD_WIDTH,
   midiToNoteName,
   nearestScaleMidi,
   playheadX,
+  REGION_FALLBACK_SPAN_SEC,
   resetEditableNotes,
   retuneSpeedToParams,
   setNoteTarget,
@@ -275,5 +277,44 @@ describe("snapYToMidi", () => {
     expect(snapYToMidi(layout.yForMidi(60), layout)).toBe(60);
     expect(snapYToMidi(-1000, layout)).toBe(layout.maxMidi);
     expect(snapYToMidi(1000000, layout)).toBe(layout.minMidi);
+  });
+});
+
+describe("computePreviewRegion", () => {
+  it("returns null (full-file) when nothing specific changed", () => {
+    expect(computePreviewRegion(null, 180)).toBeNull();
+    expect(computePreviewRegion([], 180)).toBeNull();
+  });
+
+  it("pads a single changed note by 0.3s on each side", () => {
+    const region = computePreviewRegion([{ startSec: 10, endSec: 10.7 }], 180);
+    expect(region).toEqual({ startSec: 9.7, endSec: 11 });
+  });
+
+  it("clamps the padded region to [0, durationSec]", () => {
+    expect(computePreviewRegion([{ startSec: 0.1, endSec: 0.4 }], 180)).toEqual({ startSec: 0, endSec: 0.7 });
+    expect(computePreviewRegion([{ startSec: 179.6, endSec: 179.9 }], 180)).toEqual({ startSec: 179.3, endSec: 180 });
+  });
+
+  it("spans the min start to max end across several changed notes", () => {
+    const region = computePreviewRegion(
+      [
+        { startSec: 5, endSec: 5.5 },
+        { startSec: 6, endSec: 6.5 },
+      ],
+      180
+    );
+    expect(region).toEqual({ startSec: 4.7, endSec: 6.8 });
+  });
+
+  it("falls back to full-file (null) when the span exceeds the threshold, e.g. Tune to scale over the whole song", () => {
+    const manyNotes = Array.from({ length: 40 }, (_, i) => ({ startSec: i, endSec: i + 0.5 }));
+    expect(computePreviewRegion(manyNotes, 180)).toBeNull();
+
+    // A padded span right at the threshold still gets a region; just past it falls back.
+    const atEdge = computePreviewRegion([{ startSec: 0, endSec: REGION_FALLBACK_SPAN_SEC - 0.3 }], 180);
+    expect(atEdge).not.toBeNull();
+    const overEdge = computePreviewRegion([{ startSec: 0, endSec: REGION_FALLBACK_SPAN_SEC - 0.2 }], 180);
+    expect(overEdge).toBeNull();
   });
 });

@@ -1,7 +1,7 @@
 import { isTauri, mediaUrl } from "./mediaUrl";
 import * as mock from "./backend.mock";
 import type {
-  AutotuneEdits,
+  ApplyAutotuneArgs,
   AutotuneResult,
   CutRegionResult,
   CutSampleResult,
@@ -231,8 +231,8 @@ export const backend = {
     return mock.analyzePitch(args);
   },
 
-  async applyAutotune(args: { path: string; edits: AutotuneEdits }): Promise<AutotuneResult> {
-    if (isTauri()) return invokeTauri<AutotuneResult>("apply_autotune", args);
+  async applyAutotune(args: ApplyAutotuneArgs): Promise<AutotuneResult> {
+    if (isTauri()) return invokeTauri<AutotuneResult>("apply_autotune", { ...args });
     return mock.applyAutotune(args);
   },
 

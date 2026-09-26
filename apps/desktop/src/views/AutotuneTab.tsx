@@ -16,6 +16,7 @@ import {
   buildF0Segments,
   buildScalePitchClasses,
   computeAutotuneLayout,
+  computePreviewRegion,
   isBlackKey,
   KEYBOARD_WIDTH,
   midiToNoteName,
@@ -28,6 +29,7 @@ import {
   tuneNotesToScale,
   tuningBucket,
   type EditableNote,
+  type PreviewRegion,
   type ScaleName,
 } from "@/lib/autotuneEditor";
 import type { AutotuneEdits, AutotuneResult, InstrumentStem, PitchResult, Sample, TrackInfo } from "@/lib/types";
@@ -59,6 +61,19 @@ function segmentToPath(points: { x: number; y: number }[]): string {
   return points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
 }
 
+/** Perf metrics captured off a backend result, for the "Performance" readout. */
+interface PerfMetrics {
+  seconds: number;
+  peakRssMb: number;
+}
+
+/** Formats a PerfMetrics pair like "12.4 s, 60 MB", or its label variant "Preview 2.1 s, 60 MB". */
+function formatPerf(label: string | null, m: PerfMetrics): string {
+  const secs = `${m.seconds.toFixed(1)} s`;
+  const mb = `${Math.round(m.peakRssMb)} MB`;
+  return label ? `${label} ${secs}, ${mb}` : `${secs}, ${mb}`;
+}
+
 const SOURCE_PLAYER_ID = "autotune-source";
 
 /** Antares Auto-Tune Pro Graph Mode-style pitch editor: analyze a vocal (the user's own file, or one from the song), drag notes onto pitch, apply. */
@@ -88,11 +103,24 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
    * plays before Apply is pressed. Apply promotes its latest value into `tuned`. */
   const [preview, setPreview] = useState<AutotuneResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  /** True while the in-flight/most recent preview render is a full-file render (no region), either
+   * because the edit touched many notes / the whole track, or the computed region was too wide. */
+  const [previewIsFull, setPreviewIsFull] = useState(false);
+  /** The region (song-relative seconds) the currently loaded `preview` covers, or null if it's a
+   * full-file render. Used to play back just that slice, and to know Apply's full render differs from it. */
+  const [previewRegion, setPreviewRegion] = useState<PreviewRegion | null>(null);
   // Single-flight preview: at most ONE render runs at a time. New edits during a render
   // coalesce into a single pending run instead of spawning concurrent heavy processes.
   const previewInFlight = useRef(false);
   const previewPending = useRef<AutotuneEdits | null>(null);
+  /** The note(s) that changed since the last preview render (start/end in song-relative seconds), used
+   * to compute a tight region for the next render; null means "render the whole file" (e.g. a global
+   * Retune Speed/Humanize/Key/Scale change, or before any specific note has been tracked). */
+  const changedNotesRef = useRef<{ startSec: number; endSec: number }[] | null>(null);
   const [comparing, setComparing] = useState<"original" | "tuned">("original");
+
+  const [analyzeMetrics, setAnalyzeMetrics] = useState<PerfMetrics | null>(null);
+  const [lastRenderMetrics, setLastRenderMetrics] = useState<(PerfMetrics & { label: "Preview" | "Apply" }) | null>(null);
 
   const [playerState, setPlayerState] = useState<SamplePlayerState>(() => samplePlayer.getState());
   /** Where the next Play (or resumed drag-seek) should start from, in seconds; set by clicking the waveform/grid. */
@@ -129,6 +157,11 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
     setLoading(true);
     setTuned(null);
     setPreview(null);
+    setPreviewRegion(null);
+    setPreviewIsFull(false);
+    setLastRenderMetrics(null);
+    setAnalyzeMetrics(null);
+    changedNotesRef.current = null;
     setFollowingScale(false);
     try {
       const result = await backend.analyzePitch({ path: source.path });
@@ -138,6 +171,9 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
       if (result.key) {
         setTonic(result.key.tonic);
         setScaleName(result.key.mode === "minor" ? "minor" : "major");
+      }
+      if (typeof result.seconds === "number" && typeof result.peakRssMb === "number") {
+        setAnalyzeMetrics({ seconds: result.seconds, peakRssMb: result.peakRssMb });
       }
       setElapsedSec((Date.now() - start) / 1000);
     } finally {
@@ -187,12 +223,30 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [analyzedPath, pitch]);
 
+  /** Marks every current note as changed, so the next preview covers the whole edit (region computation
+   * will naturally fall back to a full-file render once the span is too wide, e.g. many/all notes). */
+  const markAllNotesChanged = (ns: EditableNote[]) => {
+    changedNotesRef.current = ns.map((n) => ({ startSec: n.startSec, endSec: n.endSec }));
+  };
+
+  /** Marks a single note (by song-relative start/end) as the one that changed, for a tight region preview. */
+  const markNoteChanged = (n: { startSec: number; endSec: number }) => {
+    changedNotesRef.current = [{ startSec: n.startSec, endSec: n.endSec }];
+  };
+
+  /** Global parameter changes (Retune Speed, Humanize, Key, Scale) affect the whole render, not just one note. */
+  const markFullChange = () => {
+    changedNotesRef.current = null;
+  };
+
   const handleReset = () => {
+    markAllNotesChanged(notes);
     setNotes((prev) => resetEditableNotes(prev));
     setFollowingScale(false);
   };
 
   const handleTuneToScale = () => {
+    markAllNotesChanged(notes);
     setNotes((prev) => tuneNotesToScale(prev, scalePcs));
     setFollowingScale(true);
   };
@@ -201,15 +255,37 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
   // since the last "Tune to scale"), so the correction stays consistent with whatever is now selected.
   useEffect(() => {
     if (!followingScale) return;
+    markAllNotesChanged(notes);
     setNotes((prev) => tuneNotesToScale(prev, scalePcs));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scalePcs]);
 
+  const handleRetuneSpeedChange = (v: number) => {
+    markFullChange();
+    setRetuneSpeed(v);
+  };
+
+  const handleHumanizeChange = (v: number) => {
+    markFullChange();
+    setHumanize(v);
+  };
+
+  const handleTonicChange = (t: string) => {
+    markFullChange();
+    setTonic(t);
+  };
+
+  const handleScaleNameChange = (s: ScaleName) => {
+    markFullChange();
+    setScaleName(s);
+  };
+
   const handleNotePointerDown = (index: number) => (e: React.PointerEvent<SVGRectElement>) => {
     e.stopPropagation();
-    (e.target as SVGRectElement).setPointerCapture(e.pointerId);
+    (e.target as SVGRectElement).setPointerCapture?.(e.pointerId);
     setDragIndex(index);
     setDragMidi(notes[index].targetMidi);
+    markNoteChanged(notes[index]);
   };
 
   const handleNotePointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
@@ -219,6 +295,7 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
     const midi = snapYToMidi(y, layout);
     setDragMidi(midi);
     setFollowingScale(false);
+    markNoteChanged(notes[dragIndex]);
     setNotes((prev) => setNoteTarget(prev, dragIndex, midi));
   };
 
@@ -251,11 +328,25 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
         previewPending.current = nextEdits; // coalesce; run once the current render finishes
         return;
       }
+      // Compute (and consume) the region for THIS render from whatever note(s) changed since the
+      // last one; null means render the whole file (global param change, or too many notes changed).
+      const region = computePreviewRegion(changedNotesRef.current, layout.durationSec);
+      changedNotesRef.current = null;
       previewInFlight.current = true;
       setPreviewLoading(true);
+      setPreviewIsFull(region === null);
       try {
-        const result = await backend.applyAutotune({ path: analyzedPath, edits: nextEdits });
+        const result = await backend.applyAutotune({
+          path: analyzedPath,
+          edits: nextEdits,
+          pitchCachePath: pitch?.cachePath,
+          ...(region ? { regionStartSec: region.startSec, regionEndSec: region.endSec } : {}),
+        });
         setPreview(result);
+        setPreviewRegion(region);
+        if (typeof result.seconds === "number" && typeof result.peakRssMb === "number") {
+          setLastRenderMetrics({ seconds: result.seconds, peakRssMb: result.peakRssMb, label: "Preview" });
+        }
       } catch {
         // engine busy or a render error: keep the last good preview rather than piling on
       } finally {
@@ -266,7 +357,7 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
         if (pending) void runPreview(pending);
       }
     },
-    [analyzedPath],
+    [analyzedPath, pitch, layout.durationSec],
   );
 
   useEffect(() => {
@@ -280,9 +371,15 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
     if (!analyzedPath) return;
     setApplying(true);
     try {
+      // Apply always renders the whole song (no region), for save/download.
       const result = await backend.applyAutotune({ path: analyzedPath, edits });
       setTuned(result);
       setPreview(result);
+      setPreviewRegion(null);
+      setPreviewIsFull(false);
+      if (typeof result.seconds === "number" && typeof result.peakRssMb === "number") {
+        setLastRenderMetrics({ seconds: result.seconds, peakRssMb: result.peakRssMb, label: "Apply" });
+      }
       setComparing("tuned");
     } finally {
       setApplying(false);
@@ -384,11 +481,18 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
 
   const isPlayingOriginal = playerState.id === "autotune-original";
   const isPlayingTuned = playerState.id === "autotune-tuned";
+  // A loaded region preview's audio is just that slice starting at t=0, so while it plays, offset the
+  // shared playhead by the region's song-relative start to keep it lined up with the waveform/grid.
+  const isPlayingRegionPreview = isPlayingTuned && !tuned && previewRegion !== null;
   // One playhead sweeps the waveform lane and the pitch grid together, driven from a single time
   // source (samplePlayer's currentTime while any of the three players is active, else the last seek
   // position) and mapped through the shared playheadX/xForSec helper, so both lanes always agree.
   const isAnyAutotunePlaying = isPlayingSource || isPlayingOriginal || isPlayingTuned;
-  const playheadTime = isAnyAutotunePlaying ? playerState.currentTime : seekSec;
+  const playheadTime = isAnyAutotunePlaying
+    ? isPlayingRegionPreview
+      ? playerState.currentTime + previewRegion!.startSec
+      : playerState.currentTime
+    : seekSec;
   const playheadPx = playheadX(layout, playheadTime, KEYBOARD_WIDTH);
   const showPlayhead = pitch !== null;
 
@@ -403,6 +507,14 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
         {loading && <span className="text-xs text-muted tabular-nums">{elapsedSec.toFixed(1)} s</span>}
         {!loading && pitch && elapsedSec > 0 && (
           <span className="text-xs text-muted">Analyzed in {elapsedSec.toFixed(1)} s</span>
+        )}
+        {(analyzeMetrics || lastRenderMetrics) && (
+          <span className="text-[10px] text-muted w-full">
+            Performance:{" "}
+            {analyzeMetrics && `Analyzed in ${analyzeMetrics.seconds.toFixed(1)} s`}
+            {analyzeMetrics && lastRenderMetrics && " - "}
+            {lastRenderMetrics && formatPerf(lastRenderMetrics.label, lastRenderMetrics)}
+          </span>
         )}
       </Surface>
 
@@ -422,7 +534,7 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
               </div>
               <select
                 value={tonic}
-                onChange={(e) => setTonic(e.target.value)}
+                onChange={(e) => handleTonicChange(e.target.value)}
                 disabled={scaleName === "chromatic"}
                 className="bg-surface neu-surface-inset rounded-lg px-3 py-2 text-base font-semibold text-text disabled:opacity-40"
                 aria-label="Key"
@@ -442,7 +554,7 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
               </div>
               <select
                 value={scaleName}
-                onChange={(e) => setScaleName(e.target.value as ScaleName)}
+                onChange={(e) => handleScaleNameChange(e.target.value as ScaleName)}
                 className="bg-surface neu-surface-inset rounded-lg px-3 py-2 text-base font-semibold text-text"
                 aria-label="Scale"
               >
@@ -467,7 +579,7 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
                   max={100}
                   step={1}
                   orientation="horizontal"
-                  onChange={setRetuneSpeed}
+                  onChange={handleRetuneSpeedChange}
                   label="Retune speed"
                   className="w-40"
                 />
@@ -485,7 +597,7 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
                   max={100}
                   step={1}
                   orientation="horizontal"
-                  onChange={setHumanize}
+                  onChange={handleHumanizeChange}
                   label="Humanize"
                   className="w-28"
                 />
@@ -513,7 +625,7 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
               <span className="text-xs text-muted uppercase tracking-wide">Vocal waveform</span>
               {previewLoading && (
                 <span className="text-[10px] text-muted uppercase tracking-wide animate-pulse">
-                  Updating preview...
+                  {previewIsFull ? "Rendering full preview..." : "Updating preview..."}
                 </span>
               )}
             </div>
@@ -673,7 +785,9 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
             />
             <span className="text-xs text-muted">
               Tuned{comparing === "tuned" ? " (selected)" : ""}
-              {previewLoading && <span className="ml-1 animate-pulse">Updating preview...</span>}
+              {previewLoading && (
+                <span className="ml-1 animate-pulse">{previewIsFull ? "Rendering full preview..." : "Updating preview..."}</span>
+              )}
             </span>
 
             <div className="flex items-center gap-2 ml-auto">
