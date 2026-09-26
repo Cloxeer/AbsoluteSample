@@ -139,8 +139,135 @@ def crepe_f0(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     conf = periodicity[0].cpu().numpy()
     f0 = np.nan_to_num(f0, nan=0.0)
     f0[conf < CONF_THRESHOLD] = 0.0
+    f0 = clean_voicing(f0.astype(np.float64), frame_db(audio, len(f0)))
     times = np.arange(len(f0)) * (CREPE_HOP / CREPE_SR)
-    return times.astype(np.float64), f0.astype(np.float64), conf.astype(np.float64)
+    return times.astype(np.float64), f0, conf.astype(np.float64)
+
+
+# Loudness gating. CREPE happily tracks a reverb/echo tail (it is periodic), so a
+# note would keep going after the singer stopped. These thresholds remove that.
+GATE_FLOOR_DB = -55.0      # absolute silence floor (dBFS)
+GATE_BELOW_PEAK_DB = 38.0  # frames this far under the loud part of the file are silence
+TAIL_DB = 15.0             # trailing frames this far under their phrase's peak are reverb
+EDGE_OUTLIER_CENTS = 150.0 # onset/offset frames this far off the phrase are glitches
+EDGE_MAX_FRAMES = 6        # at most 60 ms trimmed at each edge
+
+
+def frame_db(audio: np.ndarray, n_frames: int, win: int = 400) -> np.ndarray:
+    """RMS level in dBFS per CREPE frame (centered 25 ms window)."""
+    pad = np.pad(audio.astype(np.float64), (win // 2, win // 2))
+    out = np.full(n_frames, -120.0)
+    for i in range(n_frames):
+        seg = pad[i * CREPE_HOP: i * CREPE_HOP + win]
+        if seg.size:
+            rms = float(np.sqrt(np.mean(seg * seg)))
+            out[i] = 20.0 * np.log10(rms) if rms > 1e-9 else -120.0
+    return out
+
+
+def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    """[start, end) index pairs of consecutive True runs."""
+    runs, start = [], None
+    for i, v in enumerate(mask):
+        if v and start is None:
+            start = i
+        elif not v and start is not None:
+            runs.append((start, i))
+            start = None
+    if start is not None:
+        runs.append((start, len(mask)))
+    return runs
+
+
+STOP_DROP_DB = 6.0   # level falls at least this much...
+STOP_WITHIN = 8      # ...within 80 ms...
+STOP_RECOVER_DB = 4.0  # ...and never climbs back within this much of where it was
+
+
+def _sudden_stop(db: np.ndarray, s: int, e: int) -> int | None:
+    """Index where a phrase ends abruptly (dry voice stops, reverb remains)."""
+    for i in range(s + 5, e - STOP_WITHIN):
+        before = float(np.max(db[max(s, i - 3): i + 1]))
+        after = float(db[i + STOP_WITHIN])
+        if before - after < STOP_DROP_DB:
+            continue
+        rest = db[i + STOP_WITHIN: e]
+        if float(np.max(rest)) >= before - STOP_RECOVER_DB:
+            continue
+        # A held soft note stays level; a reverb tail keeps fading (>= 10 dB/s).
+        if rest.size >= 3:
+            slope = np.polyfit(np.arange(rest.size) * (CREPE_HOP / CREPE_SR), rest, 1)[0]
+            if slope > -10.0:
+                continue
+        # End the note where the level has actually fallen, not where the fall began.
+        j = i + 1
+        while j < i + STOP_WITHIN and db[j] >= before - 3.0:
+            j += 1
+        return j
+    return None
+
+
+def clean_voicing(f0: np.ndarray, db: np.ndarray) -> np.ndarray:
+    """Unvoice silence, reverb tails and onset/offset pitch glitches."""
+    f0 = f0.copy()
+    voiced = f0 > 0
+    if not np.any(voiced):
+        return f0
+    loud = np.percentile(db[voiced], 95)
+    gate = max(GATE_FLOOR_DB, loud - GATE_BELOW_PEAK_DB)
+    f0[db < gate] = 0.0
+
+    midi = hz_to_midi(f0)
+    for s, e in _runs(f0 > 0):
+        # Reverb tail: drop trailing frames far below this phrase's peak level.
+        peak = float(np.max(db[s:e]))
+        while e - s > 1 and db[e - 1] < peak - TAIL_DB:
+            e -= 1
+            f0[e] = 0.0
+        # The singer stopping shows up as a sudden level drop that never recovers;
+        # everything after it is room sound, even if it still has a pitch.
+        cut = _sudden_stop(db, s, e)
+        if cut is not None:
+            f0[cut:e] = 0.0
+            e = cut
+        # Onset/offset glitches: edge frames far from the nearby stable pitch.
+        n = e - s
+        if n < 4:
+            continue
+        head_ref = float(np.median(midi[s + min(n - 1, EDGE_MAX_FRAMES): s + min(n, EDGE_MAX_FRAMES + 8)]))
+        for i in range(s, min(e, s + EDGE_MAX_FRAMES)):
+            if abs(midi[i] - head_ref) * 100.0 > EDGE_OUTLIER_CENTS:
+                f0[i] = 0.0
+            else:
+                break
+        tail_ref = float(np.median(midi[max(s, e - EDGE_MAX_FRAMES - 8): max(s + 1, e - EDGE_MAX_FRAMES)]))
+        for i in range(e - 1, max(s, e - EDGE_MAX_FRAMES) - 1, -1):
+            if abs(midi[i] - tail_ref) * 100.0 > EDGE_OUTLIER_CENTS:
+                f0[i] = 0.0
+            else:
+                break
+
+    # Leftover reverb fragments: a piece that starts shortly after a louder
+    # phrase, much quieter, with no attack of its own, and only fades.
+    hop_sec = CREPE_HOP / CREPE_SR
+    prev_peak, prev_end = None, -1
+    for s, e in _runs(f0 > 0):
+        seg = db[s:e]
+        peak = float(np.max(seg))
+        if e - s < 5:  # isolated blip under 50 ms: noise, not a sung note
+            f0[s:e] = 0.0
+            continue
+        is_tail = False
+        if prev_peak is not None and (s - prev_end) * hop_sec < 0.5 and peak < prev_peak - 8.0:
+            no_attack = int(np.argmax(seg)) <= 2
+            fading = seg.size < 3 or np.polyfit(np.arange(seg.size) * hop_sec, seg, 1)[0] < -10.0
+            is_tail = no_attack and fading
+        if is_tail:
+            f0[s:e] = 0.0
+            prev_end = e  # a tail can be split in several fragments; keep chaining
+        else:
+            prev_peak, prev_end = peak, e
+    return f0
 
 
 def krumhansl_key(midi_series: np.ndarray, voiced: np.ndarray) -> dict:
@@ -194,16 +321,31 @@ def segment_notes(times: np.ndarray, f0: np.ndarray, conf: np.ndarray) -> list[d
         })
         run.clear()
 
-    prev = None
+    # A note ends when the pitch leaves the note's own center by more than
+    # SPLIT_CENTS for SPLIT_FRAMES in a row (so a scoop or a step up/down becomes a
+    # new note, while vibrato inside a note does not).
+    SPLIT_CENTS = 60.0
+    SPLIT_FRAMES = 4
+    away: list[int] = []
     for i in range(len(f0)):
         if not voiced[i]:
+            run.extend(away)
+            away.clear()
             flush()
-            prev = None
             continue
-        if prev is not None and abs((midi[i] - prev) * 100.0) > 70.0:
-            flush()
+        if len(run) >= 3:
+            center = float(np.median(midi[run[-25:]]))
+            if abs(midi[i] - center) * 100.0 > SPLIT_CENTS:
+                away.append(i)
+                if len(away) >= SPLIT_FRAMES:
+                    flush()
+                    run.extend(away)
+                    away.clear()
+                continue
+        run.extend(away)
+        away.clear()
         run.append(i)
-        prev = midi[i]
+    run.extend(away)
     flush()
     return notes
 
@@ -320,7 +462,6 @@ def apply_edits(
     # WORLD provides the spectral envelope + aperiodicity for natural resynthesis.
     y = _load_region(inp, fs, region_start, region_end)
     w_f0, t, sp, ap = _world(y, fs)
-    del y
 
     # CREPE provides the accurate pitch track; reuse a cached one when given, else recompute.
     cached = _cached_pitch(pitch_cache, region_start, region_end) if pitch_cache else None
@@ -341,38 +482,93 @@ def apply_edits(
     orig_midi = _interp_midi(t, c_times, c_midi, c_voiced)
     voiced = orig_midi > 0
 
-    target_midi = orig_midi.copy()
-    for i in range(len(t)):
-        if not voiced[i]:
-            continue
-        tt = float(t[i])
-        override = None
-        for ne in note_edits:
-            if ne["startSec"] <= tt < ne["endSec"]:
-                override = float(ne["targetMidi"])
-                break
-        target_midi[i] = override if override is not None else nearest_scale_midi(float(orig_midi[i]), scale)
+    shift_semi = compute_shift(t, orig_midi, voiced, note_edits, snap_strength, transition_ms, scale,
+                               bool(edits.get("correctAll", False)))
 
-    hop_sec = float(t[1] - t[0]) if len(t) > 1 else 0.005
-    window = max(1, int(round((transition_ms / 1000.0) / hop_sec)))
-    smoothed = moving_average(target_midi, window)
-    blended = orig_midi + (smoothed - orig_midi) * snap_strength
-
-    new_f0 = np.zeros_like(w_f0)
-    for i in range(len(new_f0)):
-        if voiced[i]:
-            base = 440.0 * 2.0 ** ((orig_midi[i] - 69.0) / 12.0)
-            new_f0[i] = base * (2.0 ** ((blended[i] - orig_midi[i]) / 12.0))
-
-    y_out = pw.synthesize(new_f0, sp, ap, fs)
+    # WORLD's own f0 (the one the envelope was estimated with) is scaled, which
+    # keeps the vocoder coherent; frames WORLD thinks are unvoiced stay unvoiced.
+    new_f0 = w_f0 * (2.0 ** (shift_semi / 12.0))
+    y_world = pw.synthesize(new_f0, sp, ap, fs)
+    y_out = blend_original(y, y_world, t, shift_semi, fs)
     if out_path is None:
         out_path = inp.parent / f"{inp.stem}_tuned.wav"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(out_path), np.clip(y_out, -1.0, 1.0), fs, subtype="PCM_24")
-    del sp, ap, w_f0, new_f0, target_midi, smoothed, blended, orig_midi, y_out
+    del sp, ap, w_f0, new_f0, shift_semi, orig_midi, y_out, y_world, y
     cleanup_torch()
     emit({"event": "done", "path": str(out_path)})
     return 0
+
+
+def compute_shift(
+    t: np.ndarray,
+    orig_midi: np.ndarray,
+    voiced: np.ndarray,
+    note_edits: list[dict],
+    snap_strength: float,
+    transition_ms: float,
+    scale: list[int] | None,
+    correct_all: bool = False,
+) -> np.ndarray:
+    """Per-frame pitch shift in semitones.
+
+    An edited note is moved as a whole by (targetMidi - sourceMidi), so its
+    center lands exactly on the target (0 cents) no matter the Retune Speed.
+    Retune Speed (snap_strength) then only decides how much of the note's own
+    wobble around that center is flattened. Untouched notes get no shift.
+    """
+    n = len(t)
+    step = np.zeros(n)
+    corr_target = np.full(n, np.nan)
+    edited = np.zeros(n, dtype=bool)
+    for ne in note_edits:
+        idx = np.where((t >= float(ne["startSec"])) & (t < float(ne["endSec"])) & voiced)[0]
+        if idx.size == 0:
+            continue
+        src = ne.get("sourceMidi")
+        src = float(src) if src is not None else float(np.median(orig_midi[idx]))
+        tgt = float(ne["targetMidi"])
+        step[idx] = tgt - src
+        corr_target[idx] = tgt
+        edited[idx] = True
+    if correct_all:
+        for i in np.where(voiced & ~edited)[0]:
+            corr_target[i] = nearest_scale_midi(float(orig_midi[i]), scale)
+
+    # Unvoiced frames borrow the next voiced frame's step, so smoothing ramps
+    # happen in the gaps instead of at the start of a note.
+    nxt = 0.0
+    for i in range(n - 1, -1, -1):
+        if voiced[i]:
+            nxt = step[i]
+        else:
+            step[i] = nxt
+
+    hop_sec = float(t[1] - t[0]) if n > 1 else 0.005
+    window = max(1, int(round((transition_ms / 1000.0) / hop_sec)))
+    step_s = moving_average(step, window)
+    pitched = orig_midi + step_s
+    corr = np.where(np.isnan(corr_target), 0.0, (np.nan_to_num(corr_target) - pitched) * snap_strength)
+    corr[~voiced] = 0.0
+    shift = step_s + moving_average(corr, window)
+    shift[~voiced] = 0.0
+    return shift
+
+
+def blend_original(y: np.ndarray, y_world: np.ndarray, t: np.ndarray, shift: np.ndarray, fs: int) -> np.ndarray:
+    """Use the untouched original audio wherever no correction happens.
+
+    The vocoder only replaces the frames that are actually retuned, with 20 ms
+    crossfades, so untouched parts keep 100% of the original quality.
+    """
+    m = min(len(y), len(y_world))
+    y_world = y_world[:m]
+    y = y[:m]
+    g = np.clip(np.abs(shift) / 0.02, 0.0, 1.0)
+    hop_sec = float(t[1] - t[0]) if len(t) > 1 else 0.005
+    g = moving_average(g, max(1, int(round(0.02 / hop_sec))))
+    g_s = np.interp(np.arange(m) / fs, t, g)
+    return y * (1.0 - g_s) + y_world * g_s
 
 
 def _world(y: np.ndarray, fs: int):

@@ -45,15 +45,24 @@ const TONIC_PC: Record<string, number> = TONICS.reduce((acc, name, i) => ({ ...a
 /** How long to wait after the last edit before rendering a fresh tuned preview in the background. */
 const PREVIEW_DEBOUNCE_MS = 500;
 
+const COLOR_GOOD = "#3DDC97";
+const COLOR_OKAY = "#F2B33D";
+const COLOR_BAD = "#E85D5D";
+
 function tuningColor(cents: number): string {
   switch (tuningBucket(cents)) {
     case "in-tune":
-      return "#3DDC97";
+      return COLOR_GOOD;
     case "close":
-      return "#F2B33D";
+      return COLOR_OKAY;
     default:
-      return "#E85D5D";
+      return COLOR_BAD;
   }
+}
+
+/** Result-quality color: tuned (or being-dragged) notes land on 0 cents, so they are green; untouched notes show their detected cents. */
+function noteColor(n: EditableNote, isDragging: boolean): string {
+  return n.tuned || isDragging ? COLOR_GOOD : tuningColor(n.cents);
 }
 
 /** Turns a buildF0Segments() point-array into an SVG path "d" string. */
@@ -645,6 +654,19 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
                 </div>
 
                 <div className="text-xs text-muted uppercase tracking-wide mt-2 mb-1">Pitch editor (Graph Mode)</div>
+                <div data-testid="autotune-legend" className="flex flex-wrap items-center gap-4 mb-2 text-[11px] text-muted">
+                  {[
+                    { color: COLOR_GOOD, label: "In tune (0-10 cents)" },
+                    { color: COLOR_OKAY, label: "Slightly off (10-25)" },
+                    { color: COLOR_BAD, label: "Off pitch (25+)" },
+                  ].map((s) => (
+                    <span key={s.label} className="flex items-center gap-1.5">
+                      <span className="inline-block w-3 h-3 rounded-sm" style={{ background: s.color }} />
+                      {s.label}
+                    </span>
+                  ))}
+                  <span className="italic">Tuned notes turn green</span>
+                </div>
 
                 {showPlayhead && (
                   <div
@@ -743,14 +765,15 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
                         width={width}
                         height={layout.rowHeight - 2}
                         rx={3}
-                        fill={tuningColor(n.cents)}
+                        fill={noteColor(n, isDragging)}
+                        data-testid={`autotune-note-${i}`}
                         opacity={isDragging ? 0.9 : 0.75}
                         stroke={isDragging || corrected ? "#ffffff" : "none"}
                         strokeWidth={isDragging ? 1 : corrected ? 0.75 : 0}
                         className="cursor-grab"
                         onPointerDown={handleNotePointerDown(i)}
                       >
-                        <title>{`${midiToNoteName(Math.round(n.midi))} (${n.cents > 0 ? "+" : ""}${n.cents} cents) -> ${midiToNoteName(midi)}`}</title>
+                        <title>{`${midiToNoteName(Math.round(n.midi))} (${n.cents > 0 ? "+" : ""}${n.cents} cents) -> ${midiToNoteName(midi)}${n.tuned || isDragging ? ", tuned to 0 cents" : ""}`}</title>
                       </rect>
                       {(isDragging || corrected) && (
                         <text x={x} y={layout.yForMidi(midi) - 3} fontSize={10} fill="#ffffff">
@@ -805,9 +828,10 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
 
           <Surface variant="raised" className="p-4 text-sm leading-relaxed text-text">
             <div className="text-xs text-muted uppercase tracking-wide mb-2">In plain words</div>
-            Drag a note up or down onto its line to tune it. Green means it is already in tune (0 cents). Key and
-            Scale decide which notes are allowed; Retune Speed sets how hard the correction snaps, Fast is classic
-            autotune, Slow keeps it natural.
+            Drag a note up or down (or press Tune to scale) and it snaps to exactly 0 cents and turns green. Notes
+            you don't touch stay natural and are colored by how in tune they already are: green is good, yellow is
+            slightly off, red is off pitch. Key and Scale decide which notes are allowed; Retune Speed sets how hard
+            the correction snaps, Fast is classic autotune, Slow keeps it natural.
           </Surface>
         </>
       )}

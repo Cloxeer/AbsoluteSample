@@ -130,11 +130,11 @@ export function computeAutotuneLayout(
 /** Cents deviation bucket used to color a note block by tuning accuracy. */
 export type TuningBucket = "in-tune" | "close" | "off";
 
-/** Buckets an absolute cents deviation into a tuning-accuracy tier: <=5 in tune, <=20 close, else off. */
+/** Buckets an absolute cents deviation into a tuning-accuracy tier: <=10 in tune, <=25 close, else off. */
 export function tuningBucket(cents: number): TuningBucket {
   const abs = Math.abs(cents);
-  if (abs <= 5) return "in-tune";
-  if (abs <= 20) return "close";
+  if (abs <= 10) return "in-tune";
+  if (abs <= 25) return "close";
   return "off";
 }
 
@@ -211,16 +211,18 @@ export function nearestScaleMidi(midi: number, scalePcs: number[]): number {
 export interface EditableNote extends PitchNote {
   /** The MIDI pitch this note should be tuned to; starts equal to the detected (rounded) midi. */
   targetMidi: number;
+  /** True once the user tuned this note (drag or Tune to scale); only tuned notes are sent to the engine. */
+  tuned: boolean;
 }
 
 /** Builds the initial edit-model notes from freshly analyzed PitchNotes: targetMidi = detected midi. */
 export function buildEditableNotes(notes: PitchNote[]): EditableNote[] {
-  return notes.map((n) => ({ ...n, targetMidi: Math.round(n.midi) }));
+  return notes.map((n) => ({ ...n, targetMidi: Math.round(n.midi), tuned: false }));
 }
 
 /** Resets every note's targetMidi back to its originally detected pitch. */
 export function resetEditableNotes(notes: EditableNote[]): EditableNote[] {
-  return notes.map((n) => ({ ...n, targetMidi: Math.round(n.midi) }));
+  return notes.map((n) => ({ ...n, targetMidi: Math.round(n.midi), tuned: false }));
 }
 
 /** Sets every note's targetMidi to the nearest note in the given scale (null scale = nearest semitone, i.e. unchanged rounding). */
@@ -228,17 +230,24 @@ export function tuneNotesToScale(notes: EditableNote[], scalePcs: number[] | nul
   return notes.map((n) => ({
     ...n,
     targetMidi: scalePcs ? nearestScaleMidi(n.midi, scalePcs) : Math.round(n.midi),
+    tuned: true,
   }));
 }
 
 /** Updates a single note's targetMidi by index, snapping to the nearest whole semitone. */
 export function setNoteTarget(notes: EditableNote[], index: number, targetMidi: number): EditableNote[] {
-  return notes.map((n, i) => (i === index ? { ...n, targetMidi: Math.round(targetMidi) } : n));
+  return notes.map((n, i) => (i === index ? { ...n, targetMidi: Math.round(targetMidi), tuned: true } : n));
 }
 
-/** Converts the edit-model notes into the AutotuneEdits.notes payload sent to the backend. */
+/**
+ * Converts the edit-model notes into the AutotuneEdits.notes payload sent to the backend. Only tuned
+ * notes are sent (untouched notes stay natural); sourceMidi is the detected float pitch so the engine
+ * shifts the whole note by (targetMidi - sourceMidi) and lands it on exactly 0 cents.
+ */
 export function toAutotuneNoteEdits(notes: EditableNote[]): AutotuneNoteEdit[] {
-  return notes.map((n) => ({ startSec: n.startSec, endSec: n.endSec, targetMidi: n.targetMidi }));
+  return notes
+    .filter((n) => n.tuned)
+    .map((n) => ({ startSec: n.startSec, endSec: n.endSec, targetMidi: n.targetMidi, sourceMidi: n.midi }));
 }
 
 /** Median gap (seconds) between consecutive f0 points, used as the "one hop" unit when a hop isn't given explicitly. */

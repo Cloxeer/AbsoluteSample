@@ -372,6 +372,8 @@ export interface AutotuneNoteEdit {
   startSec: number;
   endSec: number;
   targetMidi: number;
+  /** The note's detected (float) MIDI pitch; the engine shifts the whole note by targetMidi - sourceMidi. */
+  sourceMidi?: number;
 }
 
 export interface AutotuneEdits {

@@ -158,7 +158,8 @@ describe("AutotuneTab", () => {
     await waitFor(() => expect(applySpy).toHaveBeenCalled());
     const call = applySpy.mock.calls[0][0];
     expect(call.path).toBe(instruments[0].path);
-    expect(call.edits.notes.length).toBeGreaterThan(0);
+    // No note was tuned, so untouched notes stay natural and none are sent.
+    expect(call.edits.notes).toEqual([]);
 
     await waitFor(() => expect(screen.getByRole("button", { name: /^save as sample$/i })).not.toBeDisabled());
     expect(screen.getByRole("button", { name: /^download$/i })).not.toBeDisabled();
@@ -314,6 +315,47 @@ describe("AutotuneTab", () => {
     expect(call.regionEndSec).toBeDefined();
     expect(call.regionEndSec! - call.regionStartSec!).toBeLessThan(2);
     expect(call.pitchCachePath).toMatch(/\.pitch\.json$/);
+  });
+
+  it("colors untouched notes by detected cents and dragged/tuned notes green, with a legend", async () => {
+    const realAnalyze = backend.analyzePitch.bind(backend);
+    vi.spyOn(backend, "analyzePitch").mockImplementationOnce(async (req) => {
+      const r = await realAnalyze(req);
+      return { ...r, notes: r.notes.map((n, i) => (i === 0 ? { ...n, cents: 40 } : i === 1 ? { ...n, cents: 18 } : n)) };
+    });
+    const applySpy = vi.spyOn(backend, "applyAutotune");
+    render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
+    pickSongSource("Vocals");
+    fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+    await waitFor(() => expect(screen.getByTestId("autotune-editor")).toBeInTheDocument());
+
+    expect(screen.getByText("In tune (0-10 cents)")).toBeInTheDocument();
+    expect(screen.getByText("Slightly off (10-25)")).toBeInTheDocument();
+    expect(screen.getByText("Off pitch (25+)")).toBeInTheDocument();
+    expect(screen.getByText(/tuned notes turn green/i)).toBeInTheDocument();
+
+    const note0 = screen.getByTestId("autotune-note-0");
+    expect(note0.getAttribute("fill")).toBe("#E85D5D");
+    expect(screen.getByTestId("autotune-note-1").getAttribute("fill")).toBe("#F2B33D");
+
+    applySpy.mockClear();
+    const editor = screen.getByTestId("autotune-editor");
+    fireEvent.pointerDown(note0, { pointerId: 1 });
+    expect(screen.getByTestId("autotune-note-0").getAttribute("fill")).toBe("#3DDC97");
+    fireEvent.pointerMove(editor, { clientY: 10 });
+    fireEvent.pointerUp(editor);
+    expect(screen.getByTestId("autotune-note-0").getAttribute("fill")).toBe("#3DDC97");
+    expect(screen.getByTestId("autotune-note-0").textContent).toMatch(/tuned to 0 cents/);
+    expect(screen.getByTestId("autotune-note-1").getAttribute("fill")).toBe("#F2B33D");
+
+    await waitFor(() => expect(applySpy).toHaveBeenCalled(), { timeout: 2000 });
+    const call = applySpy.mock.calls[applySpy.mock.calls.length - 1][0];
+    expect(call.edits.notes).toHaveLength(1);
+    expect(typeof call.edits.notes[0].sourceMidi).toBe("number");
+
+    fireEvent.change(screen.getByRole("combobox", { name: /^scale$/i }), { target: { value: "major" } });
+    fireEvent.click(screen.getByRole("button", { name: /tune to scale/i }));
+    expect(screen.getByTestId("autotune-note-1").getAttribute("fill")).toBe("#3DDC97");
   });
 
   it("cancels a stale in-flight preview render when a newer edit supersedes it", async () => {

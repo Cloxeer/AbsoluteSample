@@ -85,10 +85,11 @@ describe("computeAutotuneLayout", () => {
 describe("tuningBucket", () => {
   it("buckets in-tune, close and off by absolute cents", () => {
     expect(tuningBucket(3)).toBe("in-tune");
-    expect(tuningBucket(-5)).toBe("in-tune");
-    expect(tuningBucket(12)).toBe("close");
-    expect(tuningBucket(-20)).toBe("close");
-    expect(tuningBucket(35)).toBe("off");
+    expect(tuningBucket(-10)).toBe("in-tune");
+    expect(tuningBucket(10.5)).toBe("close");
+    expect(tuningBucket(-25)).toBe("close");
+    expect(tuningBucket(25.5)).toBe("off");
+    expect(tuningBucket(-35)).toBe("off");
   });
 });
 
@@ -201,12 +202,22 @@ describe("editable note helpers", () => {
     expect(tuned[0].targetMidi).toBe(60);
   });
 
-  it("toAutotuneNoteEdits maps to the backend payload shape", () => {
+  it("tracks the tuned flag through build/set/tune/reset", () => {
+    const built = buildEditableNotes(notes);
+    expect(built.map((n) => n.tuned)).toEqual([false, false]);
+    const set = setNoteTarget(built, 1, 65);
+    expect(set.map((n) => n.tuned)).toEqual([false, true]);
+    const scaled = tuneNotesToScale(built, null);
+    expect(scaled.map((n) => n.tuned)).toEqual([true, true]);
+    expect(resetEditableNotes(scaled).map((n) => n.tuned)).toEqual([false, false]);
+  });
+
+  it("toAutotuneNoteEdits sends only tuned notes, with the detected float midi as sourceMidi", () => {
+    expect(toAutotuneNoteEdits(buildEditableNotes(notes))).toEqual([]);
     const editable = setNoteTarget(buildEditableNotes(notes), 1, 65);
-    expect(toAutotuneNoteEdits(editable)).toEqual([
-      { startSec: 0, endSec: 1, targetMidi: 60 },
-      { startSec: 1, endSec: 2, targetMidi: 65 },
-    ]);
+    expect(toAutotuneNoteEdits(editable)).toEqual([{ startSec: 1, endSec: 2, targetMidi: 65, sourceMidi: 63 }]);
+    const all = tuneNotesToScale(buildEditableNotes(notes), null);
+    expect(toAutotuneNoteEdits(all)[0]).toEqual({ startSec: 0, endSec: 1, targetMidi: 60, sourceMidi: 60.4 });
   });
 });
 
