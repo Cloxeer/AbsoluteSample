@@ -184,6 +184,28 @@ pub fn sha1_hex(data: &[u8]) -> String {
     format!("{h0:08x}{h1:08x}{h2:08x}{h3:08x}{h4:08x}")
 }
 
+/// Audio file types the pitch editor may read from anywhere the user picked them.
+const READABLE_AUDIO_EXTS: [&str; 8] = ["wav", "mp3", "flac", "ogg", "m4a", "aac", "aif", "aiff"];
+/// Refuse anything larger (a 10-minute 24-bit stereo WAV is ~300 MB).
+pub const MAX_AUDIO_READ_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Reads a user-chosen audio file for the in-app pitch editor. Only audio extensions and
+/// regular files under the size cap are allowed, so this cannot be used to read arbitrary files.
+pub fn read_audio_bytes(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).unwrap_or_default();
+    if !READABLE_AUDIO_EXTS.contains(&ext.as_str()) {
+        return Err(format!("not an audio file: {}", path.display()));
+    }
+    let meta = std::fs::metadata(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!("not a file: {}", path.display()));
+    }
+    if meta.len() > MAX_AUDIO_READ_BYTES {
+        return Err(format!("file too large ({} MB)", meta.len() / (1024 * 1024)));
+    }
+    std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
 /// Shared across `library`'s and `samples`' test modules: `ABSOLUTESAMPLE_HOME`
 /// is process-global state, so tests that set it must not run concurrently
 /// with each other, regardless of which module they live in.
@@ -193,6 +215,23 @@ pub static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_audio_bytes_only_reads_audio_files() {
+        let dir = std::env::temp_dir().join(format!("as-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("take.WAV");
+        std::fs::write(&wav, b"RIFFdata").unwrap();
+        assert_eq!(read_audio_bytes(&wav).unwrap(), b"RIFFdata");
+        let secret = dir.join("secrets.txt");
+        std::fs::write(&secret, b"no").unwrap();
+        assert!(read_audio_bytes(&secret).is_err());
+        assert!(read_audio_bytes(&dir.join("missing.wav")).is_err());
+        let folder = dir.join("folder.wav");
+        std::fs::create_dir_all(&folder).unwrap();
+        assert!(read_audio_bytes(&folder).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn sanitize_keeps_safe_chars() {

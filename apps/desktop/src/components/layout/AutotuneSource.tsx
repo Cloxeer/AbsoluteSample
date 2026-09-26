@@ -8,6 +8,8 @@ import type { InstrumentStem, Sample } from "@/lib/types";
 
 const AUDIO_EXTENSIONS = ["wav", "flac", "mp3", "m4a", "aiff", "ogg"];
 const VOCAL_KEYS = new Set(["vocals", "lead_vocals", "backing_vocals"]);
+/** Bundled demo vocal for the web build (served from public/fixtures). */
+export const DEMO_VOCAL_URL = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/fixtures/instruments/lead_vocals.wav`;
 
 export interface SongSourceOption {
   key: string;
@@ -21,9 +23,11 @@ export interface SongSourceOption {
 export interface AutotuneSourceValue {
   path: string;
   label: string;
-  kind: "own" | "song";
-  /** Object URL for a dropped/chosen file when running outside Tauri, so the waveform can render the real audio. */
+  kind: "own" | "song" | "demo";
+  /** Object URL for a dropped/chosen file when running outside Tauri. */
   fileUrl?: string;
+  /** The dropped/chosen File itself (browser build): decoded directly, no backend involved. */
+  file?: File;
   peaks?: number[];
   durationSec?: number;
 }
@@ -116,7 +120,7 @@ export function AutotuneSource({ instruments, samples, value, onChange }: Autotu
 
   const chooseOwnFile = async (file: File) => {
     const fileUrl = URL.createObjectURL(file);
-    onChange({ path: file.name, label: file.name, kind: "own", fileUrl });
+    onChange({ path: file.name, label: file.name, kind: "own", fileUrl, file });
   };
 
   const handleChooseFile = async () => {
@@ -214,16 +218,22 @@ export function AutotuneSource({ instruments, samples, value, onChange }: Autotu
         </select>
       </label>
 
+      {!tauri && (
+        <Button type="button" onClick={() => onChange({ path: DEMO_VOCAL_URL, label: "Demo vocal", kind: "demo" })}>
+          Try a demo vocal
+        </Button>
+      )}
+
       {value && (
         <span className="flex items-center gap-2 ml-auto text-xs">
           <span className="text-text truncate max-w-[220px]">{value.label}</span>
           <span
             className={clsx(
               "px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wide",
-              value.kind === "own" ? "bg-accent/20 text-accent" : "bg-cyan-500/20 text-cyan-300"
+              value.kind === "song" ? "bg-cyan-500/20 text-cyan-300" : "bg-accent/20 text-accent"
             )}
           >
-            {value.kind === "own" ? "Your file" : "From song"}
+            {value.kind === "own" ? "Your file" : value.kind === "demo" ? "Demo" : "From song"}
           </span>
         </span>
       )}

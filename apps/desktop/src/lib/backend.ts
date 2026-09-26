@@ -77,6 +77,11 @@ export const backend = {
     return mock.sliceBeats(args);
   },
 
+  /** Desktop only: raw bytes of a user-chosen audio file (any folder), for the in-app pitch editor. */
+  async readAudioFile(path: string): Promise<ArrayBuffer> {
+    return invokeTauri<ArrayBuffer>("read_audio_file", { path });
+  },
+
   async resolveWavUrl(path: string): Promise<string> {
     if (isTauri()) return mediaUrl(path);
     return mock.resolveWav(path);

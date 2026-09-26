@@ -391,3 +391,27 @@ Every engine script emits a final line `{"event":"metrics","seconds":<f>,"peakRs
 2. `cargo test --release --no-default-features --lib` in src-tauri (via the GNU toolchain env)
 3. A bounded engine smoke: analyze_pitch on a generated 3s tone with a MEMORY WATCHDOG that samples child RSS every 100ms and KILLS + FAILS if peak > 3.0 GB or wall time > 120s.
 A committed `scripts/install-hooks.sh` installs a git `pre-push` hook that runs `node scripts/smoke.mjs` and blocks the push on failure. Document in README. The hook is installed locally so this machine is protected immediately.
+
+## v9 addendum: pitch editor engine (Rust -> WebAssembly)
+
+The Autotune tab no longer calls the Python engine. `crates/pitchcore` is a Rust crate compiled
+to WebAssembly (`node scripts/build-wasm.mjs`, output in `apps/desktop/src/wasm/pitchcore`) and
+run in a Web Worker, so the editor works the same in the desktop app and on the web.
+
+- Analysis (once per recording): 70 Hz high-pass (removes bass bleed), FFT YIN with pYIN
+  threshold weighting, CREPE-tiny (MIT, re-implemented in Rust, `src/crepe.rs`) as octave
+  referee every 100 ms and as fill-in where YIN finds no period, Viterbi continuity, then
+  loudness gating: silence floor, reverb-tail trim, sudden-stop detection, onset glitches,
+  sub-50 ms blips, and trailing reverb fragments are unvoiced.
+- Notes: split on sustained pitch departure (>60 cents for 40 ms) and on re-onsets (6 dB dips);
+  glides under 60 ms merge into a neighbour. Each note = center (amplitude-weighted, middle of
+  note) + drift (150 ms moving average) + modulation (remainder). Edits: target center, drift
+  gain, modulation gain; split; merge.
+- Rendering: TD-PSOLA on pitch epochs; only phrases containing an edited note are resynthesised;
+  everything else is copied bit-for-bit. Edited note centers land on target (tests: within 8
+  cents re-measured, typically 1-3).
+- Measured: 30 s vocal analysed in ~1.9 s native / ~2.9 s WebAssembly; an edit re-renders its
+  phrase in ~1-3 ms. `cargo test --release` in the crate enforces a 15 ms render budget and runs
+  in the pre-push smoke suite.
+- Agreement with full CREPE on two real separated vocals: 97.2% and 97.6% of frames within
+  50 cents; octave errors 12 and 0 frames.

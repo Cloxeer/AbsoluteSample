@@ -24,6 +24,9 @@ if (existsSync(cargo)) {
   const mingw = join(process.env.LOCALAPPDATA || "", "Microsoft", "WinGet", "Packages", "BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe", "mingw64", "bin");
   const env = { ...process.env, PATH: `${mingw};${process.env.PATH}` };
   step("rust tests", cargo, ["+stable-x86_64-pc-windows-gnu", "test", "--release", "--no-default-features", "--lib"], { cwd: join(root, "apps/desktop/src-tauri"), env });
+  // Pitch engine: accuracy (notes, reverb tails, edits land on target, vibrato) and
+  // the 15 ms edit-to-audio latency budget.
+  step("pitch engine accuracy + latency", cargo, ["+stable-x86_64-pc-windows-gnu", "test", "--release"], { cwd: join(root, "crates/pitchcore"), env });
 } else {
   console.log("\n=== rust tests ===\n[smoke] cargo not found; skipping.");
 }

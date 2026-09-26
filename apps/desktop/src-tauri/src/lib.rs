@@ -55,6 +55,7 @@ pub fn run() {
             commands::analyze_pitch,
             commands::apply_autotune,
             commands::perf_log,
+            commands::read_audio_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

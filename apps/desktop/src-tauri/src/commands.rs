@@ -127,6 +127,17 @@ impl From<pipeline::TrackManifest> for TrackInfo {
     }
 }
 
+/// Raw bytes of a user-chosen audio file, for the in-browser pitch editor (which decodes and
+/// analyses it itself). Returned as a binary IPC response, not JSON.
+#[tauri::command]
+pub async fn read_audio_file(path: String) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::audio::workspace::read_audio_bytes(std::path::Path::new(&path)).map(tauri::ipc::Response::new)
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
 #[tauri::command]
 pub async fn import_local(app: AppHandle, path: String) -> Result<TrackInfo, String> {
     tauri::async_runtime::spawn_blocking(move || {
