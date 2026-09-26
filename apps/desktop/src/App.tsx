@@ -4,6 +4,8 @@ import { Stepper } from "@/components/layout/Stepper";
 import { Tabs } from "@/components/layout/Tabs";
 import { SlicerTab } from "@/views/SlicerTab";
 import { NotesTab } from "@/views/NotesTab";
+import { FrequenciesTab } from "@/views/FrequenciesTab";
+import { AutotuneTab } from "@/views/AutotuneTab";
 import { LibraryPanel } from "@/components/library/LibraryPanel";
 import { SamplesPanel } from "@/components/samples/SamplesPanel";
 import { Toast } from "@/components/neumorphic/Toast";
@@ -20,6 +22,8 @@ import type { DependencyReport, LibraryEntry, Sample, TrashEntry } from "@/lib/t
 const TABS = [
   { id: "slicer", label: "Stem Slicer" },
   { id: "inspector", label: "Notes" },
+  { id: "frequencies", label: "Frequencies" },
+  { id: "autotune", label: "Autotune" },
 ];
 
 const PIPELINE_STEPS = [
@@ -316,7 +320,7 @@ export default function App() {
       />
       <Toast />
       <main className="flex-1 pb-10">
-        {activeTab === "slicer" ? (
+        {activeTab === "slicer" && (
           <SlicerTab
             engineApi={engineApi}
             syncApi={sync}
@@ -324,13 +328,29 @@ export default function App() {
             samples={samples}
             onSampleSaved={refreshSamples}
           />
-        ) : (
+        )}
+        {activeTab === "inspector" && (
           <NotesTab
             track={engine.track}
             loop={engine.loop}
             instruments={engine.instruments}
             analysis={engine.analysis}
             onAnalyze={() => analyzeLoop(engine.track?.id ?? "")}
+            samples={samples}
+          />
+        )}
+        {activeTab === "frequencies" && (
+          <FrequenciesTab
+            track={engine.track}
+            instruments={engine.instruments}
+            analysis={null}
+            samples={samples}
+          />
+        )}
+        {activeTab === "autotune" && (
+          <AutotuneTab
+            track={engine.track}
+            instruments={engine.instruments}
             samples={samples}
           />
         )}
