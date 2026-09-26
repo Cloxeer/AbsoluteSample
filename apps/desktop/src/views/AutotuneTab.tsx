@@ -1,19 +1,24 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import WaveSurfer from "wavesurfer.js";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
 import { InfoTip } from "@/components/neumorphic/InfoTip";
 import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { Slider } from "@/components/neumorphic/Slider";
+import { AutotuneSource, type AutotuneSourceValue } from "@/components/layout/AutotuneSource";
 import { backend } from "@/lib/backend";
 import { isTauri, mediaUrl } from "@/lib/mediaUrl";
+import { peaksOptions } from "@/lib/wavePeaks";
 import { samplePlayer, type SamplePlayerState } from "@/lib/samplePlayer";
 import {
+  applyHumanize,
   buildEditableNotes,
   buildScalePitchClasses,
   computeAutotuneLayout,
   isBlackKey,
   midiToNoteName,
   resetEditableNotes,
+  retuneSpeedToParams,
   setNoteTarget,
   snapYToMidi,
   toAutotuneNoteEdits,
@@ -30,32 +35,9 @@ export interface AutotuneTabProps {
   samples: Sample[];
 }
 
-interface SourceOption {
-  key: string;
-  label: string;
-  path: string;
-  group: string;
-}
-
-const VOCAL_KEYS = new Set(["vocals", "lead_vocals", "backing_vocals"]);
-
-function buildSourceOptions(instruments: InstrumentStem[] | null | undefined, samples: Sample[]): SourceOption[] {
-  const options: SourceOption[] = [];
-  const stems = instruments ?? [];
-  // Vocal-ish stems first, then any other instrument stems (allowed, just listed after).
-  const vocal = stems.filter((s) => VOCAL_KEYS.has(s.key));
-  const other = stems.filter((s) => !VOCAL_KEYS.has(s.key));
-  for (const stem of [...vocal, ...other]) {
-    options.push({ key: stem.key, label: stem.displayLabel ?? stem.label, path: stem.path, group: "Instrument stems" });
-  }
-  for (const sample of samples) {
-    options.push({ key: sample.id, label: sample.name, path: sample.path, group: "Saved samples" });
-  }
-  return options;
-}
-
 const TONICS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const TONIC_PC: Record<string, number> = TONICS.reduce((acc, name, i) => ({ ...acc, [name]: i }), {});
+const KEYBOARD_WIDTH = 44;
 
 function tuningColor(cents: number): string {
   switch (tuningBucket(cents)) {
@@ -89,10 +71,9 @@ function f0PolylinePaths(
   return paths;
 }
 
-/** Standalone Melodyne/Auto-Tune-style graphical pitch editor: analyze a vocal source, drag notes onto pitch, apply. */
+/** Antares Auto-Tune Pro Graph Mode-style pitch editor: analyze a vocal (the user's own file, or one from the song), drag notes onto pitch, apply. */
 export function AutotuneTab({ track: _track, instruments, samples = [] }: AutotuneTabProps) {
-  const sources = useMemo(() => buildSourceOptions(instruments, samples), [instruments, samples]);
-  const [selectedPath, setSelectedPath] = useState<string>("");
+  const [source, setSource] = useState<AutotuneSourceValue | null>(null);
   const [pitch, setPitch] = useState<PitchResult | null>(null);
   const [analyzedPath, setAnalyzedPath] = useState<string | null>(null);
   const [notes, setNotes] = useState<EditableNote[]>([]);
@@ -100,10 +81,10 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
 
-  const [snapStrength, setSnapStrength] = useState(70);
+  const [retuneSpeed, setRetuneSpeed] = useState(70);
+  const [humanize, setHumanize] = useState(0);
   const [scaleName, setScaleName] = useState<ScaleName>("chromatic");
   const [tonic, setTonic] = useState("C");
-  const [transitionMs, setTransitionMs] = useState(40);
 
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragMidi, setDragMidi] = useState<number | null>(null);
@@ -114,13 +95,8 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
 
   const [playerState, setPlayerState] = useState<SamplePlayerState>(() => samplePlayer.getState());
 
-  useEffect(() => {
-    if (sources.length > 0 && !sources.some((s) => s.path === selectedPath)) {
-      setSelectedPath(sources[0].path);
-    }
-    if (sources.length === 0) setSelectedPath("");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sources]);
+  const waveContainerRef = useRef<HTMLDivElement>(null);
+  const wsRef = useRef<WaveSurfer | null>(null);
 
   useEffect(() => samplePlayer.subscribe(setPlayerState), []);
 
@@ -136,10 +112,8 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
     return () => window.clearInterval(id);
   }, [loading, startedAt]);
 
-  const selectedSource = sources.find((s) => s.path === selectedPath) ?? null;
-
   const handleAnalyze = async () => {
-    if (!selectedSource) return;
+    if (!source) return;
     if (samplePlayer.isPlaying("autotune-original") || samplePlayer.isPlaying("autotune-tuned")) samplePlayer.stop();
     const start = Date.now();
     setStartedAt(start);
@@ -147,9 +121,9 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
     setLoading(true);
     setTuned(null);
     try {
-      const result = await backend.analyzePitch({ path: selectedSource.path });
+      const result = await backend.analyzePitch({ path: source.path });
       setPitch(result);
-      setAnalyzedPath(selectedSource.path);
+      setAnalyzedPath(source.path);
       setNotes(buildEditableNotes(result.notes));
       if (result.key) {
         setTonic(result.key.tonic);
@@ -171,9 +145,32 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
   for (let m = layout.maxMidi; m >= layout.minMidi; m--) rows.push(m);
 
   const f0Paths = useMemo(
-    () => (pitch ? f0PolylinePaths(pitch.f0, layout.xForSec, layout.yForMidi, 40) : []),
+    () => (pitch ? f0PolylinePaths(pitch.f0, layout.xForSec, layout.yForMidi, KEYBOARD_WIDTH) : []),
     [pitch, layout]
   );
+
+  // Renders the waveform of the chosen source, sized to match the pitch grid's time axis.
+  useEffect(() => {
+    if (!waveContainerRef.current || !pitch || !analyzedPath) return;
+    const url = source?.kind === "own" && source.fileUrl ? source.fileUrl : mediaUrl(analyzedPath);
+    const ws = WaveSurfer.create({
+      container: waveContainerRef.current,
+      waveColor: "#E8935D",
+      progressColor: "#F2B33D",
+      cursorColor: "transparent",
+      height: 64,
+      normalize: true,
+      cursorWidth: 1,
+      url,
+      ...peaksOptions(source?.kind === "song" ? source.peaks : undefined, source?.kind === "song" ? source.durationSec : undefined),
+    });
+    wsRef.current = ws;
+    return () => {
+      ws.destroy();
+      wsRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [analyzedPath, pitch]);
 
   const handleReset = () => setNotes((prev) => resetEditableNotes(prev));
 
@@ -200,14 +197,17 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
     setDragMidi(null);
   };
 
+  const retuneParams = useMemo(() => retuneSpeedToParams(retuneSpeed), [retuneSpeed]);
+  const transitionMs = useMemo(() => applyHumanize(retuneParams.transitionMs, humanize), [retuneParams, humanize]);
+
   const edits: AutotuneEdits = useMemo(
     () => ({
-      snapStrength: snapStrength / 100,
+      snapStrength: retuneParams.snapStrength,
       scale: scalePcs,
       transitionMs,
       notes: toAutotuneNoteEdits(notes),
     }),
-    [snapStrength, scalePcs, transitionMs, notes]
+    [retuneParams, scalePcs, transitionMs, notes]
   );
 
   const handleApply = async () => {
@@ -229,7 +229,8 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
       samplePlayer.stop();
       return;
     }
-    samplePlayer.playPath("autotune-original", mediaUrl(analyzedPath), { kind: "sample", label: "Autotune original" });
+    const url = source?.kind === "own" && source.fileUrl ? source.fileUrl : mediaUrl(analyzedPath);
+    samplePlayer.playPath("autotune-original", url, { kind: "sample", label: "Autotune original" });
   };
 
   const handlePlayTuned = () => {
@@ -270,126 +271,108 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
 
   const isPlayingOriginal = playerState.id === "autotune-original";
   const isPlayingTuned = playerState.id === "autotune-tuned";
+  const playheadTime = isPlayingOriginal || isPlayingTuned ? playerState.currentTime : 0;
+  const playheadX = KEYBOARD_WIDTH + layout.xForSec(playheadTime);
+  const showPlayhead = (isPlayingOriginal || isPlayingTuned) && pitch !== null;
 
   return (
     <div className="flex flex-col gap-6 px-6 py-4 max-w-5xl mx-auto w-full">
-      {sources.length === 0 ? (
-        <Surface variant="raised" className="p-6 text-center text-sm text-muted">
-          Pick a vocal stem or sample, then Analyze to tune it.
-        </Surface>
-      ) : (
-        <Surface variant="raised" className="p-4 flex flex-wrap items-center gap-3">
-          <select
-            value={selectedPath}
-            onChange={(e) => setSelectedPath(e.target.value)}
-            className="bg-surface neu-surface-inset rounded-lg px-3 py-2 text-sm text-text min-w-[220px]"
-            aria-label="Source"
-          >
-            {Object.entries(
-              sources.reduce<Record<string, SourceOption[]>>((acc, s) => {
-                (acc[s.group] ??= []).push(s);
-                return acc;
-              }, {})
-            ).map(([group, opts]) => (
-              <optgroup key={group} label={group}>
-                {opts.map((opt) => (
-                  <option key={opt.key + opt.path} value={opt.path}>
-                    {opt.label}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-          <Button variant="primary" onClick={handleAnalyze} disabled={!selectedSource || loading} busy={loading}>
-            Analyze
-          </Button>
-          {loading && <span className="text-xs text-muted tabular-nums">{elapsedSec.toFixed(1)} s</span>}
-          {!loading && pitch && elapsedSec > 0 && (
-            <span className="text-xs text-muted">Analyzed in {elapsedSec.toFixed(1)} s</span>
-          )}
-        </Surface>
-      )}
+      <AutotuneSource instruments={instruments} samples={samples} value={source} onChange={setSource} />
 
-      {!pitch && sources.length > 0 && (
+      <Surface variant="raised" className="p-4 flex flex-wrap items-center gap-3">
+        <Button variant="primary" onClick={handleAnalyze} disabled={!source || loading} busy={loading}>
+          Analyze
+        </Button>
+        {loading && <span className="text-xs text-muted tabular-nums">{elapsedSec.toFixed(1)} s</span>}
+        {!loading && pitch && elapsedSec > 0 && (
+          <span className="text-xs text-muted">Analyzed in {elapsedSec.toFixed(1)} s</span>
+        )}
+      </Surface>
+
+      {!pitch && (
         <Surface variant="raised" className="p-6 text-center text-sm text-muted">
-          Pick a vocal stem or sample, then Analyze to tune it.
+          Drop your vocal or pick one from the song, then Analyze to tune it.
         </Surface>
       )}
 
       {pitch && (
         <>
-          <Surface variant="raised" className="p-4 flex flex-wrap items-center gap-6">
+          <Surface variant="raised" className="p-4 flex flex-wrap items-center gap-6 bg-[#1b2230] neu-surface-raised">
             <div className="flex flex-col gap-1">
               <div className="flex items-center gap-1.5 text-xs text-muted uppercase tracking-wide">
-                Snap strength
-                <InfoTip
-                  term="Snap strength"
-                  text="How strongly notes are pulled to their target pitch. Natural keeps some human wobble; Full is classic hard autotune."
-                />
+                Key
+                <InfoTip term="Key" text="The home note your vocal is tuned to." />
+              </div>
+              <select
+                value={tonic}
+                onChange={(e) => setTonic(e.target.value)}
+                disabled={scaleName === "chromatic"}
+                className="bg-surface neu-surface-inset rounded-lg px-3 py-2 text-base font-semibold text-text disabled:opacity-40"
+                aria-label="Key"
+              >
+                {TONICS.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-1.5 text-xs text-muted uppercase tracking-wide">
+                Scale
+                <InfoTip term="Scale" text="Which notes are allowed; the voice snaps to these." />
+              </div>
+              <select
+                value={scaleName}
+                onChange={(e) => setScaleName(e.target.value as ScaleName)}
+                className="bg-surface neu-surface-inset rounded-lg px-3 py-2 text-base font-semibold text-text"
+                aria-label="Scale"
+              >
+                <option value="chromatic">Chromatic</option>
+                <option value="major">Major</option>
+                <option value="minor">Minor</option>
+                <option value="dorian">Dorian</option>
+                <option value="mixolydian">Mixolydian</option>
+              </select>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-1.5 text-xs text-muted uppercase tracking-wide">
+                Retune speed
+                <InfoTip term="Retune Speed" text="Fast is the classic autotune effect; slow keeps it natural." />
               </div>
               <div className="flex items-center gap-2">
+                <span className="text-[10px] text-muted">Slow</span>
                 <Slider
-                  value={snapStrength}
+                  value={retuneSpeed}
                   min={0}
                   max={100}
                   step={1}
                   orientation="horizontal"
-                  onChange={setSnapStrength}
-                  label="Snap strength"
+                  onChange={setRetuneSpeed}
+                  label="Retune speed"
                   className="w-40"
                 />
-                <span className="text-xs text-muted w-24 tabular-nums">
-                  {snapStrength === 0 ? "Natural" : snapStrength === 100 ? "Full" : `${snapStrength}%`}
-                </span>
+                <span className="text-[10px] text-muted">Fast</span>
+                <span className="text-xs text-muted w-10 tabular-nums">{retuneSpeed}%</span>
               </div>
             </div>
 
             <div className="flex flex-col gap-1">
-              <div className="text-xs text-muted uppercase tracking-wide">Scale</div>
-              <div className="flex items-center gap-2">
-                <select
-                  value={scaleName}
-                  onChange={(e) => setScaleName(e.target.value as ScaleName)}
-                  className="bg-surface neu-surface-inset rounded-lg px-2 py-1.5 text-sm text-text"
-                  aria-label="Scale"
-                >
-                  <option value="chromatic">Chromatic</option>
-                  <option value="major">Major</option>
-                  <option value="minor">Minor</option>
-                </select>
-                <select
-                  value={tonic}
-                  onChange={(e) => setTonic(e.target.value)}
-                  disabled={scaleName === "chromatic"}
-                  className="bg-surface neu-surface-inset rounded-lg px-2 py-1.5 text-sm text-text disabled:opacity-40"
-                  aria-label="Tonic"
-                >
-                  {TONICS.map((t) => (
-                    <option key={t} value={t}>
-                      {t}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-1">
-              <div className="flex items-center gap-1.5 text-xs text-muted uppercase tracking-wide">
-                Transition
-                <InfoTip term="Transition" text="How many milliseconds a pitch shift is smoothed over, to avoid a stepped, robotic sound." />
-              </div>
+              <div className="text-xs text-muted uppercase tracking-wide">Humanize</div>
               <div className="flex items-center gap-2">
                 <Slider
-                  value={transitionMs}
+                  value={humanize}
                   min={0}
-                  max={200}
-                  step={5}
+                  max={100}
+                  step={1}
                   orientation="horizontal"
-                  onChange={setTransitionMs}
-                  label="Transition ms"
-                  className="w-32"
+                  onChange={setHumanize}
+                  label="Humanize"
+                  className="w-28"
                 />
-                <span className="text-xs text-muted w-16 tabular-nums">{transitionMs} ms</span>
+                <span className="text-xs text-muted w-10 tabular-nums">{humanize}%</span>
               </div>
             </div>
 
@@ -401,44 +384,74 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
             </div>
           </Surface>
 
-          <Surface variant="raised" className="p-4 flex flex-col gap-2">
-            <div className="text-xs text-muted uppercase tracking-wide">Pitch editor</div>
+          <Surface variant="raised" className="p-4 flex flex-col gap-2 bg-[#1b2230] neu-surface-raised">
+            <div className="text-xs text-muted uppercase tracking-wide">Vocal waveform</div>
+            <div className="overflow-x-auto">
+              <div className="flex" style={{ width: layout.width + KEYBOARD_WIDTH }}>
+                <div style={{ width: KEYBOARD_WIDTH }} className="shrink-0" />
+                <div className="relative flex-1 min-w-0">
+                  <div ref={waveContainerRef} data-testid="autotune-waveform" style={{ width: layout.width }} />
+                  {showPlayhead && (
+                    <div
+                      className="pointer-events-none absolute top-0 bottom-0 w-px bg-white/70"
+                      style={{ left: layout.xForSec(playheadTime) }}
+                    />
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="text-xs text-muted uppercase tracking-wide mt-2">Pitch editor (Graph Mode)</div>
             <div className="overflow-x-auto">
               <svg
                 data-testid="autotune-editor"
-                width={layout.width + 40}
+                width={layout.width + KEYBOARD_WIDTH}
                 height={layout.height}
-                viewBox={`0 0 ${layout.width + 40} ${layout.height}`}
+                viewBox={`0 0 ${layout.width + KEYBOARD_WIDTH} ${layout.height}`}
                 onPointerMove={handleNotePointerMove}
                 onPointerUp={handleNotePointerUp}
+                className="rounded-lg"
+                style={{ background: "#161b26" }}
               >
                 {rows.map((midi) => {
                   const inScale = scalePcs ? scalePcs.includes(((midi % 12) + 12) % 12) : false;
+                  const black = isBlackKey(midi);
                   return (
                     <g key={midi}>
+                      {/* Piano keyboard column */}
                       <rect
                         x={0}
                         y={layout.yForMidi(midi)}
-                        width={layout.width + 40}
+                        width={KEYBOARD_WIDTH}
                         height={layout.rowHeight}
-                        fill={inScale ? "rgba(61,220,151,0.08)" : isBlackKey(midi) ? "rgba(255,255,255,0.04)" : "transparent"}
+                        fill={black ? "#0c0f16" : "#242b3a"}
+                        stroke="#0a0c11"
+                        strokeWidth={0.5}
                       />
                       <text
-                        x={2}
+                        x={4}
                         y={layout.yForMidi(midi) + layout.rowHeight - 2}
                         fontSize={layout.rowHeight - 3}
-                        fill="rgba(255,255,255,0.35)"
+                        fill="rgba(255,255,255,0.55)"
                       >
                         {midi % 12 === 0 ? midiToNoteName(midi) : ""}
                       </text>
+                      {/* Pitch grid row */}
+                      <rect
+                        x={KEYBOARD_WIDTH}
+                        y={layout.yForMidi(midi)}
+                        width={layout.width}
+                        height={layout.rowHeight}
+                        fill={inScale ? "rgba(61,220,151,0.10)" : black ? "rgba(255,255,255,0.03)" : "transparent"}
+                      />
                     </g>
                   );
                 })}
                 {Array.from({ length: Math.ceil(layout.durationSec) + 1 }, (_, s) => s).map((s) => (
                   <line
                     key={`ruler-${s}`}
-                    x1={40 + layout.xForSec(s)}
-                    x2={40 + layout.xForSec(s)}
+                    x1={KEYBOARD_WIDTH + layout.xForSec(s)}
+                    x2={KEYBOARD_WIDTH + layout.xForSec(s)}
                     y1={0}
                     y2={layout.height}
                     stroke="rgba(255,255,255,0.06)"
@@ -446,7 +459,7 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
                   />
                 ))}
                 {f0Paths.map((d, i) => (
-                  <path key={`f0-${i}`} d={d} fill="none" stroke="#59D9E6" strokeWidth={1} opacity={0.8} />
+                  <path key={`f0-${i}`} d={d} fill="none" stroke="#F2734F" strokeWidth={1.5} opacity={0.85} />
                 ))}
                 {notes.map((n, i) => {
                   const isDragging = dragIndex === i;
@@ -454,7 +467,7 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
                   return (
                     <g key={i}>
                       <rect
-                        x={40 + layout.xForSec(n.startSec)}
+                        x={KEYBOARD_WIDTH + layout.xForSec(n.startSec)}
                         y={layout.yForMidi(midi) + 1}
                         width={Math.max(4, layout.xForSec(n.endSec) - layout.xForSec(n.startSec))}
                         height={layout.rowHeight - 2}
@@ -470,7 +483,7 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
                       </rect>
                       {isDragging && (
                         <text
-                          x={40 + layout.xForSec(n.startSec)}
+                          x={KEYBOARD_WIDTH + layout.xForSec(n.startSec)}
                           y={layout.yForMidi(midi) - 3}
                           fontSize={10}
                           fill="#ffffff"
@@ -482,6 +495,9 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
                     </g>
                   );
                 })}
+                {showPlayhead && (
+                  <line x1={playheadX} x2={playheadX} y1={0} y2={layout.height} stroke="rgba(255,255,255,0.7)" strokeWidth={1} />
+                )}
               </svg>
             </div>
           </Surface>
@@ -520,8 +536,9 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
 
           <Surface variant="raised" className="p-4 text-sm leading-relaxed text-text">
             <div className="text-xs text-muted uppercase tracking-wide mb-2">In plain words</div>
-            Drag a note up or down onto its line to tune it. Green means it is already in tune (0 cents). Snap
-            strength sets how strongly it corrects; Full is classic autotune, lower keeps it natural.
+            Drag a note up or down onto its line to tune it. Green means it is already in tune (0 cents). Key and
+            Scale decide which notes are allowed; Retune Speed sets how hard the correction snaps, Fast is classic
+            autotune, Slow keeps it natural.
           </Surface>
         </>
       )}

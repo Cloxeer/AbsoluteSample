@@ -9,6 +9,22 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
 }));
 
+vi.mock("wavesurfer.js", () => ({
+  default: {
+    create: vi.fn(() => ({
+      on: vi.fn(),
+      destroy: vi.fn(),
+      play: vi.fn(),
+      pause: vi.fn(),
+      setTime: vi.fn(),
+      getCurrentTime: vi.fn(() => 0),
+      getDuration: vi.fn(() => 4.2),
+      setVolume: vi.fn(),
+      isPlaying: vi.fn(() => false),
+    })),
+  },
+}));
+
 const track: TrackInfo = {
   id: "t1",
   title: "Test Track",
@@ -51,39 +67,77 @@ const instruments: InstrumentStem[] = [
 
 const samples: Sample[] = [];
 
+function pickSongSource(label: RegExp | string) {
+  fireEvent.change(screen.getByRole("combobox", { name: /vocal from this song/i }), {
+    target: { value: instruments.find((s) => new RegExp(label as string, "i").test(s.label))?.path ?? label },
+  });
+}
+
 describe("AutotuneTab", () => {
-  it("shows the empty state when there are no sources", () => {
-    render(<AutotuneTab track={track} instruments={[]} samples={[]} />);
-    expect(screen.getByText(/pick a vocal stem or sample, then analyze/i)).toBeInTheDocument();
+  it("shows the empty state before analyzing", () => {
+    render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
+    expect(screen.getByText(/drop your vocal or pick one from the song, then analyze/i)).toBeInTheDocument();
   });
 
-  it("shows the empty state before analyzing even when sources exist", () => {
+  it("offers both a drop/choose-file zone and a from-song dropdown", () => {
     render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
-    expect(screen.getAllByText(/pick a vocal stem or sample, then analyze/i).length).toBeGreaterThan(0);
-  });
-
-  it("lists vocal stems and any other stem in the source picker", () => {
-    render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
-    const select = screen.getByRole("combobox", { name: /source/i });
+    expect(screen.getByTestId("autotune-dropzone")).toBeInTheDocument();
+    const select = screen.getByRole("combobox", { name: /vocal from this song/i });
     expect(select).toHaveTextContent("Vocals");
     expect(select).toHaveTextContent("Drums");
   });
 
-  it("calls backend.analyzePitch for the selected source and renders the editor", async () => {
+  it("Analyze is disabled until a source is picked", () => {
+    render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
+    expect(screen.getByRole("button", { name: /^analyze$/i })).toBeDisabled();
+  });
+
+  it("picking a stem from the song tags it 'From song' and enables Analyze", () => {
+    render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
+    fireEvent.change(screen.getByRole("combobox", { name: /vocal from this song/i }), {
+      target: { value: instruments[0].path },
+    });
+    expect(screen.getByText(/from song/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^analyze$/i })).not.toBeDisabled();
+  });
+
+  it("calls backend.analyzePitch for the selected song source and renders the editor", async () => {
     const spy = vi.spyOn(backend, "analyzePitch");
     render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
+    fireEvent.change(screen.getByRole("combobox", { name: /vocal from this song/i }), {
+      target: { value: instruments[0].path },
+    });
 
-    fireEvent.click(screen.getByRole("button", { name: /analyze/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
 
     await waitFor(() => expect(spy).toHaveBeenCalledWith({ path: instruments[0].path }));
     await waitFor(() => expect(screen.getByTestId("autotune-editor")).toBeInTheDocument());
     expect(screen.getByText(/in plain words/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /apply/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^apply$/i })).toBeInTheDocument();
+  });
+
+  it("dropping the user's own file tags it 'Your file' and analyzes it directly", async () => {
+    URL.createObjectURL = vi.fn(() => "blob:mock");
+    const spy = vi.spyOn(backend, "analyzePitch");
+    render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
+
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(["fake audio"], "my-vocal-take.wav", { type: "audio/wav" });
+    Object.defineProperty(input, "files", { value: [file] });
+    fireEvent.change(input);
+
+    expect(screen.getByText("my-vocal-take.wav")).toBeInTheDocument();
+    expect(screen.getByText(/your file/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+    await waitFor(() => expect(spy).toHaveBeenCalledWith({ path: "my-vocal-take.wav" }));
+    await waitFor(() => expect(screen.getByTestId("autotune-editor")).toBeInTheDocument());
   });
 
   it("disables Apply-derived actions (compare tuned, save, download) until Apply runs", async () => {
     render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
-    fireEvent.click(screen.getByRole("button", { name: /analyze/i }));
+    pickSongSource("Vocals");
+    fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
     await waitFor(() => expect(screen.getByTestId("autotune-editor")).toBeInTheDocument());
 
     expect(screen.getByRole("button", { name: /pause tuned|play tuned/i })).toBeDisabled();
@@ -94,10 +148,11 @@ describe("AutotuneTab", () => {
   it("applies edits and enables compare/save/download afterward", async () => {
     const applySpy = vi.spyOn(backend, "applyAutotune");
     render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
-    fireEvent.click(screen.getByRole("button", { name: /analyze/i }));
+    pickSongSource("Vocals");
+    fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
     await waitFor(() => expect(screen.getByTestId("autotune-editor")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /apply/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
 
     await waitFor(() => expect(applySpy).toHaveBeenCalled());
     const call = applySpy.mock.calls[0][0];
@@ -108,15 +163,33 @@ describe("AutotuneTab", () => {
     expect(screen.getByRole("button", { name: /^download$/i })).not.toBeDisabled();
   });
 
-  it("Tune to scale is disabled while Chromatic is selected", async () => {
+  it("Tune to scale is disabled while Chromatic is selected, and Key/Scale are prominent", async () => {
     render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
-    fireEvent.click(screen.getByRole("button", { name: /analyze/i }));
+    pickSongSource("Vocals");
+    fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
     await waitFor(() => expect(screen.getByTestId("autotune-editor")).toBeInTheDocument());
 
     expect(screen.getByRole("combobox", { name: /^scale$/i })).toHaveValue("minor");
+    expect(screen.getByRole("combobox", { name: /^key$/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /tune to scale/i })).not.toBeDisabled();
 
     fireEvent.change(screen.getByRole("combobox", { name: /^scale$/i }), { target: { value: "chromatic" } });
     expect(screen.getByRole("button", { name: /tune to scale/i })).toBeDisabled();
+  });
+
+  it("changing Retune Speed updates the edits sent to backend.applyAutotune", async () => {
+    const applySpy = vi.spyOn(backend, "applyAutotune");
+    render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
+    pickSongSource("Vocals");
+    fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+    await waitFor(() => expect(screen.getByTestId("autotune-editor")).toBeInTheDocument());
+
+    fireEvent.keyDown(screen.getByRole("slider", { name: /retune speed/i }), { key: "Home" });
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+
+    await waitFor(() => expect(applySpy).toHaveBeenCalled());
+    const call = applySpy.mock.calls[0][0];
+    expect(call.edits.snapStrength).toBeCloseTo(0.3, 2);
+    expect(call.edits.transitionMs).toBe(150);
   });
 });

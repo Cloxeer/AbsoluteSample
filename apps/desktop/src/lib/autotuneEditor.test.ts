@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyHumanize,
   buildEditableNotes,
   buildScalePitchClasses,
   computeAutotuneLayout,
@@ -7,6 +8,7 @@ import {
   midiToNoteName,
   nearestScaleMidi,
   resetEditableNotes,
+  retuneSpeedToParams,
   setNoteTarget,
   snapYToMidi,
   toAutotuneNoteEdits,
@@ -92,6 +94,50 @@ describe("buildScalePitchClasses", () => {
   it("transposes minor scale steps by the tonic pitch class", () => {
     const scale = buildScalePitchClasses("minor", 9); // A natural minor -> same pitch classes as C major
     expect(scale).toEqual([0, 2, 4, 5, 7, 9, 11]);
+  });
+
+  it("supports dorian and mixolydian modes", () => {
+    expect(buildScalePitchClasses("dorian", 0)).toEqual([0, 2, 3, 5, 7, 9, 10]);
+    expect(buildScalePitchClasses("mixolydian", 0)).toEqual([0, 2, 4, 5, 7, 9, 10]);
+  });
+});
+
+describe("retuneSpeedToParams", () => {
+  it("maps Fast (100) to hard, near-instant correction", () => {
+    const p = retuneSpeedToParams(100);
+    expect(p.snapStrength).toBeCloseTo(1.0, 3);
+    expect(p.transitionMs).toBe(0);
+  });
+
+  it("maps Slow (0) to a lower strength and a longer transition", () => {
+    const p = retuneSpeedToParams(0);
+    expect(p.snapStrength).toBeCloseTo(0.3, 3);
+    expect(p.transitionMs).toBe(150);
+  });
+
+  it("is monotonic between Slow and Fast", () => {
+    const slow = retuneSpeedToParams(20);
+    const mid = retuneSpeedToParams(50);
+    const fast = retuneSpeedToParams(80);
+    expect(slow.snapStrength).toBeLessThan(mid.snapStrength);
+    expect(mid.snapStrength).toBeLessThan(fast.snapStrength);
+    expect(slow.transitionMs).toBeGreaterThan(mid.transitionMs);
+    expect(mid.transitionMs).toBeGreaterThan(fast.transitionMs);
+  });
+
+  it("clamps out-of-range input", () => {
+    expect(retuneSpeedToParams(-50)).toEqual(retuneSpeedToParams(0));
+    expect(retuneSpeedToParams(500)).toEqual(retuneSpeedToParams(100));
+  });
+});
+
+describe("applyHumanize", () => {
+  it("leaves the transition unchanged at 0", () => {
+    expect(applyHumanize(40, 0)).toBe(40);
+  });
+
+  it("adds smoothing proportional to the humanize amount", () => {
+    expect(applyHumanize(40, 100)).toBe(80);
   });
 });
 

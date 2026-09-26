@@ -121,10 +121,14 @@ export function tuningBucket(cents: number): TuningBucket {
 }
 
 /** Scale name understood by buildScalePitchClasses. */
-export type ScaleName = "chromatic" | "major" | "minor";
+export type ScaleName = "chromatic" | "major" | "minor" | "dorian" | "mixolydian";
 
-const MAJOR_STEPS = [0, 2, 4, 5, 7, 9, 11];
-const MINOR_STEPS = [0, 2, 3, 5, 7, 8, 10]; // natural minor
+const SCALE_STEPS: Record<Exclude<ScaleName, "chromatic">, number[]> = {
+  major: [0, 2, 4, 5, 7, 9, 11],
+  minor: [0, 2, 3, 5, 7, 8, 10], // natural minor
+  dorian: [0, 2, 3, 5, 7, 9, 10],
+  mixolydian: [0, 2, 4, 5, 7, 9, 10],
+};
 
 /**
  * Builds the pitch-class set (0..11) for a scale name + tonic pitch class, or null for "Chromatic"
@@ -132,9 +136,39 @@ const MINOR_STEPS = [0, 2, 3, 5, 7, 8, 10]; // natural minor
  */
 export function buildScalePitchClasses(scale: ScaleName, tonicPc: number): number[] | null {
   if (scale === "chromatic") return null;
-  const steps = scale === "major" ? MAJOR_STEPS : MINOR_STEPS;
+  const steps = SCALE_STEPS[scale];
   const pc = ((tonicPc % 12) + 12) % 12;
   return steps.map((s) => (s + pc) % 12).sort((a, b) => a - b);
+}
+
+/** Retune Speed (0 = Slow/natural, 100 = Fast/hard) mapped to the engine's snapStrength (0..1) and transitionMs. */
+export interface RetuneParams {
+  snapStrength: number;
+  transitionMs: number;
+}
+
+const RETUNE_MIN_STRENGTH = 0.3;
+const RETUNE_MAX_STRENGTH = 1.0;
+const RETUNE_MAX_TRANSITION_MS = 150;
+
+/**
+ * Maps a single "Retune Speed" 0..100 control (Auto-Tune's headline knob) to the underlying
+ * snapStrength/transitionMs: Fast (100) is the classic hard-autotune sound (strength 1.0, ~0ms
+ * transition); Slow (0) keeps a natural, more human transition between notes.
+ */
+export function retuneSpeedToParams(speed: number): RetuneParams {
+  const clamped = Math.max(0, Math.min(100, speed));
+  const t = clamped / 100;
+  return {
+    snapStrength: Number((RETUNE_MIN_STRENGTH + t * (RETUNE_MAX_STRENGTH - RETUNE_MIN_STRENGTH)).toFixed(3)),
+    transitionMs: Math.round(RETUNE_MAX_TRANSITION_MS * (1 - t)),
+  };
+}
+
+/** Humanize 0..100 adds a little extra smoothing on top of the Retune Speed's transition, for subtler wobble. */
+export function applyHumanize(transitionMs: number, humanize: number): number {
+  const clamped = Math.max(0, Math.min(100, humanize));
+  return Math.round(transitionMs + clamped * 0.4);
 }
 
 /** The nearest MIDI pitch to `midi` whose pitch class is in `scalePcs` (ties broken toward the lower pitch). */
