@@ -90,6 +90,22 @@ The old crossover splitter is still available as "Quick EQ bands".
 - Notes tab: MIDI extraction with Basic Pitch, key and camelot, chords in time, a piano roll, plain-words theory, MIDI export.
 - Storage chip with Clear scans and Empty trash; GPU busy chip; Low priority toggle for splits.
 
+
+## Safety and performance
+
+The engine runs one Python job at a time (a global gate), and the Autotune live preview is single-flight, so heavy renders can never stack and exhaust RAM. The Autotune preview renders only the edited region using cached pitch, so an edit re-renders in about 2 seconds using around 60 MB instead of 40 seconds and 1.6 GB. A full Apply renders the whole file.
+
+Every engine run records its time and peak memory to `~/.absolutesample/perf.log`, and the app shows the last run's time and peak MB.
+
+Automatic checks guard against shipping anything that could hang or exhaust the machine:
+
+```bash
+node scripts/smoke.mjs        # frontend tests, Rust tests, and a memory-guarded engine run
+bash scripts/install-hooks.sh # install a git pre-push hook that runs the above and blocks bad pushes
+```
+
+The engine smoke kills the run and fails if it exceeds 3 GB or 120 seconds. Neural inference (CREPE, Demucs, WORLD) takes seconds and cannot be real-time; the interface stays responsive because heavy work is gated and off the UI.
+
 ## Songs, scans and samples
 
 - Every fetched song is a scan. The three most recent scans stay so you can flip between them (Songs panel, B); older unkept scans are deleted when you fetch a new link. Press Keep to hold a song, or delete it yourself.
