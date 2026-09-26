@@ -17,7 +17,9 @@ import {
   buildScalePitchClasses,
   computeAutotuneLayout,
   isBlackKey,
+  KEYBOARD_WIDTH,
   midiToNoteName,
+  playheadX,
   resetEditableNotes,
   retuneSpeedToParams,
   setNoteTarget,
@@ -38,7 +40,8 @@ export interface AutotuneTabProps {
 
 const TONICS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const TONIC_PC: Record<string, number> = TONICS.reduce((acc, name, i) => ({ ...acc, [name]: i }), {});
-const KEYBOARD_WIDTH = 44;
+/** How long to wait after the last edit before rendering a fresh tuned preview in the background. */
+const PREVIEW_DEBOUNCE_MS = 350;
 
 function tuningColor(cents: number): string {
   switch (tuningBucket(cents)) {
@@ -75,9 +78,17 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
 
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragMidi, setDragMidi] = useState<number | null>(null);
+  /** True once notes were snapped by "Tune to scale" and haven't been manually dragged since, so a
+   * later Key/Scale change should re-snap them rather than leaving stale targets behind. */
+  const [followingScale, setFollowingScale] = useState(false);
 
   const [applying, setApplying] = useState(false);
   const [tuned, setTuned] = useState<AutotuneResult | null>(null);
+  /** Background-rendered preview of the current edits, refreshed on a debounce; this is what "Tuned"
+   * plays before Apply is pressed. Apply promotes its latest value into `tuned`. */
+  const [preview, setPreview] = useState<AutotuneResult | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const previewRequestRef = useRef(0);
   const [comparing, setComparing] = useState<"original" | "tuned">("original");
 
   const [playerState, setPlayerState] = useState<SamplePlayerState>(() => samplePlayer.getState());
@@ -114,6 +125,8 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
     setElapsedSec(0);
     setLoading(true);
     setTuned(null);
+    setPreview(null);
+    setFollowingScale(false);
     try {
       const result = await backend.analyzePitch({ path: source.path });
       setPitch(result);
@@ -152,12 +165,14 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
     const url = source?.kind === "own" && source.fileUrl ? source.fileUrl : mediaUrl(analyzedPath);
     const ws = WaveSurfer.create({
       container: waveContainerRef.current,
+      // No built-in wavesurfer cursor or progress tint: the single overlay playhead below (shared with
+      // the pitch grid via KEYBOARD_WIDTH/xForSec) is the only playhead drawn, so it never doubles up.
       waveColor: "#E8935D",
-      progressColor: "#F2B33D",
+      progressColor: "#E8935D",
       cursorColor: "transparent",
       height: 64,
       normalize: true,
-      cursorWidth: 1,
+      cursorWidth: 0,
       url,
       ...peaksOptions(source?.kind === "song" ? source.peaks : undefined, source?.kind === "song" ? source.durationSec : undefined),
     });
@@ -169,9 +184,23 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [analyzedPath, pitch]);
 
-  const handleReset = () => setNotes((prev) => resetEditableNotes(prev));
+  const handleReset = () => {
+    setNotes((prev) => resetEditableNotes(prev));
+    setFollowingScale(false);
+  };
 
-  const handleTuneToScale = () => setNotes((prev) => tuneNotesToScale(prev, scalePcs));
+  const handleTuneToScale = () => {
+    setNotes((prev) => tuneNotesToScale(prev, scalePcs));
+    setFollowingScale(true);
+  };
+
+  // Key/Scale changes re-snap targets that are still following the scale (i.e. weren't hand-dragged
+  // since the last "Tune to scale"), so the correction stays consistent with whatever is now selected.
+  useEffect(() => {
+    if (!followingScale) return;
+    setNotes((prev) => tuneNotesToScale(prev, scalePcs));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scalePcs]);
 
   const handleNotePointerDown = (index: number) => (e: React.PointerEvent<SVGRectElement>) => {
     e.stopPropagation();
@@ -186,6 +215,7 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
     const y = e.clientY - rect.top;
     const midi = snapYToMidi(y, layout);
     setDragMidi(midi);
+    setFollowingScale(false);
     setNotes((prev) => setNoteTarget(prev, dragIndex, midi));
   };
 
@@ -207,17 +237,45 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
     [retuneParams, scalePcs, transitionMs, notes]
   );
 
+  // Live tuned preview: whenever the edits change (a dragged note, Tune to scale, Key, Scale, Retune
+  // Speed, or Humanize), debounce a background applyAutotune render so Compare's "Tuned" option always
+  // has fresh audio to play, even before Apply is pressed. A monotonic request id discards any response
+  // that arrives after a newer edit superseded it.
+  useEffect(() => {
+    if (!analyzedPath || notes.length === 0) return;
+    const requestId = ++previewRequestRef.current;
+    setPreviewLoading(true);
+    const timer = window.setTimeout(() => {
+      backend
+        .applyAutotune({ path: analyzedPath, edits })
+        .then((result) => {
+          if (previewRequestRef.current !== requestId) return; // a newer edit superseded this render
+          setPreview(result);
+        })
+        .finally(() => {
+          if (previewRequestRef.current === requestId) setPreviewLoading(false);
+        });
+    }, PREVIEW_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [edits, analyzedPath]);
+
   const handleApply = async () => {
     if (!analyzedPath) return;
     setApplying(true);
     try {
       const result = await backend.applyAutotune({ path: analyzedPath, edits });
       setTuned(result);
+      setPreview(result);
       setComparing("tuned");
     } finally {
       setApplying(false);
     }
   };
+
+  /** The tuned audio Compare's "Tuned" plays: the finalized Apply result once it exists, otherwise the
+   * latest live preview render. */
+  const tunedResult = tuned ?? preview;
 
   /** URL for the currently loaded source (before or after Apply); same resolution used by the waveform and Compare's Original. */
   const sourceUrl = analyzedPath
@@ -273,13 +331,13 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
   };
 
   const handlePlayTuned = () => {
-    if (!tuned) return;
+    if (!tunedResult) return;
     setComparing("tuned");
     if (samplePlayer.isPlaying("autotune-tuned")) {
       samplePlayer.stop();
       return;
     }
-    samplePlayer.playPath("autotune-tuned", mediaUrl(tuned.path), { kind: "sample", label: "Autotune tuned" });
+    samplePlayer.playPath("autotune-tuned", mediaUrl(tunedResult.path), { kind: "sample", label: "Autotune tuned" });
   };
 
   const handleSaveAsSample = async () => {
@@ -310,11 +368,12 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
 
   const isPlayingOriginal = playerState.id === "autotune-original";
   const isPlayingTuned = playerState.id === "autotune-tuned";
-  // One playhead sweeps the waveform and the pitch grid together, driven by whichever of the three
-  // players (source / original / tuned) is currently active; otherwise it sits at the seek position.
+  // One playhead sweeps the waveform lane and the pitch grid together, driven from a single time
+  // source (samplePlayer's currentTime while any of the three players is active, else the last seek
+  // position) and mapped through the shared playheadX/xForSec helper, so both lanes always agree.
   const isAnyAutotunePlaying = isPlayingSource || isPlayingOriginal || isPlayingTuned;
   const playheadTime = isAnyAutotunePlaying ? playerState.currentTime : seekSec;
-  const playheadX = KEYBOARD_WIDTH + layout.xForSec(playheadTime);
+  const playheadPx = playheadX(layout, playheadTime, KEYBOARD_WIDTH);
   const showPlayhead = pitch !== null;
 
   return (
@@ -436,40 +495,48 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
                 disabled={!sourceUrl}
               />
               <span className="text-xs text-muted uppercase tracking-wide">Vocal waveform</span>
+              {previewLoading && (
+                <span className="text-[10px] text-muted uppercase tracking-wide animate-pulse">
+                  Updating preview...
+                </span>
+              )}
             </div>
+            {/* Waveform lane and pitch grid scroll together in one container, both starting at
+                KEYBOARD_WIDTH and sized to layout.width, with a single playhead overlay spanning both
+                so exactly one bar is ever drawn and it always lines up between the two lanes. */}
             <div className="overflow-x-auto">
-              <div className="flex" style={{ width: layout.width + KEYBOARD_WIDTH }}>
-                <div style={{ width: KEYBOARD_WIDTH }} className="shrink-0" />
-                <div className="relative flex-1 min-w-0">
+              <div className="relative" style={{ width: layout.width + KEYBOARD_WIDTH }}>
+                <div className="flex">
+                  <div style={{ width: KEYBOARD_WIDTH }} className="shrink-0" />
                   <div
                     ref={waveContainerRef}
                     data-testid="autotune-waveform"
                     style={{ width: layout.width, cursor: "pointer" }}
                     onClick={handleWaveformClick}
                   />
-                  {showPlayhead && (
-                    <div
-                      className="pointer-events-none absolute top-0 bottom-0 w-px bg-white/70"
-                      style={{ left: layout.xForSec(playheadTime) }}
-                    />
-                  )}
                 </div>
-              </div>
-            </div>
 
-            <div className="text-xs text-muted uppercase tracking-wide mt-2">Pitch editor (Graph Mode)</div>
-            <div className="overflow-x-auto">
-              <svg
-                data-testid="autotune-editor"
-                width={layout.width + KEYBOARD_WIDTH}
-                height={layout.height}
-                viewBox={`0 0 ${layout.width + KEYBOARD_WIDTH} ${layout.height}`}
-                onPointerMove={handleNotePointerMove}
-                onPointerUp={handleNotePointerUp}
-                onClick={handleGridClick}
-                className="rounded-lg"
-                style={{ background: "#161b26", cursor: "pointer" }}
-              >
+                <div className="text-xs text-muted uppercase tracking-wide mt-2 mb-1">Pitch editor (Graph Mode)</div>
+
+                {showPlayhead && (
+                  <div
+                    data-testid="autotune-playhead"
+                    className="pointer-events-none absolute top-0 bottom-0 w-px bg-white/70 z-10"
+                    style={{ left: playheadPx }}
+                  />
+                )}
+
+                <svg
+                  data-testid="autotune-editor"
+                  width={layout.width + KEYBOARD_WIDTH}
+                  height={layout.height}
+                  viewBox={`0 0 ${layout.width + KEYBOARD_WIDTH} ${layout.height}`}
+                  onPointerMove={handleNotePointerMove}
+                  onPointerUp={handleNotePointerUp}
+                  onClick={handleGridClick}
+                  className="rounded-lg"
+                  style={{ background: "#161b26", cursor: "pointer" }}
+                >
                 {rows.map((midi) => {
                   const inScale = scalePcs ? scalePcs.includes(((midi % 12) + 12) % 12) : false;
                   const black = isBlackKey(midi);
@@ -521,41 +588,53 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
                 {notes.map((n, i) => {
                   const isDragging = dragIndex === i;
                   const midi = isDragging && dragMidi !== null ? dragMidi : n.targetMidi;
+                  const originalMidi = Math.round(n.midi);
+                  const corrected = midi !== originalMidi;
+                  const x = KEYBOARD_WIDTH + layout.xForSec(n.startSec);
+                  const width = Math.max(4, layout.xForSec(n.endSec) - layout.xForSec(n.startSec));
                   return (
                     <g key={i}>
+                      {/* Faint outline at the originally-detected pitch when a correction moved the
+                          block, so original vs corrected is visible even while not dragging. */}
+                      {corrected && !isDragging && (
+                        <rect
+                          x={x}
+                          y={layout.yForMidi(originalMidi) + 1}
+                          width={width}
+                          height={layout.rowHeight - 2}
+                          rx={3}
+                          fill="none"
+                          stroke="rgba(255,255,255,0.35)"
+                          strokeDasharray="2,2"
+                          strokeWidth={1}
+                        />
+                      )}
                       <rect
-                        x={KEYBOARD_WIDTH + layout.xForSec(n.startSec)}
+                        x={x}
                         y={layout.yForMidi(midi) + 1}
-                        width={Math.max(4, layout.xForSec(n.endSec) - layout.xForSec(n.startSec))}
+                        width={width}
                         height={layout.rowHeight - 2}
                         rx={3}
                         fill={tuningColor(n.cents)}
                         opacity={isDragging ? 0.9 : 0.75}
-                        stroke={isDragging ? "#ffffff" : "none"}
-                        strokeWidth={isDragging ? 1 : 0}
+                        stroke={isDragging || corrected ? "#ffffff" : "none"}
+                        strokeWidth={isDragging ? 1 : corrected ? 0.75 : 0}
                         className="cursor-grab"
                         onPointerDown={handleNotePointerDown(i)}
                       >
                         <title>{`${midiToNoteName(Math.round(n.midi))} (${n.cents > 0 ? "+" : ""}${n.cents} cents) -> ${midiToNoteName(midi)}`}</title>
                       </rect>
-                      {isDragging && (
-                        <text
-                          x={KEYBOARD_WIDTH + layout.xForSec(n.startSec)}
-                          y={layout.yForMidi(midi) - 3}
-                          fontSize={10}
-                          fill="#ffffff"
-                        >
-                          {midiToNoteName(midi)} ({midi - Math.round(n.midi) >= 0 ? "+" : ""}
-                          {midi - Math.round(n.midi)} st)
+                      {(isDragging || corrected) && (
+                        <text x={x} y={layout.yForMidi(midi) - 3} fontSize={10} fill="#ffffff">
+                          {midiToNoteName(midi)} ({midi - originalMidi >= 0 ? "+" : ""}
+                          {midi - originalMidi} st)
                         </text>
                       )}
                     </g>
                   );
                 })}
-                {showPlayhead && (
-                  <line x1={playheadX} x2={playheadX} y1={0} y2={layout.height} stroke="rgba(255,255,255,0.7)" strokeWidth={1} />
-                )}
               </svg>
+              </div>
             </div>
           </Surface>
 
@@ -574,9 +653,12 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
               onToggle={handlePlayTuned}
               label="tuned"
               tone="accent"
-              disabled={!tuned}
+              disabled={!tunedResult}
             />
-            <span className="text-xs text-muted">Tuned{comparing === "tuned" ? " (selected)" : ""}</span>
+            <span className="text-xs text-muted">
+              Tuned{comparing === "tuned" ? " (selected)" : ""}
+              {previewLoading && <span className="ml-1 animate-pulse">Updating preview...</span>}
+            </span>
 
             <div className="flex items-center gap-2 ml-auto">
               <Button variant="primary" onClick={handleApply} busy={applying} disabled={!analyzedPath || applying}>

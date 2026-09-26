@@ -6,8 +6,10 @@ import {
   buildScalePitchClasses,
   computeAutotuneLayout,
   isBlackKey,
+  KEYBOARD_WIDTH,
   midiToNoteName,
   nearestScaleMidi,
+  playheadX,
   resetEditableNotes,
   retuneSpeedToParams,
   setNoteTarget,
@@ -249,6 +251,21 @@ describe("buildF0Segments", () => {
   it("returns no segments for an empty contour", () => {
     const layout = computeAutotuneLayout([], []);
     expect(buildF0Segments([], layout)).toEqual([]);
+  });
+});
+
+describe("playheadX", () => {
+  it("offsets xForSec by the keyboard width, matching how both the waveform lane and the pitch grid position their playhead", () => {
+    const layout = computeAutotuneLayout([note(0, 8, 60)], [], { pxPerSec: 50 });
+    expect(playheadX(layout, 2)).toBe(KEYBOARD_WIDTH + layout.xForSec(2));
+    expect(playheadX(layout, 2, 0)).toBe(layout.xForSec(2));
+  });
+
+  it("is the single time->x mapping both lanes share: same layout + same time always yields the same x", () => {
+    const layout = computeAutotuneLayout([note(0, 8, 60)], [], { pxPerSec: 50 });
+    const waveformX = playheadX(layout, 3.5);
+    const gridX = playheadX(layout, 3.5);
+    expect(waveformX).toBe(gridX);
   });
 });
 

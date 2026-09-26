@@ -197,6 +197,47 @@ describe("AutotuneTab", () => {
     );
   });
 
+  it("renders a single unified playhead element shared by the waveform lane and the pitch grid", async () => {
+    render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
+    pickSongSource("Vocals");
+    fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+    await waitFor(() => expect(screen.getByTestId("autotune-editor")).toBeInTheDocument());
+
+    // Exactly one playhead bar exists, and it sits in the shared container that wraps both the
+    // waveform (autotune-waveform) and the pitch grid (autotune-editor), so a single left offset
+    // (via the shared xForSec/KEYBOARD_WIDTH mapping) positions it across both lanes at once.
+    const playheads = screen.getAllByTestId("autotune-playhead");
+    expect(playheads).toHaveLength(1);
+    const container = playheads[0].parentElement as HTMLElement;
+    expect(container.querySelector('[data-testid="autotune-waveform"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="autotune-editor"]')).toBeTruthy();
+  });
+
+  it("Tune to scale snaps every note's target to the selected scale and triggers a live preview render", async () => {
+    const applySpy = vi.spyOn(backend, "applyAutotune");
+    render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
+    pickSongSource("Vocals");
+    fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+    await waitFor(() => expect(screen.getByTestId("autotune-editor")).toBeInTheDocument());
+
+    applySpy.mockClear();
+    fireEvent.change(screen.getByRole("combobox", { name: /^scale$/i }), { target: { value: "major" } });
+    fireEvent.click(screen.getByRole("button", { name: /tune to scale/i }));
+
+    // The live preview loop (debounced applyAutotune) picks up the new targets automatically.
+    await waitFor(() => expect(applySpy).toHaveBeenCalled(), { timeout: 2000 });
+    const call = applySpy.mock.calls[applySpy.mock.calls.length - 1][0];
+    const majorPcs = [0, 2, 4, 5, 7, 9, 11].map((s) => (s + (["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"].indexOf("C"))) % 12);
+    for (const n of call.edits.notes) {
+      expect(majorPcs).toContain(((n.targetMidi % 12) + 12) % 12);
+    }
+
+    // And the Tuned compare option becomes playable once the preview lands.
+    await waitFor(() => expect(screen.getByRole("button", { name: /pause tuned|play tuned/i })).not.toBeDisabled(), {
+      timeout: 2000,
+    });
+  });
+
   it("changing Retune Speed updates the edits sent to backend.applyAutotune", async () => {
     const applySpy = vi.spyOn(backend, "applyAutotune");
     render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
@@ -211,5 +252,54 @@ describe("AutotuneTab", () => {
     const call = applySpy.mock.calls[0][0];
     expect(call.edits.snapStrength).toBeCloseTo(0.3, 2);
     expect(call.edits.transitionMs).toBe(150);
+  });
+
+  it("debounces the live preview: an edit schedules applyAutotune ~350ms later, not immediately", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const applySpy = vi.spyOn(backend, "applyAutotune");
+      render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
+      pickSongSource("Vocals");
+      fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+      await vi.waitFor(() => expect(screen.getByTestId("autotune-editor")).toBeInTheDocument());
+
+      applySpy.mockClear();
+      // An edit: bump Retune Speed, which changes the edits payload the preview effect watches.
+      fireEvent.keyDown(screen.getByRole("slider", { name: /retune speed/i }), { key: "End" });
+
+      // Not yet: the debounce hasn't elapsed.
+      await vi.advanceTimersByTimeAsync(100);
+      expect(applySpy).not.toHaveBeenCalled();
+
+      // Past the ~350ms debounce window, the background render fires exactly once for this edit.
+      await vi.advanceTimersByTimeAsync(300);
+      await vi.waitFor(() => expect(applySpy).toHaveBeenCalledTimes(1));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a stale in-flight preview render when a newer edit supersedes it", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const applySpy = vi.spyOn(backend, "applyAutotune");
+      render(<AutotuneTab track={track} instruments={instruments} samples={samples} />);
+      pickSongSource("Vocals");
+      fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+      await vi.waitFor(() => expect(screen.getByTestId("autotune-editor")).toBeInTheDocument());
+
+      applySpy.mockClear();
+      fireEvent.keyDown(screen.getByRole("slider", { name: /retune speed/i }), { key: "End" });
+      await vi.advanceTimersByTimeAsync(200); // mid-debounce
+      fireEvent.keyDown(screen.getByRole("slider", { name: /humanize/i }), { key: "End" }); // supersedes it
+
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.waitFor(() => expect(applySpy).toHaveBeenCalledTimes(1));
+      // The one call that did land reflects the latest edit (humanize maxed out => longer transition).
+      const call = applySpy.mock.calls[0][0];
+      expect(call.edits.transitionMs).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

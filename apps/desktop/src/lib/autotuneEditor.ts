@@ -25,6 +25,18 @@ export interface AutotuneLayout {
   secForX(x: number): number;
 }
 
+/** Width (px) of the piano-keyboard column to the left of the pitch grid; the waveform lane above it
+ * is padded by the same amount so both lanes share one x-axis and one playhead. */
+export const KEYBOARD_WIDTH = 44;
+
+/**
+ * The single source of truth for the playhead's x-position, shared by the waveform lane and the
+ * pitch grid so exactly one playhead bar is ever drawn, and it always lines up across both lanes.
+ */
+export function playheadX(layout: AutotuneLayout, sec: number, keyboardWidth: number = KEYBOARD_WIDTH): number {
+  return keyboardWidth + layout.xForSec(sec);
+}
+
 const MIN_SEMITONE_SPAN = 24; // 2 octaves
 const PAD_SEMITONES = 2;
 const DEFAULT_ROW_HEIGHT = 10;
