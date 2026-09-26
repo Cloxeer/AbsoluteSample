@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
@@ -41,7 +41,7 @@ export interface AutotuneTabProps {
 const TONICS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const TONIC_PC: Record<string, number> = TONICS.reduce((acc, name, i) => ({ ...acc, [name]: i }), {});
 /** How long to wait after the last edit before rendering a fresh tuned preview in the background. */
-const PREVIEW_DEBOUNCE_MS = 350;
+const PREVIEW_DEBOUNCE_MS = 500;
 
 function tuningColor(cents: number): string {
   switch (tuningBucket(cents)) {
@@ -88,7 +88,10 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
    * plays before Apply is pressed. Apply promotes its latest value into `tuned`. */
   const [preview, setPreview] = useState<AutotuneResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
-  const previewRequestRef = useRef(0);
+  // Single-flight preview: at most ONE render runs at a time. New edits during a render
+  // coalesce into a single pending run instead of spawning concurrent heavy processes.
+  const previewInFlight = useRef(false);
+  const previewPending = useRef<AutotuneEdits | null>(null);
   const [comparing, setComparing] = useState<"original" | "tuned">("original");
 
   const [playerState, setPlayerState] = useState<SamplePlayerState>(() => samplePlayer.getState());
@@ -241,21 +244,34 @@ export function AutotuneTab({ track: _track, instruments, samples = [] }: Autotu
   // Speed, or Humanize), debounce a background applyAutotune render so Compare's "Tuned" option always
   // has fresh audio to play, even before Apply is pressed. A monotonic request id discards any response
   // that arrives after a newer edit superseded it.
+  const runPreview = useCallback(
+    async (nextEdits: AutotuneEdits) => {
+      if (!analyzedPath) return;
+      if (previewInFlight.current) {
+        previewPending.current = nextEdits; // coalesce; run once the current render finishes
+        return;
+      }
+      previewInFlight.current = true;
+      setPreviewLoading(true);
+      try {
+        const result = await backend.applyAutotune({ path: analyzedPath, edits: nextEdits });
+        setPreview(result);
+      } catch {
+        // engine busy or a render error: keep the last good preview rather than piling on
+      } finally {
+        previewInFlight.current = false;
+        setPreviewLoading(false);
+        const pending = previewPending.current;
+        previewPending.current = null;
+        if (pending) void runPreview(pending);
+      }
+    },
+    [analyzedPath],
+  );
+
   useEffect(() => {
     if (!analyzedPath || notes.length === 0) return;
-    const requestId = ++previewRequestRef.current;
-    setPreviewLoading(true);
-    const timer = window.setTimeout(() => {
-      backend
-        .applyAutotune({ path: analyzedPath, edits })
-        .then((result) => {
-          if (previewRequestRef.current !== requestId) return; // a newer edit superseded this render
-          setPreview(result);
-        })
-        .finally(() => {
-          if (previewRequestRef.current === requestId) setPreviewLoading(false);
-        });
-    }, PREVIEW_DEBOUNCE_MS);
+    const timer = window.setTimeout(() => void runPreview(edits), PREVIEW_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [edits, analyzedPath]);

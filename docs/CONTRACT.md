@@ -362,3 +362,32 @@ UI new tab "Autotune": source picker (stems/samples/imported vocal). Analyze →
 
 ## UI placement
 Tabs order: Stem Slicer, Notes, Frequencies, Autotune. All four are always present; each shows an empty-state prompt when there is nothing to work on.
+
+---
+
+# v8 addendum: safety, performance metrics, real-time-feel, smoke tests
+
+## Why: a stacked autotune preview drove RAM to 99% and forced a restart.
+Measured single runs: analyze_pitch 23s/1.07GB, apply_autotune (full song) 40s/1.62GB. Concurrent renders stacked to exhaust RAM.
+
+## Hard safety rules
+1. Global engine gate (Rust): a process-wide lock acquired by EVERY Python-spawning command (separate_instruments, separate_karaoke, analyze_pitch, apply_autotune, analyze_frequencies, extract_notes). At most ONE Python engine process runs at a time. If the gate is taken, the command returns Err("engine busy: <label>") immediately WITHOUT spawning. `engine_status.busy`/`busyLabel` reflect it. Guard clears on all exit paths (Drop).
+2. Frontend single-flight preview (done): at most one applyAutotune in flight; edits during a render coalesce to one pending run. Never concurrent.
+3. Python memory hygiene: `torch.set_num_threads(<=4)`, `torch.cuda.empty_cache()` after inference, free large arrays; process exits after each job so memory is reclaimed.
+
+## Region preview (real-time feel)
+`apply_autotune` accepts optional `regionStartSec`,`regionEndSec` and `pitchCachePath`:
+- With a region, render ONLY that slice (load just those samples) and return a wav of the region. Bounds memory to well under 300MB and time to ~1-3s.
+- With `pitchCachePath` (the cached `<stem>.pitch.json`), skip CREPE and reuse the stored f0/notes, so a preview is WORLD-synthesis-only (fast).
+Frontend live preview renders only the edited note's region (start-0.3s .. end+0.3s) using the cached pitch, so edits feel near-instant; full "Apply" still renders the whole file.
+Honest note: neural inference cannot be <10ms; UI interactions (drag, draw, tab switch) must stay <16ms/frame, and heavy work stays single-flight and off the UI thread.
+
+## Performance metrics
+Every engine script emits a final line `{"event":"metrics","seconds":<f>,"peakRssMb":<f>,"device":"cuda|cpu"}` (psutil peak working set). Rust parses it, appends a row to `~/.absolutesample/perf.log` (jsonl: ts, op, trackId, seconds, peakRssMb), and includes `{seconds,peakRssMb}` in the command result. A `perf_log()` command returns the last N rows. The UI shows the last op's time and peak MB in the relevant tab, and a small "Performance" readout (last analyze/apply/split time + peak MB). UI-side: a lightweight FPS/interaction timer in dev that warns if a frame exceeds 50ms.
+
+## Automatic smoke tests + push guard
+`scripts/smoke.mjs` (node) runs, in order, and exits non-zero on any failure:
+1. `pnpm -C apps/desktop test` (frontend vitest)
+2. `cargo test --release --no-default-features --lib` in src-tauri (via the GNU toolchain env)
+3. A bounded engine smoke: analyze_pitch on a generated 3s tone with a MEMORY WATCHDOG that samples child RSS every 100ms and KILLS + FAILS if peak > 3.0 GB or wall time > 120s.
+A committed `scripts/install-hooks.sh` installs a git `pre-push` hook that runs `node scripts/smoke.mjs` and blocks the push on failure. Document in README. The hook is installed locally so this machine is protected immediately.
