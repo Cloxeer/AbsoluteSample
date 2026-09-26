@@ -8,7 +8,15 @@ import { groupInstruments } from "@/lib/instruments";
 import { camelotFor, explainKey } from "@/lib/notesTheory";
 import { computePianoRollLayout, isBlackKey } from "@/lib/pianoRoll";
 import { notePlayer, type NotePlayerState } from "@/lib/notePlayer";
+import { samplePlayer, type SamplePlayerState } from "@/lib/samplePlayer";
 import type { InstrumentStem, LoopAnalysis, LoopInfo, NoteEvent, NotesResult, Sample, TrackInfo } from "@/lib/types";
+
+/** Stem/sample keys that are drum sounds: their audio has no meaningful pitch, so Notes renders a step sequencer instead of a piano roll. */
+const DRUM_KEYS = new Set(["drums", "kick", "snare", "toms", "hihat", "ride", "crash"]);
+
+function isDrumSource(key: string, group: string): boolean {
+  return group === "drums" || DRUM_KEYS.has(key);
+}
 
 export interface NotesTabProps {
   track: TrackInfo | null;
@@ -23,21 +31,42 @@ interface SourceOption {
   key: string;
   label: string;
   path: string;
+  /** UI grouping ("Instrument stems" / "Saved samples"), distinct from the InstrumentGroup/drum-kind check below. */
   group: string;
+  isDrum: boolean;
 }
 
 function buildSourceOptions(instruments: InstrumentStem[] | null | undefined, samples: Sample[]): SourceOption[] {
   const options: SourceOption[] = [];
   if (instruments && instruments.length > 0) {
     for (const node of groupInstruments(instruments)) {
-      options.push({ key: node.stem.key, label: node.stem.displayLabel ?? node.stem.label, path: node.stem.path, group: "Instrument stems" });
+      options.push({
+        key: node.stem.key,
+        label: node.stem.displayLabel ?? node.stem.label,
+        path: node.stem.path,
+        group: "Instrument stems",
+        isDrum: isDrumSource(node.stem.key, node.stem.group),
+      });
       for (const child of node.children) {
-        options.push({ key: child.key, label: `${node.stem.displayLabel ?? node.stem.label}  /  ${child.label}`, path: child.path, group: "Instrument stems" });
+        options.push({
+          key: child.key,
+          label: `${node.stem.displayLabel ?? node.stem.label}  /  ${child.label}`,
+          path: child.path,
+          group: "Instrument stems",
+          isDrum: isDrumSource(child.key, child.group),
+        });
       }
     }
   }
   for (const sample of samples) {
-    options.push({ key: sample.id, label: sample.name, path: sample.path, group: "Saved samples" });
+    // Saved samples always carry their own real, absolute path: that's what must reach extractNotes.
+    options.push({
+      key: sample.id,
+      label: sample.name,
+      path: sample.path,
+      group: "Saved samples",
+      isDrum: isDrumSource(sample.stemKey, sample.group),
+    });
   }
   return options;
 }
@@ -88,6 +117,7 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
   /** Set by clicking the piano roll background; consumed (and cleared) by the next Play press. */
   const [pendingStart, setPendingStart] = useState<number | null>(null);
   const tickRef = useRef<number | null>(null);
+  const [sampleState, setSampleState] = useState<SamplePlayerState>(() => samplePlayer.getState());
 
   useEffect(() => {
     if (sources.length > 0 && !sources.some((s) => s.path === selectedPath)) {
@@ -101,11 +131,8 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
     return notePlayer.subscribe(setNoteState);
   }, []);
 
-  // Stop any note playback still going for a result that's no longer selected/loaded.
   useEffect(() => {
-    return () => {
-      if (notePlayer.isPlaying) notePlayer.stop();
-    };
+    return samplePlayer.subscribe(setSampleState);
   }, []);
 
   useEffect(() => {
@@ -119,17 +146,33 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
   }, [loading, startedAt]);
 
   const selectedSource = sources.find((s) => s.path === selectedPath) ?? null;
+  /** The samplePlayer id used while auditioning the drum stem's audio for the step sequencer's "Play". */
+  const drumId = selectedSource ? `notes-drum-${selectedSource.path}` : null;
+
+  // Stop any note/drum playback still going for a result that's no longer selected/loaded.
+  useEffect(() => {
+    return () => {
+      if (notePlayer.isPlaying) notePlayer.stop();
+      if (drumId && samplePlayer.isPlaying(drumId)) samplePlayer.stop();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleReadNotes = async () => {
     if (!selectedSource) return;
     if (notePlayer.isPlaying) notePlayer.stop();
+    if (drumId && samplePlayer.isPlaying(drumId)) samplePlayer.stop();
     setPendingStart(null);
     const start = Date.now();
     setStartedAt(start);
     setElapsedSec(0);
     setLoading(true);
     try {
-      const notes = await backend.extractNotes({ path: selectedSource.path, bpm: analysis?.bpm });
+      const notes = await backend.extractNotes({
+        path: selectedSource.path,
+        bpm: analysis?.bpm,
+        kind: selectedSource.isDrum ? "drums" : undefined,
+      });
       setResult(notes);
       setElapsedSec(notes.elapsedSec > 0 ? notes.elapsedSec : (Date.now() - start) / 1000);
     } finally {
@@ -137,8 +180,21 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
     }
   };
 
+  const isDrumResult = !!result?.drum;
+  const isDrumPlaying = !!drumId && sampleState.id === drumId;
+
   const handleTogglePlay = () => {
     if (!result) return;
+    if (isDrumResult) {
+      if (isDrumPlaying) {
+        samplePlayer.stop();
+      } else if (selectedSource && drumId) {
+        void backend.resolveWavUrl(selectedSource.path).then((url) => {
+          samplePlayer.playPath(drumId, url, { label: selectedSource.label, kind: "sample" });
+        });
+      }
+      return;
+    }
     if (noteState.isPlaying) {
       notePlayer.pause();
     } else {
@@ -167,6 +223,26 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
   };
 
   const layout = useMemo(() => computePianoRollLayout(result?.notes ?? []), [result]);
+
+  const drumCellSize = 22;
+  const drumLabelWidth = 64;
+  const drumLayout = useMemo(() => {
+    const steps = result?.drum?.steps ?? 16;
+    const lanes = result?.drum?.lanes.length ?? 1;
+    return {
+      cellSize: drumCellSize,
+      labelWidth: drumLabelWidth,
+      width: drumLabelWidth + steps * drumCellSize,
+      height: lanes * drumCellSize,
+    };
+  }, [result]);
+  /** Column index (16th-note step) the drum playhead currently sits on, from the sample player's audio time. */
+  const activeStep = useMemo(() => {
+    if (!result?.drum || !isDrumPlaying) return -1;
+    const stepSec = 60 / result.drum.bpm / 4;
+    if (!Number.isFinite(stepSec) || stepSec <= 0) return -1;
+    return Math.floor(sampleState.currentTime / stepSec) % Math.max(1, result.drum.steps);
+  }, [result, isDrumPlaying, sampleState.currentTime]);
 
   const camelot = result?.key ? camelotFor(result.key.tonic, result.key.mode) : null;
   const explanation = result ? explainKey(result) : "";
@@ -238,7 +314,13 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
           <Button variant="primary" onClick={handleReadNotes} disabled={!track || !selectedSource || loading} busy={loading}>
             Read notes
           </Button>
-          <PlayPauseButton playing={noteState.isPlaying} onToggle={handleTogglePlay} label="notes" tone="cyan" disabled={!result} />
+          <PlayPauseButton
+            playing={isDrumResult ? isDrumPlaying : noteState.isPlaying}
+            onToggle={handleTogglePlay}
+            label="notes"
+            tone="cyan"
+            disabled={!result}
+          />
           {loading && <span className="text-xs text-muted tabular-nums">{formatMmSs(elapsedSec)}</span>}
           {!loading && result && elapsedSec > 0 && (
             <span className="text-xs text-muted">Read in {elapsedSec.toFixed(1)} s</span>
@@ -246,7 +328,65 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
         </Surface>
       )}
 
-      {result && (
+      {result && isDrumResult && result.drum && (
+        <>
+          <Surface variant="raised" className="p-4 flex flex-col gap-2">
+            <div className="text-xs text-muted uppercase tracking-wide">Step sequencer</div>
+            <div className="overflow-x-auto">
+              <svg data-testid="drum-step-grid" width={drumLayout.width} height={drumLayout.height} viewBox={`0 0 ${drumLayout.width} ${drumLayout.height}`}>
+                {/* bar separators every 16 steps */}
+                {Array.from({ length: Math.floor(result.drum.steps / 16) + 1 }, (_, b) => b).map((b) => (
+                  <line
+                    key={`bar-${b}`}
+                    x1={drumLayout.labelWidth + b * 16 * drumLayout.cellSize}
+                    x2={drumLayout.labelWidth + b * 16 * drumLayout.cellSize}
+                    y1={0}
+                    y2={drumLayout.height}
+                    stroke="rgba(255,255,255,0.12)"
+                    strokeWidth={1}
+                  />
+                ))}
+                {result.drum.lanes.map((lane, rowIndex) => (
+                  <g key={lane.key}>
+                    <text
+                      x={0}
+                      y={rowIndex * drumLayout.cellSize + drumLayout.cellSize / 2 + 4}
+                      className="fill-current text-text"
+                      fontSize={11}
+                    >
+                      {lane.label}
+                    </text>
+                    {Array.from({ length: result.drum!.steps }, (_, col) => col).map((col) => {
+                      const isHit = lane.hits.includes(col);
+                      const isActive = isDrumPlaying && activeStep === col;
+                      return (
+                        <rect
+                          key={col}
+                          x={drumLayout.labelWidth + col * drumLayout.cellSize + 1}
+                          y={rowIndex * drumLayout.cellSize + 1}
+                          width={drumLayout.cellSize - 2}
+                          height={drumLayout.cellSize - 2}
+                          rx={2}
+                          fill={isHit ? "#F2B33D" : "rgba(255,255,255,0.06)"}
+                          stroke={isActive ? "#3DD68C" : "none"}
+                          strokeWidth={isActive ? 2 : 0}
+                        />
+                      );
+                    })}
+                  </g>
+                ))}
+              </svg>
+            </div>
+          </Surface>
+
+          <Surface variant="raised" className="p-4 text-sm leading-relaxed text-text">
+            <div className="text-xs text-muted uppercase tracking-wide mb-2">In plain words</div>
+            Each lit block is a hit. Rows are drum sounds, columns are 16th notes.
+          </Surface>
+        </>
+      )}
+
+      {result && !isDrumResult && (
         <>
           <Surface variant="raised" className="p-4 flex flex-col gap-2">
             <div className="text-xs text-muted uppercase tracking-wide">Piano roll</div>

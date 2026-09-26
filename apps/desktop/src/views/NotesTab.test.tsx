@@ -39,6 +39,36 @@ const instruments: InstrumentStem[] = [
 
 const samples: Sample[] = [];
 
+const savedSample: Sample = {
+  id: "s1",
+  name: "Guitar riff",
+  path: "/home/user/.absolutesample/samples/s1.wav",
+  bytes: 500,
+  songId: "t1",
+  songTitle: "Test Track",
+  stemKey: "guitar",
+  stemLabel: "Guitar",
+  group: "guitar",
+  startSec: 0,
+  endSec: 4,
+  durationSec: 4,
+  bpm: 100,
+  createdAt: new Date().toISOString(),
+};
+
+const drumStem: InstrumentStem = {
+  key: "drums",
+  label: "Drums",
+  group: "drums",
+  parent: null,
+  path: "mock/t1/instruments/drums.wav",
+  bytes: 1000,
+  peakDb: -2,
+  rmsDb: -14,
+  model: "htdemucs_6s",
+  order: 1,
+};
+
 describe("NotesTab", () => {
   it("shows the empty state when there are no sources", () => {
     render(<NotesTab track={track} loop={null} instruments={[]} analysis={null} samples={[]} />);
@@ -71,5 +101,28 @@ describe("NotesTab", () => {
     fireEvent.click(screen.getByRole("button", { name: /read notes/i }));
 
     await waitFor(() => expect(screen.getByRole("button", { name: /play notes/i })).not.toBeDisabled());
+  });
+
+  it("calls backend.extractNotes with the sample's real absolute path when a saved sample is chosen", async () => {
+    const spy = vi.spyOn(backend, "extractNotes");
+    render(<NotesTab track={track} loop={null} instruments={[]} analysis={{ bpm: 128 } as never} samples={[savedSample]} />);
+
+    fireEvent.change(screen.getByLabelText(/source/i), { target: { value: savedSample.path } });
+    fireEvent.click(screen.getByRole("button", { name: /read notes/i }));
+
+    await waitFor(() =>
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ path: savedSample.path, bpm: 128 }))
+    );
+  });
+
+  it("renders the drum step grid, not the piano roll, for a drum stem source", async () => {
+    render(<NotesTab track={track} loop={null} instruments={[drumStem]} analysis={null} samples={samples} />);
+
+    fireEvent.change(screen.getByLabelText(/source/i), { target: { value: drumStem.path } });
+    fireEvent.click(screen.getByRole("button", { name: /read notes/i }));
+
+    await waitFor(() => expect(screen.getByTestId("drum-step-grid")).toBeInTheDocument());
+    expect(screen.queryByTestId("piano-roll")).not.toBeInTheDocument();
+    expect(screen.getByText(/each lit block is a hit/i)).toBeInTheDocument();
   });
 });
