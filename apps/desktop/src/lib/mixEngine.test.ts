@@ -6,11 +6,14 @@ class FakeParam {
   linearRampToValueAtTime = vi.fn((v: number) => {
     this.value = v;
   });
+  setValueAtTime = vi.fn();
+  cancelScheduledValues = vi.fn();
 }
 
 class FakeGainNode {
   gain = new FakeParam();
   connect = vi.fn();
+  disconnect = vi.fn();
 }
 
 class FakeSourceNode {
@@ -160,5 +163,26 @@ describe("MixEngine", () => {
     src.onended?.();
     expect(engine.isPlaying).toBe(false);
     expect(engine.currentTime()).toBe(0);
+  });
+
+  it("never hard-cuts: pause fades out and stops slightly later; gain changes are anchored glides", async () => {
+    globalThis.fetch = fakeFetch({ "a.wav": 4 });
+    await engine.load([{ id: "a", url: "a.wav" }]);
+    ctx.currentTime = 1;
+    engine.play(0);
+    const src = (engine as unknown as { sources: Map<string, FakeSourceNode> }).sources.get("a")!;
+    const env = (engine as unknown as { envelopes: Map<string, FakeGainNode> }).envelopes.get("a")!;
+    // fade in from silence at the start time
+    expect(env.gain.setValueAtTime).toHaveBeenCalledWith(0, expect.closeTo(1.05, 5));
+    ctx.currentTime = 2;
+    engine.pause();
+    const [when] = src.stop.mock.calls[0];
+    expect(when).toBeGreaterThan(2); // stops after the fade-out, not instantly
+    expect(env.gain.linearRampToValueAtTime).toHaveBeenLastCalledWith(0, expect.closeTo(2.008, 5));
+
+    engine.setGain("a", 0.5);
+    const g = (engine as unknown as { gains: Map<string, FakeGainNode> }).gains.get("a")!;
+    expect(g.gain.setValueAtTime).toHaveBeenCalled(); // anchored at the current value first
+    expect(g.gain.linearRampToValueAtTime).toHaveBeenLastCalledWith(0.5, expect.closeTo(2.02, 5));
   });
 });

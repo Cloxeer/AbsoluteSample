@@ -5,14 +5,16 @@ Runs a multi-pass, fully local, fully free instrument separation chain and
 reports progress as JSON lines on stdout. Invoked by the Rust backend (and the
 CLI); never imported by the frontend.
 
-Passes (run in this order when requested; "instruments" is always run first):
-  instruments  Demucs v4 htdemucs_6s      -> vocals, drums, bass, guitar, piano, other
-  vocals       BS-Roformer (viperx 12.97) -> refined vocals, ensembled with Demucs vocals;
-                                             the difference is pushed into "other" so the
-                                             stems still sum to the original mix
-  lead         Mel-Band Roformer karaoke  -> lead_vocals + backing_vocals from the vocals stem
-  drums        MDX23C DrumSep             -> kick, snare, toms, hihat, ride, crash from the drums stem
-  tag          AudioSet AST classifier    -> tags + soundsLike for every top-level stem (never fatal)
+Default pipeline (v2, measured on the MUSDB18 test set with scripts/bench_separation.py):
+  vocals       two vocal Roformers (viperx 1297 + unwa revive v2) combined bin-by-bin keeping the
+               quieter bin, then a soft bleed gate; instrumental = mix - vocals (exact)
+  instruments  on the INSTRUMENTAL: BS-Roformer SW -> drums, guitar, piano; htdemucs_ft -> bass;
+               drum hits above 250 Hz moved out of the bass; other = the exact remainder
+  lead         Roformer karaoke on the vocals -> lead; backing = vocals - lead (exact)
+  drums        MDX23C DrumSep -> kick, snare, toms, hihat, ride, crash from the drums stem
+  tag          AudioSet AST classifier -> tags + soundsLike for every top-level stem (never fatal)
+All stems are 32-bit float WAV (no clipping) and sum back to the original mix.
+The legacy chain (Demucs 6s on the full mix) is kept as --pipeline v1.
 
 Protocol (stdout, one JSON object per line):
   {"event":"device","device":"cuda|cpu","gpu":"..."}
@@ -147,7 +149,7 @@ class _ProgressHook(logging.Handler):
             progress(self.pass_name, -1, msg[:120])
 
 
-def make_separator(model_dir: Path, out_dir: Path, pass_name: str, device_pref: str):
+def make_separator(model_dir: Path, out_dir: Path, pass_name: str, device_pref: str, autocast: bool = False, overlap: int = 8):
     from audio_separator.separator import Separator
 
     sep = Separator(
@@ -155,23 +157,40 @@ def make_separator(model_dir: Path, out_dir: Path, pass_name: str, device_pref: 
         model_file_dir=str(model_dir),
         output_dir=str(out_dir),
         output_format="WAV",
-        # Quality first: no input normalization (keeps original levels and headroom),
-        # no fp16 autocast (avoids quantization buzz on older GPUs), more Demucs shifts
-        # and overlap for cleaner seams. Slower, but audibly cleaner.
+        # No input normalization (keeps original levels and headroom). fp16 autocast and
+        # Roformer overlap 4 are the measured sweet spot (same SDR as fp32/overlap 8, ~3x faster).
         normalization_threshold=1.0,
         amplification_threshold=0.0,
-        use_autocast=False,
+        use_autocast=autocast,
         demucs_params={"segment_size": "Default", "shifts": 2, "overlap": 0.4, "segments_enabled": True},
-        mdxc_params={"segment_size": 256, "override_model_segment_size": False, "batch_size": 1, "overlap": 8, "pitch_shift": 0},
+        mdxc_params={"segment_size": 256, "override_model_segment_size": False, "batch_size": 1, "overlap": overlap, "pitch_shift": 0},
     )
     sep.logger.addHandler(_ProgressHook(pass_name))
     return sep
 
 
+
+def load_model_safe(sep, models, pass_name: str) -> None:
+    """Load one model (str) or an ensemble (list). If a model file is corrupt or incomplete (an
+    interrupted download), delete it so the separator downloads it again, and retry once."""
+    names = models if isinstance(models, list) else [models]
+    arg = names if len(names) > 1 else names[0]
+    try:
+        sep.load_model(model_filename=arg)
+        return
+    except Exception as e:  # noqa: BLE001
+        progress(pass_name, -1, f"Model load failed ({str(e)[:80]}); re-downloading")
+    model_dir = Path(sep.model_file_dir)
+    for n in names:
+        f = model_dir / n
+        if f.exists():
+            f.unlink()
+    sep.load_model(model_filename=arg)
+
 def run_model(sep, model_file: str, input_path: Path, pass_name: str) -> dict[str, Path]:
     """Run one model on one file; returns {stem_name_lower: path}."""
     progress(pass_name, 5, f"Loading {model_file}")
-    sep.load_model(model_filename=model_file)
+    load_model_safe(sep, model_file, pass_name)
     progress(pass_name, 20, "Separating")
     outputs = sep.separate(str(input_path))
     result: dict[str, Path] = {}
@@ -246,6 +265,271 @@ def pass_drums(sep_factory, out: Path, sr: int, stems: dict[str, Path]) -> None:
         found += 1
     if found == 0:
         raise RuntimeError(f"drum model returned {sorted(res)}")
+
+
+# ---------------------------------------------------------------------------
+# v2 pipeline (default). Every choice below was measured on the MUSDB18 test set with
+# scripts/bench_separation.py (ground-truth stems); see docs/CONTRACT.md "v10".
+#   1. input: float32, 44.1 kHz, DC removed
+#   2. vocals: two vocal models combined bin-by-bin keeping the QUIETER bin (least bleed),
+#      then a soft spectral gate that moves "vocal" bins far below the instrumental (bleed)
+#      back into the instrumental. instrumental = mix - vocals, exactly.
+#   3. instruments from the INSTRUMENTAL, never the full mix: BS-Roformer SW for drums,
+#      guitar, piano; htdemucs_ft for bass (best bass). Drum transients that leaked into the
+#      bass above 250 Hz are moved into the drums.
+#   4. other = instrumental - (drums + bass + guitar + piano): stems always sum to the mix.
+
+V2_MODELS = {
+    "vocals": ["model_bs_roformer_ep_317_sdr_12.9755.ckpt", "bs_roformer_vocals_revive_v2_unwa.ckpt"],
+    "instruments": "BS-Roformer-SW.ckpt",
+    "bass": "htdemucs_ft.yaml",
+    "lead": "bs_roformer_karaoke_frazer_becruily.ckpt",
+    "drums": MODELS["drums"],
+}
+# Models whose file labelled "Vocals" by audio-separator 0.47 actually holds the instrumental
+# (single-target configs). Verified against ground truth; also cross-checked at runtime.
+LABEL_SWAPPED = {"bs_roformer_vocals_revive_v2_unwa.ckpt", "bs_roformer_vocals_resurrection_unwa.ckpt"}
+MODEL_SR = 44100
+VOCAL_GATE_DB = -18.0      # vocal bins this far under the instrumental are treated as bleed
+BASS_CLEAN_ABOVE_HZ = 250.0
+BASS_CLEAN_STRENGTH = 8.0
+
+
+def write_float(path: Path, data: np.ndarray, sr: int) -> None:
+    """32-bit float WAV: no quantisation, no clipping, no wrap-around clicks."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(path), data.astype(np.float32), sr, subtype="FLOAT")
+
+
+def prepare_input(inp: Path, work: Path) -> tuple[Path, np.ndarray, int]:
+    """Decode once to float32 stereo at the models' 44.1 kHz and remove DC offset.
+    Returns (prepared path, prepared audio, original sample rate)."""
+    data, sr = sf.read(str(inp), dtype="float32", always_2d=True)
+    if data.shape[1] == 1:
+        data = np.repeat(data, 2, axis=1)
+    data = data[:, :2]
+    if sr != MODEL_SR:
+        import librosa
+
+        data = np.stack([librosa.resample(data[:, c], orig_sr=sr, target_sr=MODEL_SR, res_type="soxr_hq") for c in range(2)], axis=1)
+    data = data - data.mean(axis=0, keepdims=True)
+    path = work / "input_44k.wav"
+    write_float(path, data, MODEL_SR)
+    return path, data.astype(np.float32), sr
+
+
+def fit_len(x: np.ndarray, n: int) -> np.ndarray:
+    if len(x) >= n:
+        return x[:n]
+    return np.concatenate([x, np.zeros((n - len(x), x.shape[1]), dtype=x.dtype)])
+
+
+def _stft(x: np.ndarray, n_fft: int, hop: int):
+    import torch
+
+    win = torch.hann_window(n_fft)
+    return torch.stft(torch.from_numpy(np.ascontiguousarray(x.T)).float(), n_fft, hop, window=win, return_complex=True)
+
+
+def _istft(S, n: int, n_fft: int, hop: int) -> np.ndarray:
+    import torch
+
+    win = torch.hann_window(n_fft)
+    return torch.istft(S, n_fft, hop, window=win, length=n).T.numpy().astype(np.float32)
+
+
+def low_band_ratio_db(x: np.ndarray, mix: np.ndarray, below_hz: float = 150.0) -> float:
+    """Energy under `below_hz` of x relative to the mix's (dB). Vocals have almost none."""
+    X, M = _stft(x, 4096, 1024), _stft(mix, 4096, 1024)
+    k = int(below_hz / (MODEL_SR / 4096)) + 1
+    ex = float((X[:, 1:k].abs() ** 2).sum()) + 1e-12
+    em = float((M[:, 1:k].abs() ** 2).sum()) + 1e-12
+    return 10.0 * np.log10(ex / em)
+
+
+def true_vocals(model: str, labelled_vocals: np.ndarray, mix: np.ndarray) -> np.ndarray:
+    """The model's real vocal estimate: undo a known label swap, and cross-check physically
+    (the vocal stem must have far less low end than the instrumental)."""
+    cand = mix - labelled_vocals if model in LABEL_SWAPPED else labelled_vocals
+    other = mix - cand
+    lv, lo = low_band_ratio_db(cand, mix), low_band_ratio_db(other, mix)
+    if lv > lo + 10.0:  # clearly the instrumental: labels are the other way round
+        progress("vocals", -1, f"{model}: outputs looked swapped (low end {lv:.0f} vs {lo:.0f} dB); corrected")
+        cand = other
+    return cand
+
+
+def min_mag_combine(estimates: list[np.ndarray]) -> np.ndarray:
+    """Per time-frequency bin keep the estimate with the SMALLEST magnitude: only what every
+    model agrees is voice survives (least bleed)."""
+    import torch
+
+    n = min(len(e) for e in estimates)
+    S = torch.stack([_stft(e[:n], 2048, 512) for e in estimates])
+    idx = S.abs().argmin(0, keepdim=True)
+    return _istft(torch.gather(S, 0, idx)[0], n, 2048, 512)
+
+
+def vocal_bleed_gate(v: np.ndarray, mix: np.ndarray, thr_db: float = VOCAL_GATE_DB, floor_db: float = -30.0) -> np.ndarray:
+    """Soft spectral gate: vocal bins more than |thr_db| under the instrumental are mostly music
+    that leaked in. They fade (12 dB knee, time-smoothed so no musical noise) toward floor_db."""
+    import torch
+
+    n = min(len(v), len(mix))
+    V, I = _stft(v[:n], 2048, 512), _stft(mix[:n] - v[:n], 2048, 512)
+    ratio_db = 20 * torch.log10((V.abs() + 1e-9) / (I.abs() + 1e-9))
+    g = 10 ** (torch.clamp((ratio_db - thr_db) / 12.0, -1.0, 0.0) * (-floor_db) / 20)
+    g = torch.nn.functional.avg_pool1d(g.reshape(-1, 1, g.shape[-1]), 5, 1, 2, count_include_pad=False).reshape(g.shape)
+    return _istft(V * g, n, 2048, 512)
+
+
+def move_intruder(target: np.ndarray, intruder: np.ndarray, above_hz: float, strength: float) -> tuple[np.ndarray, np.ndarray]:
+    """Moves from `target` the bins above `above_hz` where `intruder` is louder (soft mask) into
+    `intruder`. Sum preserving. Used to take drum hits out of the bass."""
+    import torch
+
+    n = min(len(target), len(intruder))
+    T, I = _stft(target[:n], 4096, 1024), _stft(intruder[:n], 4096, 1024)
+    pt, pi = T.abs() ** 2, I.abs() ** 2
+    keep = pt / (pt + strength * pi + 1e-12)
+    f = torch.linspace(0, MODEL_SR / 2, keep.shape[1])[None, :, None]
+    keep = torch.where(f < above_hz, torch.ones_like(keep), keep)
+    Tn = T * keep
+    return _istft(Tn, n, 4096, 1024), intruder[:n] + _istft(T - Tn, n, 4096, 1024)
+
+
+def _outputs(sep, path: Path) -> dict[str, Path]:
+    res = {}
+    for o in sep.separate(str(path)):
+        p = Path(o) if Path(o).is_absolute() else Path(sep.output_dir) / o
+        stem = p.stem.split("_(")[-1].split(")")[0].lower() if "_(" in p.stem else p.stem.lower()
+        res[stem] = p
+    return res
+
+
+def v2_vocals(sep_factory, prepared: Path, mix: np.ndarray) -> np.ndarray:
+    estimates = []
+    models = V2_MODELS["vocals"]
+    for i, m in enumerate(models):
+        sep = sep_factory(f"vocals{i}")
+        progress("vocals", 5 + 40 * i, f"Loading {m}")
+        load_model_safe(sep, m, "vocals")
+        progress("vocals", 15 + 40 * i, f"Separating vocals ({i + 1}/{len(models)})")
+        res = _outputs(sep, prepared)
+        k = next((r for r in res if "vocal" in r and "instrument" not in r), None)
+        if k is None:
+            raise RuntimeError(f"{m} returned {sorted(res)}")
+        estimates.append(true_vocals(m, fit_len(read_wav(res[k])[0], len(mix)), mix))
+        del sep
+        cleanup_torch()
+    progress("vocals", 90, "Combining and removing bleed")
+    v = min_mag_combine(estimates) if len(estimates) > 1 else estimates[0]
+    if VOCAL_GATE_DB <= -90:
+        return fit_len(v, len(mix))
+    return fit_len(vocal_bleed_gate(v, mix), len(mix))
+
+
+def v2_instruments(sep_factory, inst: np.ndarray, work: Path) -> dict[str, np.ndarray]:
+    path = work / "instrumental_44k.wav"
+    write_float(path, inst, MODEL_SR)
+    sep = sep_factory("instruments")
+    progress("instruments", 5, f"Loading {V2_MODELS['instruments']}")
+    load_model_safe(sep, V2_MODELS["instruments"], "instruments")
+    progress("instruments", 15, "Separating drums, guitar, piano")
+    res = _outputs(sep, path)
+    out: dict[str, np.ndarray] = {}
+    for key in ("drums", "guitar", "piano"):
+        k = next((r for r in res if r == key or r.startswith(key)), None)
+        if k is None:
+            raise RuntimeError(f"SW did not return {key!r} (got {sorted(res)})")
+        out[key] = fit_len(read_wav(res[k])[0], len(inst))
+    del sep
+    cleanup_torch()
+
+    sep = sep_factory("bass")
+    progress("instruments", 55, f"Loading {V2_MODELS['bass']}")
+    load_model_safe(sep, V2_MODELS["bass"], "instruments")
+    progress("instruments", 65, "Separating bass")
+    res = _outputs(sep, path)
+    if "bass" not in res:
+        raise RuntimeError(f"bass model returned {sorted(res)}")
+    bass = fit_len(read_wav(res["bass"])[0], len(inst))
+    del sep
+    cleanup_torch()
+
+    progress("instruments", 90, "Removing drum hits from the bass")
+    bass, drums = move_intruder(bass, out["drums"], BASS_CLEAN_ABOVE_HZ, BASS_CLEAN_STRENGTH)
+    out["bass"] = fit_len(bass, len(inst))
+    out["drums"] = fit_len(drums, len(inst))
+    out["other"] = inst - out["drums"] - out["bass"] - out["guitar"] - out["piano"]
+    return out
+
+
+def resample_back(x: np.ndarray, sr: int) -> np.ndarray:
+    if sr == MODEL_SR:
+        return x
+    import librosa
+
+    return np.stack([librosa.resample(x[:, c], orig_sr=MODEL_SR, target_sr=sr, res_type="soxr_hq") for c in range(x.shape[1])], axis=1)
+
+
+def run_v2(sep_factory, inp: Path, out: Path, work: Path, passes: list[str]) -> tuple[dict[str, Path], list]:
+    """Returns (stems, failed optional passes). Raises if the vocal or instrument pass fails."""
+    prepared, mix, orig_sr = prepare_input(inp, work)
+    failed = []
+
+    t0 = time.time()
+    vocals = v2_vocals(sep_factory, prepared, mix)
+    inst = mix - vocals
+    emit({"event": "pass_done", "pass": "vocals", "seconds": round(time.time() - t0, 1)})
+
+    t0 = time.time()
+    parts = v2_instruments(sep_factory, inst, work)
+    emit({"event": "pass_done", "pass": "instruments", "seconds": round(time.time() - t0, 1)})
+
+    top = {"vocals": vocals, **parts}
+    stems: dict[str, Path] = {}
+    for key in ("vocals", "drums", "bass", "guitar", "piano", "other"):
+        p = out / f"{key}.wav"
+        write_float(p, resample_back(top[key], orig_sr), orig_sr)
+        stems[key] = p
+
+    if "lead" in passes:
+        t0 = time.time()
+        try:
+            sep = sep_factory("lead")
+            vpath = work / "vocals_44k.wav"
+            write_float(vpath, vocals, MODEL_SR)
+            progress("lead", 5, f"Loading {V2_MODELS['lead']}")
+            load_model_safe(sep, V2_MODELS["lead"], "lead")
+            progress("lead", 20, "Separating lead and backing vocals")
+            res = _outputs(sep, vpath)
+            lead_key = next((k for k in res if "vocal" in k and "back" not in k and "instrument" not in k), None)
+            if lead_key is None:
+                raise RuntimeError(f"karaoke model returned {sorted(res)}")
+            lead = fit_len(read_wav(res[lead_key])[0], len(vocals))
+            back = vocals - lead  # exact: lead + backing == vocals
+            # Lead is the dominant voice: if the "lead" file is the quieter one, labels are swapped.
+            if float(np.mean(lead ** 2)) < float(np.mean(back ** 2)):
+                lead, back = back, lead
+            for key, data in (("lead_vocals", lead), ("backing_vocals", back)):
+                p = out / f"{key}.wav"
+                write_float(p, resample_back(data, orig_sr), orig_sr)
+                stems[key] = p
+            emit({"event": "pass_done", "pass": "lead", "seconds": round(time.time() - t0, 1)})
+        except Exception as e:  # noqa: BLE001
+            failed.append("lead")
+            emit({"event": "pass_failed", "pass": "lead", "error": str(e)[:400]})
+
+    if "drums" in passes:
+        t0 = time.time()
+        try:
+            pass_drums(sep_factory, out, orig_sr, stems)
+            emit({"event": "pass_done", "pass": "drums", "seconds": round(time.time() - t0, 1)})
+        except Exception as e:  # noqa: BLE001
+            failed.append("drums")
+            emit({"event": "pass_failed", "pass": "drums", "error": str(e)[:400]})
+    return stems, failed
 
 
 def ensure_headroom(stems: dict[str, Path], sr: int, ceiling: float = 0.98) -> float:
@@ -418,6 +702,63 @@ KARAOKE_META = {
 }
 
 
+def run_karaoke_v2(sep_factory, inp: Path, out: Path, stems: dict[str, Path], lead: bool, work: Path, device: str = "cpu", t_start: float | None = None) -> int:
+    """Karaoke with the v2 vocal chain: clean vocals, instrumental = mix - vocals (exact),
+    optional lead/backing by subtraction. Float WAV output."""
+    t0 = time.time()
+    try:
+        prepared, mix, orig_sr = prepare_input(inp, work)
+        vocals = v2_vocals(sep_factory, prepared, mix)
+        inst = mix - vocals
+        for key, data in (("vocals", vocals), ("instrumental", inst)):
+            pth = out / f"{key}.wav"
+            write_float(pth, resample_back(data, orig_sr), orig_sr)
+            stems[key] = pth
+        emit({"event": "pass_done", "pass": "vocals", "seconds": round(time.time() - t0, 1)})
+    except Exception as e:  # noqa: BLE001
+        emit({"event": "fatal", "error": f"vocals pass failed: {e}"})
+        return 1
+
+    if lead:
+        t0 = time.time()
+        try:
+            sep = sep_factory("lead")
+            vpath = work / "vocals_44k.wav"
+            write_float(vpath, vocals, MODEL_SR)
+            load_model_safe(sep, V2_MODELS["lead"], "lead")
+            res = _outputs(sep, vpath)
+            lead_key = next((k for k in res if "vocal" in k and "back" not in k and "instrument" not in k), None)
+            if lead_key is None:
+                raise RuntimeError(f"karaoke model returned {sorted(res)}")
+            lead_data = fit_len(read_wav(res[lead_key])[0], len(vocals))
+            back_data = vocals - lead_data
+            if float(np.mean(lead_data ** 2)) < float(np.mean(back_data ** 2)):
+                lead_data, back_data = back_data, lead_data
+            for key, data in (("lead_vocals", lead_data), ("backing_vocals", back_data)):
+                pth = out / f"{key}.wav"
+                write_float(pth, resample_back(data, orig_sr), orig_sr)
+                stems[key] = pth
+            emit({"event": "pass_done", "pass": "lead", "seconds": round(time.time() - t0, 1)})
+        except Exception as e:  # noqa: BLE001
+            emit({"event": "pass_failed", "pass": "lead", "error": str(e)[:400]})
+
+    shutil.rmtree(work, ignore_errors=True)
+    listing = []
+    for key, path in stems.items():
+        label, group, parent, order = KARAOKE_META[key]
+        listing.append({
+            "key": key, "label": label, "group": group, "parent": parent, "path": str(path),
+            "model": V2_MODELS["lead"] if key in ("lead_vocals", "backing_vocals") else " + ".join(V2_MODELS["vocals"]),
+            "order": order,
+        })
+    listing.sort(key=lambda x: x["order"])
+    cleanup_torch()
+    emit({"event": "done", "stems": listing, "device": device})
+    if t_start is not None:
+        emit_metrics(t_start, device)
+    return 0
+
+
 def run_karaoke(sep_factory, inp: Path, out: Path, sr: int, stems: dict[str, Path], lead: bool, work: Path, device: str = "cpu", t_start: float | None = None) -> int:
     t0 = time.time()
     try:
@@ -489,7 +830,16 @@ def main() -> int:
     ap.add_argument("--low-priority", action="store_true")
     ap.add_argument("--mode", default="full", choices=["full", "karaoke"])
     ap.add_argument("--lead", action="store_true")
+    ap.add_argument("--pipeline", default="v2", choices=["v1", "v2"],
+                    help="v2: vocals-first bleedless ensemble + SW instruments on the instrumental")
+    # Measured on MUSDB18: fp16 + overlap 4 gives the same SDR as fp32 + overlap 8, ~3x faster.
+    ap.add_argument("--no-autocast", dest="autocast", action="store_false", help="fp32 inference (slower, same quality)")
+    ap.add_argument("--overlap", type=int, default=4, help="Roformer window overlap (higher = smoother, slower)")
+    ap.add_argument("--vocal-gate-db", type=float, default=None, help="v2: bleed gate threshold (<= -90 disables)")
     args = ap.parse_args()
+    if args.vocal_gate_db is not None:
+        global VOCAL_GATE_DB
+        VOCAL_GATE_DB = args.vocal_gate_db
 
     t_start = time.time()
     inp = Path(args.input).resolve()
@@ -513,42 +863,61 @@ def main() -> int:
     emit({"event": "device", "device": device, "gpu": torch.cuda.get_device_name(0) if device == "cuda" else None})
 
     def sep_factory(pass_name: str):
-        return make_separator(model_dir, work / pass_name, pass_name, device)
+        return make_separator(model_dir, work / pass_name, pass_name, device, autocast=args.autocast, overlap=args.overlap)
 
     _, sr = read_wav(inp)
     stems: dict[str, Path] = {}
 
     if args.mode == "karaoke":
+        if args.pipeline == "v2":
+            return run_karaoke_v2(sep_factory, inp, out, stems, args.lead, work, device, t_start)
         return run_karaoke(sep_factory, inp, out, sr, stems, args.lead, work, device, t_start)
 
     passes = [p.strip() for p in args.passes.split(",") if p.strip()]
 
-    t0 = time.time()
-    try:
-        pass_instruments(sep_factory, inp, out, sr, stems)
-        emit({"event": "pass_done", "pass": "instruments", "seconds": round(time.time() - t0, 1)})
-    except Exception as e:  # noqa: BLE001
-        emit({"event": "fatal", "error": f"instruments pass failed: {e}"})
-        return 1
-
-    optional = [
-        ("vocals", lambda: pass_vocals(sep_factory, inp, sr, stems)),
-        ("lead", lambda: pass_lead(sep_factory, out, sr, stems)),
-        ("drums", lambda: pass_drums(sep_factory, out, sr, stems)),
-    ]
-    for name, fn in optional:
-        if name not in passes:
-            continue
+    if args.pipeline == "v2":
+        try:
+            stems, _failed = run_v2(sep_factory, inp, out, work, passes)
+        except Exception as e:  # noqa: BLE001
+            emit({"event": "fatal", "error": f"separation failed: {e}"})
+            return 1
+        model_of = {
+            "vocals": " + ".join(V2_MODELS["vocals"]),
+            "bass": V2_MODELS["bass"],
+            "lead_vocals": V2_MODELS["lead"], "backing_vocals": V2_MODELS["lead"],
+        }
+        for k in ("kick", "snare", "toms", "hihat", "ride", "crash"):
+            model_of[k] = V2_MODELS["drums"]
+        STEM_MODEL.clear()
+        STEM_MODEL.update(model_of)
+        MODELS["instruments"] = V2_MODELS["instruments"]
+    else:
         t0 = time.time()
         try:
-            fn()
-            emit({"event": "pass_done", "pass": name, "seconds": round(time.time() - t0, 1)})
+            pass_instruments(sep_factory, inp, out, sr, stems)
+            emit({"event": "pass_done", "pass": "instruments", "seconds": round(time.time() - t0, 1)})
         except Exception as e:  # noqa: BLE001
-            emit({"event": "pass_failed", "pass": name, "error": str(e)[:400]})
+            emit({"event": "fatal", "error": f"instruments pass failed: {e}"})
+            return 1
 
-    gain = ensure_headroom(stems, sr)
-    if gain < 1.0:
-        emit({"event": "progress", "pass": "headroom", "percent": 100, "message": f"Applied shared gain {gain:.3f} to avoid clipping"})
+        optional = [
+            ("vocals", lambda: pass_vocals(sep_factory, inp, sr, stems)),
+            ("lead", lambda: pass_lead(sep_factory, out, sr, stems)),
+            ("drums", lambda: pass_drums(sep_factory, out, sr, stems)),
+        ]
+        for name, fn in optional:
+            if name not in passes:
+                continue
+            t0 = time.time()
+            try:
+                fn()
+                emit({"event": "pass_done", "pass": name, "seconds": round(time.time() - t0, 1)})
+            except Exception as e:  # noqa: BLE001
+                emit({"event": "pass_failed", "pass": name, "error": str(e)[:400]})
+
+        gain = ensure_headroom(stems, sr)
+        if gain < 1.0:
+            emit({"event": "progress", "pass": "headroom", "percent": 100, "message": f"Applied shared gain {gain:.3f} to avoid clipping"})
 
     tag_info: dict[str, dict] = {}
     if "tag" in passes:

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
-import { Download, Maximize2, Merge, Redo2, RotateCcw, Undo2, Wand2, ZoomIn, ZoomOut } from "lucide-react";
+import { Check, Download, Maximize2, Merge, Redo2, RotateCcw, Undo2, Wand2, ZoomIn, ZoomOut } from "lucide-react";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
 import { InfoTip } from "@/components/neumorphic/InfoTip";
@@ -214,6 +214,8 @@ export function AutotuneTab({ instruments, samples = [], deps: depsProp }: Autot
   const [abSource, setAbSource] = useState<PlaySource>("tuned");
   const [busy, setBusy] = useState(0);
   const [exporting, setExporting] = useState(false);
+  /** Last export: where it went (desktop path; null on web) and which tuning it captured. */
+  const [saved, setSaved] = useState<{ name: string; path: string | null; forAnalysis: Analysis | null } | null>(null);
 
   const outputRef = useRef<Float32Array>(new Float32Array(0));
   const peaksRef = useRef<Float32Array | null>(null);
@@ -591,19 +593,19 @@ export function AutotuneTab({ instruments, samples = [], deps: depsProp }: Autot
 
   // ---- Export ----
   const baseName = (source?.label ?? "vocal").replace(/\.[^.]+$/, "");
+  const exportName = `${baseName}-autotuned.wav`;
+  // The exact tuning that was last saved; the button stays "Saved" until the tuning changes, so
+  // repeated clicks can't pile up duplicate files.
+  const alreadySaved = saved !== null && saved.forAnalysis === analysis;
   const handleDownload = async () => {
+    if (exporting || alreadySaved) return;
     setExporting(true);
     try {
+      const forAnalysis = analysisRef.current;
       const rendered = await enqueue((e) => e.renderAll());
       const wav = encodeWav16(rendered, sampleRateRef.current);
-      const url = URL.createObjectURL(new Blob([wav], { type: "audio/wav" }));
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${baseName}-tuned.wav`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      const path = await backend.saveExport(exportName, new Uint8Array(wav));
+      setSaved({ name: path ? path.split(/[\\/]/).pop() ?? exportName : exportName, path, forAnalysis });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -847,8 +849,40 @@ export function AutotuneTab({ instruments, samples = [], deps: depsProp }: Autot
                     Save as sample
                   </Button>
                 )}
-                <Button type="button" onClick={handleDownload} busy={exporting} className="inline-flex items-center gap-1.5">
-                  <Download size={14} /> Download WAV
+                {saved && (
+                  <span data-testid="autotune-saved" role="status" className="text-[11px] text-muted max-w-[420px] truncate">
+                    {saved.path ? (
+                      <>
+                        Saved to Downloads as <span className="text-text font-medium">{saved.name}</span>
+                        {" · "}
+                        <button type="button" className="underline hover:text-text" onClick={() => void backend.revealDownload(saved.path as string)}>
+                          Show in folder
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        Downloaded <span className="text-text font-medium">{saved.name}</span> (check your browser&apos;s downloads)
+                      </>
+                    )}
+                  </span>
+                )}
+                <Button
+                  type="button"
+                  onClick={handleDownload}
+                  busy={exporting}
+                  disabled={alreadySaved}
+                  title={alreadySaved ? "This version is already saved. Change the tuning to save again." : `Save as ${exportName}`}
+                  className="inline-flex items-center gap-1.5"
+                >
+                  {alreadySaved ? (
+                    <>
+                      <Check size={14} /> Saved
+                    </>
+                  ) : (
+                    <>
+                      <Download size={14} /> Download WAV
+                    </>
+                  )}
                 </Button>
               </div>
             </div>

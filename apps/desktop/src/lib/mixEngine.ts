@@ -22,6 +22,16 @@ type AudioContextFactory = () => AudioContext;
 const START_LATENCY_SEC = 0.05;
 /** Short ramp used for gain changes, to avoid audible clicks/pops. */
 const GAIN_RAMP_SEC = 0.02;
+/** Every start, stop, seek and loop seam fades over this long, so playback never clicks. */
+const FADE_SEC = 0.008;
+
+/** Glides an AudioParam from its CURRENT value to `value`. Anchoring first matters: a bare
+ * linearRamp starts from the last scheduled event (possibly long ago), which jumps = click. */
+function glide(param: AudioParam, value: number, now: number, dur: number): void {
+  param.cancelScheduledValues?.(now);
+  param.setValueAtTime?.(param.value, now);
+  param.linearRampToValueAtTime(value, now + dur);
+}
 
 export class MixEngine {
   private ctxFactory: AudioContextFactory;
@@ -32,6 +42,8 @@ export class MixEngine {
   private tracks: MixTrackDef[] = [];
   private gains = new Map<string, GainNode>();
   private sources = new Map<string, AudioBufferSourceNode>();
+  /** Per-play fade envelope for each source (source -> envelope -> track gain). */
+  private envelopes = new Map<string, GainNode>();
 
   private _isPlaying = false;
   private startCtxTime = 0;
@@ -104,16 +116,27 @@ export class MixEngine {
     return bestId;
   }
 
+  /** Fades every playing source out over FADE_SEC, then stops it (never a hard cut). */
   private stopSources() {
-    for (const src of this.sources.values()) {
+    const ctx = this._ctx;
+    const now = ctx ? ctx.currentTime : 0;
+    for (const [id, src] of this.sources) {
+      const env = this.envelopes.get(id);
       src.onended = null;
       try {
-        src.stop();
+        if (env && ctx) {
+          glide(env.gain, 0, now, FADE_SEC);
+          src.stop(now + FADE_SEC + 0.002);
+          src.onended = () => env.disconnect?.();
+        } else {
+          src.stop();
+        }
       } catch {
         // already stopped
       }
     }
     this.sources.clear();
+    this.envelopes.clear();
   }
 
   /** Starts every loaded track's source simultaneously, offset to `fromSec` into each buffer. */
@@ -135,7 +158,13 @@ export class MixEngine {
       if (!buffer) continue;
       const src = ctx.createBufferSource();
       src.buffer = buffer;
-      src.connect(this.gainFor(d.id));
+      // Fade in at the start and out just before the natural end (loop seams included).
+      const env = ctx.createGain();
+      env.gain.setValueAtTime?.(0, startAt);
+      env.gain.linearRampToValueAtTime(1, startAt + FADE_SEC);
+      src.connect(env);
+      env.connect(this.gainFor(d.id));
+      this.envelopes.set(d.id, env);
 
       if (d.id === longestId) {
         src.onended = () => {
@@ -145,6 +174,11 @@ export class MixEngine {
       }
 
       const offset = Math.min(Math.max(0, fromSec), Math.max(0, buffer.duration - 0.0001));
+      const remaining = buffer.duration - offset;
+      if (remaining > 3 * FADE_SEC) {
+        env.gain.setValueAtTime?.(1, startAt + remaining - FADE_SEC);
+        env.gain.linearRampToValueAtTime(0, startAt + remaining);
+      }
       src.start(startAt, offset);
       this.sources.set(d.id, src);
     }
@@ -191,13 +225,13 @@ export class MixEngine {
   setGain(id: string, gain: number): void {
     const g = this.gainFor(id);
     const ctx = this.ctx();
-    g.gain.linearRampToValueAtTime(gain, ctx.currentTime + GAIN_RAMP_SEC);
+    glide(g.gain, gain, ctx.currentTime, GAIN_RAMP_SEC);
   }
 
   setMaster(gain: number): void {
     const ctx = this.ctx();
     this.ctx(); // ensure masterGain exists
-    this.masterGain!.gain.linearRampToValueAtTime(gain, ctx.currentTime + GAIN_RAMP_SEC);
+    glide(this.masterGain!.gain, gain, ctx.currentTime, GAIN_RAMP_SEC);
   }
 
   /** Derived arithmetically from ctx.currentTime, never from a node's own playback state. */

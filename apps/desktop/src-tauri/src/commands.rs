@@ -138,6 +138,46 @@ pub async fn read_audio_file(path: String) -> Result<tauri::ipc::Response, Strin
     .map_err(|e| format!("task join error: {e}"))?
 }
 
+/// Saves an exported file (raw bytes in the request body, name in the `x-file-name` header)
+/// into the user's Downloads folder without overwriting anything; returns the full path.
+#[tauri::command]
+pub async fn save_to_downloads(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let name = request
+        .headers()
+        .get("x-file-name")
+        .and_then(|v| v.to_str().ok())
+        .map(crate::audio::workspace::percent_decode)
+        .unwrap_or_else(|| "audio.wav".to_string());
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(b) => b.clone(),
+        _ => return Err("expected raw file bytes".into()),
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::audio::workspace::save_to_downloads(&name, &bytes).map(|p| p.display().to_string())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+/// Shows a file the app saved into Downloads in Explorer (only files inside Downloads).
+#[tauri::command]
+pub async fn reveal_download(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = crate::audio::workspace::downloads_dir()?;
+        let p = std::path::PathBuf::from(&path);
+        if p.parent() != Some(dir.as_path()) || !p.is_file() {
+            return Err("can only show files saved to Downloads".into());
+        }
+        crate::audio::silent_command("explorer")
+            .arg(format!("/select,{}", p.display()))
+            .spawn()
+            .map_err(|e| format!("failed to open explorer: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
 #[tauri::command]
 pub async fn import_local(app: AppHandle, path: String) -> Result<TrackInfo, String> {
     tauri::async_runtime::spawn_blocking(move || {

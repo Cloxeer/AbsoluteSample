@@ -96,10 +96,15 @@ pub fn slice_beats(
         let out_s = out_path.to_string_lossy().to_string();
         let start_s = format!("{t}");
         let dur_s = format!("{}", end - t);
+        // Tiny fades so a slice cut mid-waveform never clicks (2 ms in keeps the attack).
+        let fade_out_start = ((end - t) - 0.004).max(0.0);
+        let filter = format!(
+            "aresample=resampler=soxr:precision=28,afade=t=in:d=0.002,afade=t=out:st={fade_out_start}:d=0.004"
+        );
 
         let output = silent_command("ffmpeg")
             .args([
-                "-ss", &start_s, "-t", &dur_s, "-i", &src_s, "-af", "aresample=resampler=soxr:precision=28", "-c:a", "pcm_s24le", "-y", &out_s,
+                "-ss", &start_s, "-t", &dur_s, "-i", &src_s, "-af", &filter, "-c:a", "pcm_s24le", "-y", &out_s,
             ])
             .output()
             .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;

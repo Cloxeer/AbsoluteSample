@@ -37,4 +37,11 @@ const venvPy = join(process.env.USERPROFILE || process.env.HOME || "", ".absolut
 const py = existsSync(venvPy) ? venvPy : (process.platform === "win32" ? "python" : "python3");
 step("engine memory guard", py, [join(root, "scripts", "engine_smoke.py")]);
 
+// 4. Stem-separation post-processing self-test (no AI models; seconds). Skipped without the venv.
+if (existsSync(venvPy)) {
+  step("separation self-test", venvPy, [join(root, "scripts", "separation_selftest.py")]);
+} else {
+  console.log("\n=== separation self-test ===\n[smoke] engine venv not found; skipping.");
+}
+
 console.log("\n[smoke] ALL CHECKS PASSED");

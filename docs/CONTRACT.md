@@ -415,3 +415,36 @@ run in a Web Worker, so the editor works the same in the desktop app and on the 
   in the pre-push smoke suite.
 - Agreement with full CREPE on two real separated vocals: 97.2% and 97.6% of frames within
   50 cents; octave errors 12 and 0 frames.
+
+## v10 addendum: stem separation quality (engine/separate.py pipeline v2)
+
+Measured on 10 MUSDB18 test tracks against the real isolated parts (`scripts/bench_separation.py`,
+median SDR in dB, higher is cleaner; "bursts" = 5 ms frames with >10 dB more high-frequency energy
+than the true part):
+
+| | v1 (old) | v2 (new) |
+|---|---|---|
+| vocals SDR | 12.18 | 12.25 |
+| drums SDR | 7.50 | 9.84 |
+| bass SDR | 8.57 | 10.17 |
+| other SDR | 5.40 | 7.51 |
+| music in vocals where the singer is silent | -88.6 dB | -99.7 dB |
+| bursts in "other" per track | 60.5 | 0 |
+| stems re-summed vs mix | 20 dB | 50 dB (91 dB on a full song) |
+
+Pipeline: vocals-first (min-magnitude combination of viperx 1297 + unwa revive v2, then a soft
+spectral bleed gate at -18 dB), instrumental = mix - vocals, BS-Roformer SW (drums/guitar/piano)
+and htdemucs_ft (bass) on the instrumental, drum transients above 250 Hz moved out of the bass,
+other = exact remainder, lead/backing by subtraction, float32 output, fp16 + Roformer overlap 4
+(measured identical SDR to fp32 + overlap 8, 3.7x faster). A 3.5 min song: 6.4 min on an RTX 2070
+Super, peak 4.4 GB RAM / 3.5 GB VRAM.
+
+Findings that shaped it: audio-separator 0.47 labels the unwa single-target models' outputs the
+wrong way round (the engine corrects known models and cross-checks every model by low-frequency
+content); a full Wiener consistency pass cost 2-3 dB and was dropped; SW alone leaks drum hits into
+the bass (hence htdemucs_ft bass + the targeted cleanup). Known limit: faint vocal consonants still
+leak into the drum stem (drum bursts 10.5 -> ~30 per track while drum SDR improves by 2.3 dB); no
+free model or combination tested removed them without costing drum quality.
+
+Playback: the stem mixer now fades every start/stop/seek/loop seam (8 ms) and anchors every gain
+ramp; beat slices get 2 ms / 4 ms edge fades.

@@ -206,6 +206,68 @@ pub fn read_audio_bytes(path: &std::path::Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
 
+/// The user's Downloads folder (override with `ABSOLUTESAMPLE_DOWNLOADS`, used by tests).
+pub fn downloads_dir() -> Result<PathBuf, String> {
+    if let Ok(p) = std::env::var("ABSOLUTESAMPLE_DOWNLOADS") {
+        return Ok(PathBuf::from(p));
+    }
+    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).map_err(|_| "no home folder".to_string())?;
+    Ok(PathBuf::from(home).join("Downloads"))
+}
+
+/// Decodes a `encodeURIComponent` string (file names are sent that way in an IPC header).
+pub fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Keeps a user-facing file name safe: no folders, no reserved characters, sane length.
+pub fn safe_file_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let cleaned: String = base
+        .chars()
+        .map(|c| if c.is_control() || "<>:\"|?*".contains(c) { '_' } else { c })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.').to_string();
+    let t = if trimmed.is_empty() { "audio.wav".to_string() } else { trimmed };
+    t.chars().take(150).collect()
+}
+
+/// `dir/name`, or `dir/stem (2).ext`, `(3)`, ... so an earlier save is never overwritten.
+pub fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let p = std::path::Path::new(name);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
+    let ext = p.extension().and_then(|s| s.to_str()).map(|e| format!(".{e}")).unwrap_or_default();
+    (2..10_000).map(|i| dir.join(format!("{stem} ({i}){ext}"))).find(|c| !c.exists()).unwrap_or(first)
+}
+
+/// Writes `bytes` into the Downloads folder under a unique, safe name; returns the full path.
+pub fn save_to_downloads(name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let dir = downloads_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot open Downloads: {e}"))?;
+    let path = unique_path(&dir, &safe_file_name(name));
+    std::fs::write(&path, bytes).map_err(|e| format!("cannot save {}: {e}", path.display()))?;
+    Ok(path)
+}
+
 /// Shared across `library`'s and `samples`' test modules: `ABSOLUTESAMPLE_HOME`
 /// is process-global state, so tests that set it must not run concurrently
 /// with each other, regardless of which module they live in.
@@ -215,6 +277,31 @@ pub static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percent_decode_handles_unicode_and_junk() {
+        assert_eq!(percent_decode("My%20Song%20%E2%80%93%20take-autotuned.wav"), "My Song \u{2013} take-autotuned.wav");
+        assert_eq!(percent_decode("plain.wav"), "plain.wav");
+        assert_eq!(percent_decode("bad%zzend%"), "bad%zzend%");
+    }
+
+    #[test]
+    fn save_to_downloads_never_overwrites_and_strips_folders() {
+        let _g = ENV_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("as-dl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("ABSOLUTESAMPLE_DOWNLOADS", &dir);
+        let a = save_to_downloads("take-autotuned.wav", b"one").unwrap();
+        let b = save_to_downloads("take-autotuned.wav", b"two").unwrap();
+        let c = save_to_downloads("..\\..\\evil/take:x.wav", b"three").unwrap();
+        std::env::remove_var("ABSOLUTESAMPLE_DOWNLOADS");
+        assert_eq!(a.file_name().unwrap(), "take-autotuned.wav");
+        assert_eq!(b.file_name().unwrap(), "take-autotuned (2).wav");
+        assert_eq!(std::fs::read(&a).unwrap(), b"one");
+        assert_eq!(c.parent().unwrap(), dir.as_path());
+        assert_eq!(c.file_name().unwrap(), "take_x.wav");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn read_audio_bytes_only_reads_audio_files() {

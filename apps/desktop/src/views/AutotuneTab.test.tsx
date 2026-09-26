@@ -475,5 +475,15 @@ describe("AutotuneTab (Melodyne-style editor)", () => {
     await waitFor(() => expect(clickSpy).toHaveBeenCalled());
     const blob = (created.mock.calls[0] as unknown as [Blob])[0];
     expect(blob.type).toBe("audio/wav");
+    // Saved under "<name>-autotuned.wav", and the user is told so.
+    const anchor = clickSpy.mock.instances[0] as unknown as HTMLAnchorElement;
+    expect(anchor.download).toMatch(/-autotuned\.wav$/);
+    const status = await screen.findByTestId("autotune-saved");
+    expect(status).toHaveTextContent(/-autotuned\.wav/);
+    // Clicking again without changing anything does not save a duplicate.
+    const button = screen.getByRole("button", { name: /saved/i });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(engine.renderAll).toHaveBeenCalledTimes(1);
   });
 });

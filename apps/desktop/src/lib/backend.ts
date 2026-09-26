@@ -82,6 +82,31 @@ export const backend = {
     return invokeTauri<ArrayBuffer>("read_audio_file", { path });
   },
 
+  /**
+   * Saves exported bytes. Desktop: written into the Downloads folder (never overwriting) and the
+   * full path is returned. Web: a normal browser download; returns null (the browser picks the place).
+   */
+  async saveExport(fileName: string, bytes: Uint8Array): Promise<string | null> {
+    if (isTauri()) {
+      const { invoke } = await import("@tauri-apps/api/core");
+      return invoke<string>("save_to_downloads", bytes, { headers: { "x-file-name": encodeURIComponent(fileName) } });
+    }
+    const url = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: "audio/wav" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    return null;
+  },
+
+  /** Desktop: shows a file saved by saveExport in Explorer. */
+  async revealDownload(path: string): Promise<void> {
+    if (isTauri()) await invokeTauri<void>("reveal_download", { path });
+  },
+
   async resolveWavUrl(path: string): Promise<string> {
     if (isTauri()) return mediaUrl(path);
     return mock.resolveWav(path);
