@@ -4,6 +4,8 @@
 //! env var if set, else `%USERPROFILE%\.absolutesample\`. NOT `%LOCALAPPDATA%`, which
 //! is filesystem-virtualized for processes launched from packaged (MSIX) apps.
 
+use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::PathBuf;
 
 /// Root app data directory: `ABSOLUTESAMPLE_HOME` env if set, else
@@ -48,6 +50,63 @@ pub fn work_dir(track_id: &str) -> Result<PathBuf, String> {
     let dir = work_root()?.join(id);
     std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create work dir: {e}"))?;
     Ok(dir)
+}
+
+// ---------------------------------------------------------------------
+// Performance log (contract v8 addendum "Performance metrics")
+// ---------------------------------------------------------------------
+
+/// One parsed row of `<home>/perf.log`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PerfRow {
+    pub ts: String,
+    pub op: String,
+    pub track_id: Option<String>,
+    pub seconds: f64,
+    pub peak_rss_mb: Option<f64>,
+}
+
+/// `<home>/perf.log` path.
+pub fn perf_log_path() -> Result<PathBuf, String> {
+    Ok(home_dir()?.join("perf.log"))
+}
+
+/// Appends one jsonl row to `<home>/perf.log`: `{ts, op, trackId, seconds,
+/// peakRssMb}`. Never fatal to the caller's operation on its own merits, but
+/// returns `Err` on an actual write failure so callers can decide whether to
+/// ignore it.
+pub fn log_perf(op: &str, track_id: Option<&str>, seconds: f64, peak_rss_mb: Option<f64>) -> Result<(), String> {
+    let path = perf_log_path()?;
+    let row = PerfRow {
+        ts: super::library::now_rfc3339(),
+        op: op.to_string(),
+        track_id: track_id.map(|s| s.to_string()),
+        seconds,
+        peak_rss_mb,
+    };
+    let line = serde_json::to_string(&row).map_err(|e| format!("failed to serialize perf row: {e}"))?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+    writeln!(file, "{line}").map_err(|e| format!("failed to append to {}: {e}", path.display()))?;
+    Ok(())
+}
+
+/// Returns the last `limit` rows of `<home>/perf.log`, newest last (file
+/// order), parsed; unparsable lines are skipped. Missing file returns an
+/// empty vec (not an error).
+pub fn read_perf_log(limit: usize) -> Result<Vec<PerfRow>, String> {
+    let path = perf_log_path()?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let rows: Vec<PerfRow> = text.lines().filter_map(|line| serde_json::from_str::<PerfRow>(line).ok()).collect();
+    let start = rows.len().saturating_sub(limit);
+    Ok(rows[start..].to_vec())
 }
 
 /// `stems/` subdirectory of the track's work dir, created if missing.
@@ -154,5 +213,41 @@ mod tests {
     fn sha1_matches_known_vector() {
         assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
         assert_eq!(sha1_hex(b""), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+    }
+
+    #[test]
+    fn perf_log_append_and_read_round_trip() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("perf_log_rs_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prior = std::env::var("ABSOLUTESAMPLE_HOME").ok();
+        std::env::set_var("ABSOLUTESAMPLE_HOME", dir.to_string_lossy().to_string());
+
+        // Fresh home: no perf.log yet -> empty, not an error.
+        assert_eq!(read_perf_log(100).unwrap(), Vec::new());
+
+        log_perf("analyze_pitch", Some("track1"), 23.4, Some(1096.7)).unwrap();
+        log_perf("apply_autotune", None, 40.1, Some(1620.0)).unwrap();
+
+        let rows = read_perf_log(100).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].op, "analyze_pitch");
+        assert_eq!(rows[0].track_id, Some("track1".to_string()));
+        assert_eq!(rows[0].seconds, 23.4);
+        assert_eq!(rows[0].peak_rss_mb, Some(1096.7));
+        assert_eq!(rows[1].op, "apply_autotune");
+        assert_eq!(rows[1].track_id, None);
+        assert!(!rows[0].ts.is_empty());
+
+        // `limit` trims to the newest rows.
+        let last_one = read_perf_log(1).unwrap();
+        assert_eq!(last_one.len(), 1);
+        assert_eq!(last_one[0].op, "apply_autotune");
+
+        match prior {
+            Some(p) => std::env::set_var("ABSOLUTESAMPLE_HOME", p),
+            None => std::env::remove_var("ABSOLUTESAMPLE_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

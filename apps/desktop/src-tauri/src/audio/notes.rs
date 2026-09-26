@@ -5,8 +5,9 @@
 //! via `include_str!` and rewritten to `<engine>/notes.py` before every run,
 //! then driven with the engine's venv python.
 
-use super::engine::{engine_dir, venv_python_path};
+use super::engine::{acquire_engine, engine_dir, parse_metrics_line, venv_python_path};
 use super::silent_command;
+use super::workspace::log_perf;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -93,6 +94,10 @@ pub struct NotesResult {
     pub elapsed_sec: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drum: Option<DrumResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_rss_mb: Option<f64>,
 }
 
 /// Stem-name keys that `extract_notes` treats as drums (contract v7
@@ -168,7 +173,12 @@ fn cache_is_fresh(cache: &Path, wav: &Path) -> bool {
     cache_mtime >= wav_mtime
 }
 
-fn load_notes_result(json_path: &Path, mid_path: &Path, elapsed_sec: f64) -> Result<NotesResult, String> {
+fn load_notes_result(
+    json_path: &Path,
+    mid_path: &Path,
+    elapsed_sec: f64,
+    metrics: Option<&super::engine::MetricsEvent>,
+) -> Result<NotesResult, String> {
     let text = std::fs::read_to_string(json_path)
         .map_err(|e| format!("failed to read {}: {e}", json_path.display()))?;
     let parsed: NotesJson =
@@ -182,6 +192,8 @@ fn load_notes_result(json_path: &Path, mid_path: &Path, elapsed_sec: f64) -> Res
         mid_path: mid_path.to_string_lossy().to_string(),
         elapsed_sec,
         drum: parsed.drum,
+        seconds: metrics.map(|m| m.seconds),
+        peak_rss_mb: metrics.and_then(|m| m.peak_rss_mb),
     })
 }
 
@@ -199,12 +211,18 @@ pub fn extract_notes(path: &Path, bpm: Option<f64>, kind: Option<&str>) -> Resul
     ));
 
     if cache_is_fresh(&cache, path) {
-        return load_notes_result(&cache, &mid_path, 0.0);
+        return load_notes_result(&cache, &mid_path, 0.0, None);
     }
 
     let stem_key = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
     let is_drums = kind.map(|k| k.eq_ignore_ascii_case("drums")).unwrap_or(false)
         || DRUM_STEM_KEYS.contains(&stem_key.as_str());
+
+    let label = format!(
+        "extract_notes: {}",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("wav")
+    );
+    let _guard = acquire_engine(&label)?;
 
     let start = Instant::now();
     let engine = engine_dir()?;
@@ -258,10 +276,15 @@ pub fn extract_notes(path: &Path, bpm: Option<f64>, kind: Option<&str>) -> Resul
     let mut done: Option<(String, String)> = None;
     let mut drum_done: Option<DrumResult> = None;
     let mut fatal: Option<String> = None;
+    let mut metrics: Option<super::engine::MetricsEvent> = None;
     if let Some(stdout) = stdout {
         use std::io::{BufRead, BufReader};
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
+            if let Some(m) = parse_metrics_line(&line) {
+                metrics = Some(m);
+                continue;
+            }
             match parse_notes_line(&line) {
                 NotesEvent::Done { json, mid } => done = Some((json, mid)),
                 NotesEvent::DrumDone { drum } => drum_done = Some(drum),
@@ -290,6 +313,10 @@ pub fn extract_notes(path: &Path, bpm: Option<f64>, kind: Option<&str>) -> Resul
 
     let elapsed_sec = start.elapsed().as_secs_f64();
 
+    if let Some(m) = &metrics {
+        let _ = log_perf("extract_notes", None, m.seconds, m.peak_rss_mb);
+    }
+
     if is_drums {
         let drum = drum_done.ok_or_else(|| "notes.py did not emit a drum done event".to_string())?;
         let cache_json = NotesJson {
@@ -312,13 +339,15 @@ pub fn extract_notes(path: &Path, bpm: Option<f64>, kind: Option<&str>) -> Resul
             mid_path: String::new(),
             elapsed_sec,
             drum: Some(drum),
+            seconds: metrics.as_ref().map(|m| m.seconds),
+            peak_rss_mb: metrics.as_ref().and_then(|m| m.peak_rss_mb),
         });
     }
 
     let (json_str, mid_str) = done.ok_or_else(|| "notes.py did not emit a done event".to_string())?;
     let json_path = PathBuf::from(json_str);
     let mid_path = PathBuf::from(mid_str);
-    load_notes_result(&json_path, &mid_path, elapsed_sec)
+    load_notes_result(&json_path, &mid_path, elapsed_sec, metrics.as_ref())
 }
 
 /// Copies the cached `.mid` for `path` (produced by a prior `extract_notes`)

@@ -58,12 +58,29 @@ fn busy_label() -> Option<String> {
     busy_label_mutex().lock().ok().and_then(|g| g.clone())
 }
 
-/// Guards the `BUSY` flag for the duration of a `separate()` call; clears it
-/// (and the label) in every exit path, including a panic, via `Drop`.
+/// Guards the global engine lock for the duration of a Python-spawning
+/// command (`separate`, `separate_karaoke`, `analyze_pitch`,
+/// `apply_autotune`, `analyze_frequencies`, `extract_notes`); clears it (and
+/// the label) in every exit path, including a panic, via `Drop`. At most one
+/// `EngineGuard` can be held at a time across the whole app (contract v8
+/// addendum "Hard safety rules" #1).
 #[derive(Debug)]
-struct BusyGuard;
+pub struct EngineGuard;
 
-impl BusyGuard {
+/// Backwards-compatible alias for `EngineGuard`'s prior internal name.
+type BusyGuard = EngineGuard;
+
+/// Tries to acquire the global engine lock for `label` (typically a track
+/// title or a wav's file name), WITHOUT blocking. Returns
+/// `Err("engine busy: <current label>")` immediately if another
+/// Python-spawning command already holds it. The returned guard releases the
+/// lock on `Drop`, so it must be held for the entire duration of the spawned
+/// Python child process.
+pub fn acquire_engine(label: &str) -> Result<EngineGuard, String> {
+    EngineGuard::acquire(label)
+}
+
+impl EngineGuard {
     fn acquire(label: &str) -> Result<Self, String> {
         if BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
             let current = busy_label().unwrap_or_else(|| "another track".to_string());
@@ -72,11 +89,11 @@ impl BusyGuard {
         if let Ok(mut g) = busy_label_mutex().lock() {
             *g = Some(label.to_string());
         }
-        Ok(BusyGuard)
+        Ok(EngineGuard)
     }
 }
 
-impl Drop for BusyGuard {
+impl Drop for EngineGuard {
     fn drop(&mut self) {
         if let Ok(mut g) = busy_label_mutex().lock() {
             *g = None;
@@ -614,6 +631,33 @@ pub fn install(mut progress: impl FnMut(EngineProgress)) -> Result<EngineStatus,
 // separate()
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// Performance metrics (contract v8 addendum "Performance metrics")
+// ---------------------------------------------------------------------
+
+/// A parsed `{"event":"metrics","seconds":..,"peakRssMb":..,"device":..}`
+/// line, emitted as the final stdout line by every engine script.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetricsEvent {
+    pub seconds: f64,
+    pub peak_rss_mb: Option<f64>,
+    pub device: String,
+}
+
+/// Parses one stdout line as a `metrics` event, if it is one. Any other
+/// event (or unparsable line) returns `None`; callers should keep scanning
+/// their own event types on `None`.
+pub fn parse_metrics_line(line: &str) -> Option<MetricsEvent> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    if value.get("event").and_then(|v| v.as_str()) != Some("metrics") {
+        return None;
+    }
+    let seconds = value.get("seconds").and_then(|v| v.as_f64())?;
+    let peak_rss_mb = value.get("peakRssMb").and_then(|v| v.as_f64());
+    let device = value.get("device").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    Some(MetricsEvent { seconds, peak_rss_mb, device })
+}
+
 /// One parsed line of the separate.py stdout JSON protocol.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SeparateEvent {
@@ -724,6 +768,10 @@ pub struct SeparateResult {
     pub failed_passes: Vec<(String, String)>,
     pub elapsed_sec: f64,
     pub pass_seconds: std::collections::HashMap<String, f64>,
+    /// From the script's optional trailing `metrics` line (contract v8
+    /// addendum "Performance metrics"); absent if the script didn't emit one.
+    pub seconds: Option<f64>,
+    pub peak_rss_mb: Option<f64>,
 }
 
 pub fn separate(
@@ -808,10 +856,15 @@ pub fn separate(
     let mut failed_passes: Vec<(String, String)> = Vec::new();
     let mut fatal_error: Option<String> = None;
     let mut pass_seconds: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let mut metrics: Option<MetricsEvent> = None;
 
     if let Some(stdout) = stdout {
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
+            if let Some(m) = parse_metrics_line(&line) {
+                metrics = Some(m);
+                continue;
+            }
             match parse_separate_line(&line) {
                 SeparateEvent::Device { device: d, .. } => {
                     device = d;
@@ -937,7 +990,15 @@ pub fn separate(
     std::fs::write(&manifest_path, manifest_json)
         .map_err(|e| format!("failed to write instruments.json: {e}"))?;
 
-    Ok(SeparateResult { stems, device, failed_passes, elapsed_sec, pass_seconds })
+    let (seconds, peak_rss_mb) = match &metrics {
+        Some(m) => {
+            let _ = super::workspace::log_perf("separate", Some(label), m.seconds, m.peak_rss_mb);
+            (Some(m.seconds), m.peak_rss_mb)
+        }
+        None => (None, None),
+    };
+
+    Ok(SeparateResult { stems, device, failed_passes, elapsed_sec, pass_seconds, seconds, peak_rss_mb })
 }
 
 /// Fast 2-stem karaoke split (contract v7 addendum "Karaoke"): runs
@@ -1022,10 +1083,15 @@ pub fn separate_karaoke(
     let mut failed_passes: Vec<(String, String)> = Vec::new();
     let mut fatal_error: Option<String> = None;
     let mut pass_seconds: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let mut metrics: Option<MetricsEvent> = None;
 
     if let Some(stdout) = stdout {
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
+            if let Some(m) = parse_metrics_line(&line) {
+                metrics = Some(m);
+                continue;
+            }
             match parse_separate_line(&line) {
                 SeparateEvent::Device { device: d, .. } => device = d,
                 SeparateEvent::Progress { pass, percent, message } => {
@@ -1132,7 +1198,15 @@ pub fn separate_karaoke(
         .map_err(|e| format!("failed to serialize karaoke manifest: {e}"))?;
     std::fs::write(&manifest_path, manifest_json).map_err(|e| format!("failed to write karaoke.json: {e}"))?;
 
-    Ok(SeparateResult { stems, device, failed_passes, elapsed_sec, pass_seconds })
+    let (seconds, peak_rss_mb) = match &metrics {
+        Some(m) => {
+            let _ = super::workspace::log_perf("separate_karaoke", Some(label), m.seconds, m.peak_rss_mb);
+            (Some(m.seconds), m.peak_rss_mb)
+        }
+        None => (None, None),
+    };
+
+    Ok(SeparateResult { stems, device, failed_passes, elapsed_sec, pass_seconds, seconds, peak_rss_mb })
 }
 
 #[cfg(test)]
@@ -1251,8 +1325,16 @@ mod tests {
         assert!(saw.iter().all(|&b| b));
     }
 
+    /// Serializes tests that touch the process-wide `BUSY` static, so
+    /// parallel test threads don't see each other's acquire/release.
+    fn busy_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     #[test]
     fn busy_guard_clears_on_drop() {
+        let _lock = busy_test_lock().lock().unwrap();
         assert!(!BUSY.load(Ordering::SeqCst));
         {
             let _g = BusyGuard::acquire("track1").expect("first acquire should succeed");
@@ -1264,6 +1346,51 @@ mod tests {
         }
         assert!(!BUSY.load(Ordering::SeqCst));
         assert_eq!(busy_label(), None);
+    }
+
+    /// Global engine gate (contract v8 addendum "Hard safety rules" #1):
+    /// a second concurrent `acquire_engine` while the first guard is still
+    /// held must be rejected immediately, without blocking.
+    #[test]
+    fn acquire_engine_rejects_second_concurrent_acquire() {
+        let _lock = busy_test_lock().lock().unwrap();
+        let _g1 = acquire_engine("analyze_pitch: song.wav").expect("first acquire should succeed");
+        let err = acquire_engine("apply_autotune: song.wav").expect_err("second acquire must fail");
+        assert!(err.contains("engine busy"));
+        assert!(err.contains("analyze_pitch: song.wav"));
+        drop(_g1);
+        let _g2 = acquire_engine("apply_autotune: song.wav").expect("acquire after drop should succeed");
+    }
+
+    #[test]
+    fn parses_metrics_line_from_sample_transcript() {
+        let transcript = concat!(
+            "{\"event\":\"progress\",\"pass\":\"analyze\",\"percent\":50,\"message\":\"running\"}\n",
+            "{\"event\":\"metrics\",\"seconds\":23.4,\"peakRssMb\":1096.7,\"device\":\"cuda\"}\n",
+        );
+        let mut metrics = None;
+        for line in transcript.lines() {
+            if let Some(m) = parse_metrics_line(line) {
+                metrics = Some(m);
+            }
+        }
+        let metrics = metrics.expect("metrics line should parse");
+        assert_eq!(metrics.seconds, 23.4);
+        assert_eq!(metrics.peak_rss_mb, Some(1096.7));
+        assert_eq!(metrics.device, "cuda");
+    }
+
+    #[test]
+    fn parses_metrics_line_with_missing_peak_rss() {
+        let line = r#"{"event":"metrics","seconds":1.5,"device":"cpu"}"#;
+        let metrics = parse_metrics_line(line).expect("should parse");
+        assert_eq!(metrics.peak_rss_mb, None);
+    }
+
+    #[test]
+    fn non_metrics_lines_are_ignored() {
+        assert!(parse_metrics_line(r#"{"event":"done"}"#).is_none());
+        assert!(parse_metrics_line("not json").is_none());
     }
 
     #[test]

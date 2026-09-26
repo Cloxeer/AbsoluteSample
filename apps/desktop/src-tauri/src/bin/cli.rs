@@ -187,7 +187,18 @@ enum Commands {
         path: PathBuf,
         #[arg(long)]
         edits: PathBuf,
+        /// Render only this region (contract v8 "Region preview").
+        #[arg(long)]
+        region_start: Option<f64>,
+        #[arg(long)]
+        region_end: Option<f64>,
+        /// Reuse a cached `<stem>.pitch.json` (skips CREPE re-analysis).
+        #[arg(long)]
+        pitch_cache: Option<PathBuf>,
     },
+    /// Show the last 100 rows of `<home>/perf.log` (contract v8 addendum
+    /// "Performance metrics").
+    Perf,
 }
 
 #[derive(Subcommand)]
@@ -590,7 +601,7 @@ fn main() -> ExitCode {
             }
             Err(e) => print_err("pitch", &e),
         },
-        Commands::Autotune { path, edits } => {
+        Commands::Autotune { path, edits, region_start, region_end, pitch_cache } => {
             let edits_text = match std::fs::read_to_string(&edits) {
                 Ok(t) => t,
                 Err(e) => return print_err("autotune", &format!("failed to read edits json: {e}")),
@@ -599,7 +610,14 @@ fn main() -> ExitCode {
                 Ok(v) => v,
                 Err(e) => return print_err("autotune", &format!("failed to parse edits json: {e}")),
             };
-            match absolutesample_lib::audio::autotune::apply_autotune(&path, &edits_value) {
+            let pitch_cache_str = pitch_cache.as_ref().map(|p| p.to_string_lossy().to_string());
+            match absolutesample_lib::audio::autotune::apply_autotune(
+                &path,
+                &edits_value,
+                region_start,
+                region_end,
+                pitch_cache_str.as_deref(),
+            ) {
                 Ok(result) => {
                     print_json(&result);
                     ExitCode::SUCCESS
@@ -607,5 +625,12 @@ fn main() -> ExitCode {
                 Err(e) => print_err("autotune", &e),
             }
         }
+        Commands::Perf => match workspace::read_perf_log(100) {
+            Ok(rows) => {
+                print_json(&rows);
+                ExitCode::SUCCESS
+            }
+            Err(e) => print_err("perf", &e),
+        },
     }
 }

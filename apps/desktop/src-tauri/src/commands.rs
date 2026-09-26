@@ -502,6 +502,10 @@ pub struct SeparateInstrumentsOut {
     pub pass_seconds: HashMap<String, f64>,
     pub device: String,
     pub failed_passes: Vec<engine::FailedPass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_rss_mb: Option<f64>,
 }
 
 #[tauri::command]
@@ -536,6 +540,8 @@ pub async fn separate_instruments(
                 .into_iter()
                 .map(|(pass, error)| engine::FailedPass { pass, error })
                 .collect(),
+            seconds: result.seconds,
+            peak_rss_mb: result.peak_rss_mb,
         })
     })
     .await
@@ -549,6 +555,10 @@ pub struct SeparateKaraokeOut {
     pub stems: Vec<InstrumentStem>,
     pub elapsed_sec: f64,
     pub device: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_rss_mb: Option<f64>,
 }
 
 #[tauri::command]
@@ -563,7 +573,13 @@ pub async fn separate_karaoke(
         let result = pipeline::run_karaoke(&track_id, split_lead_backing.unwrap_or(false), low_priority.unwrap_or(false), |p| {
             progress.report_pass(&p.stage, p.pass.as_deref().unwrap_or(""), p.percent, &p.message, p.failed, &HashMap::new());
         })?;
-        Ok(SeparateKaraokeOut { stems: result.stems, elapsed_sec: result.elapsed_sec, device: result.device })
+        Ok(SeparateKaraokeOut {
+            stems: result.stems,
+            elapsed_sec: result.elapsed_sec,
+            device: result.device,
+            seconds: result.seconds,
+            peak_rss_mb: result.peak_rss_mb,
+        })
     })
     .await
     .map_err(|e| format!("task join error: {e}"))?
@@ -865,8 +881,33 @@ pub async fn analyze_pitch(path: String) -> Result<crate::audio::autotune::Pitch
 }
 
 #[tauri::command]
-pub async fn apply_autotune(path: String, edits: serde_json::Value) -> Result<crate::audio::autotune::AutotuneResult, String> {
-    tauri::async_runtime::spawn_blocking(move || crate::audio::autotune::apply_autotune(std::path::Path::new(&path), &edits))
+pub async fn apply_autotune(
+    path: String,
+    edits: serde_json::Value,
+    region_start_sec: Option<f64>,
+    region_end_sec: Option<f64>,
+    pitch_cache_path: Option<String>,
+) -> Result<crate::audio::autotune::AutotuneResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::audio::autotune::apply_autotune(
+            std::path::Path::new(&path),
+            &edits,
+            region_start_sec,
+            region_end_sec,
+            pitch_cache_path.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+// ---------------------------------------------------------------------
+// v8: Performance log
+// ---------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn perf_log() -> Result<Vec<crate::audio::workspace::PerfRow>, String> {
+    tauri::async_runtime::spawn_blocking(|| crate::audio::workspace::read_perf_log(100))
         .await
         .map_err(|e| format!("task join error: {e}"))?
 }

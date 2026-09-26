@@ -3,8 +3,9 @@
 //! `engine/frequencies.py` is embedded via `include_str!` and rewritten to
 //! disk before every run, then driven with the engine's venv python.
 
-use super::engine::{engine_dir, venv_python_path};
+use super::engine::{acquire_engine, engine_dir, parse_metrics_line, venv_python_path};
 use super::silent_command;
+use super::workspace::log_perf;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -68,6 +69,10 @@ pub struct FrequencyResult {
     pub tuning: Tuning,
     pub key: FrequencyKey,
     pub duration_sec: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_rss_mb: Option<f64>,
 }
 
 /// `<wav dir>/<stem>.freq.json` cache path for a given wav path.
@@ -120,6 +125,12 @@ pub fn analyze_frequencies(path: &Path, bpm: Option<f64>) -> Result<FrequencyRes
         }
     }
 
+    let label = format!(
+        "analyze_frequencies: {}",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("wav")
+    );
+    let _guard = acquire_engine(&label)?;
+
     let engine = engine_dir()?;
     std::fs::create_dir_all(&engine).map_err(|e| format!("failed to create engine dir: {e}"))?;
     let script_path = engine.join("frequencies.py");
@@ -160,10 +171,15 @@ pub fn analyze_frequencies(path: &Path, bpm: Option<f64>) -> Result<FrequencyRes
 
     let mut result: Option<FrequencyResult> = None;
     let mut error: Option<String> = None;
+    let mut metrics: Option<super::engine::MetricsEvent> = None;
     if let Some(stdout) = stdout {
         use std::io::{BufRead, BufReader};
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
+            if let Some(m) = parse_metrics_line(&line) {
+                metrics = Some(m);
+                continue;
+            }
             match parse_frequencies_line(&line) {
                 Ok(Some(r)) => result = Some(r),
                 Ok(None) => {}
@@ -187,7 +203,13 @@ pub fn analyze_frequencies(path: &Path, bpm: Option<f64>) -> Result<FrequencyRes
         return Err(msg);
     }
 
-    let result = result.ok_or_else(|| "frequencies.py did not emit a done event".to_string())?;
+    let mut result = result.ok_or_else(|| "frequencies.py did not emit a done event".to_string())?;
+
+    if let Some(m) = &metrics {
+        result.seconds = Some(m.seconds);
+        result.peak_rss_mb = m.peak_rss_mb;
+        let _ = log_perf("analyze_frequencies", None, m.seconds, m.peak_rss_mb);
+    }
 
     if let Ok(json) = serde_json::to_string_pretty(&result) {
         let _ = std::fs::write(&cache, json);
