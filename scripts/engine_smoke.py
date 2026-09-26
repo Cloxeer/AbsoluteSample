@@ -43,7 +43,7 @@ if r.returncode != 0 or not tone.exists():
 try:
     import psutil
 except Exception:
-    subprocess.run([str(venv_py), "-m", "pip", "install", "-q", "psutil"])
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "psutil"])
     import psutil
 
 args = [str(venv_py), str(script), "--mode", "analyze", "--input", str(tone)]

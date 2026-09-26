@@ -29,7 +29,9 @@ if (existsSync(cargo)) {
 }
 
 // 3. Memory-guarded engine smoke (skips itself if the engine venv is absent).
-const py = process.platform === "win32" ? "python" : "python3";
+// Prefer the engine venv python (it has psutil + the audio deps).
+const venvPy = join(process.env.USERPROFILE || process.env.HOME || "", ".absolutesample", "engine", "venv", "Scripts", "python.exe");
+const py = existsSync(venvPy) ? venvPy : (process.platform === "win32" ? "python" : "python3");
 step("engine memory guard", py, [join(root, "scripts", "engine_smoke.py")]);
 
 console.log("\n[smoke] ALL CHECKS PASSED");
