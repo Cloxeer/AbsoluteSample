@@ -30,12 +30,25 @@ const PASS_DEFS: { pass: string; label: string }[] = [
   { pass: "drums", label: "Drum kit" },
 ];
 
+const KARAOKE_PASS_DEFS: { pass: string; label: string }[] = [
+  { pass: "vocals", label: "Vocals" },
+  { pass: "lead", label: "Lead & backing" },
+];
+
 type PassState = "pending" | "running" | "done" | "failed";
 
-function PassChecklist({ passStates, reasons }: { passStates: Record<string, PassState>; reasons: Record<string, string> }) {
+function PassChecklist({
+  passStates,
+  reasons,
+  defs = PASS_DEFS,
+}: {
+  passStates: Record<string, PassState>;
+  reasons: Record<string, string>;
+  defs?: { pass: string; label: string }[];
+}) {
   return (
     <ul className="flex flex-col gap-1.5">
-      {PASS_DEFS.map(({ pass, label }) => {
+      {defs.map(({ pass, label }) => {
         const state = passStates[pass] ?? "pending";
         return (
           <li key={pass} className="flex items-center gap-2 text-xs">
@@ -189,7 +202,7 @@ export interface SlicerTabProps {
 
 export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], onSampleSaved }: SlicerTabProps = {}) {
   const ownEngine = useAudioEngine();
-  const { engine, fetchAudio, importLocal, trimLoop, separateStems, separateInstruments, newLink } = engineApi ?? ownEngine;
+  const { engine, fetchAudio, importLocal, trimLoop, separateStems, separateInstruments, separateKaraoke, newLink } = engineApi ?? ownEngine;
   const ownSync = useSyncPlayback();
   const sync = syncApi ?? ownSync;
   const [url, setUrl] = useState(SEED_URL);
@@ -203,6 +216,11 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
   const [installing, setInstalling] = useState(false);
   const [passStates, setPassStates] = useState<Record<string, PassState>>({});
   const [passReasons, setPassReasons] = useState<Record<string, string>>({});
+  const [karaokeRunning, setKaraokeRunning] = useState(false);
+  const [karaokeSuccess, setKaraokeSuccess] = useState(false);
+  const [splitLeadBacking, setSplitLeadBacking] = useState(false);
+  const [karaokePassStates, setKaraokePassStates] = useState<Record<string, PassState>>({});
+  const [karaokePassReasons, setKaraokePassReasons] = useState<Record<string, string>>({});
 
   useEffect(() => {
     backend.engineStatus().then(setEngineStatus);
@@ -236,6 +254,23 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
     let unlisten: (() => void) | null = null;
     onProgress((payload: ProgressPayload) => {
       if (payload.stage !== "separate" || !payload.pass) return;
+      if (karaokeRunning) {
+        setKaraokePassStates((prev) => {
+          const next = { ...prev };
+          for (const def of KARAOKE_PASS_DEFS) {
+            if (def.pass === payload.pass) {
+              next[def.pass] = payload.failed ? "failed" : payload.percent >= 100 ? "done" : "running";
+            } else if (!next[def.pass]) {
+              next[def.pass] = "pending";
+            }
+          }
+          return next;
+        });
+        if (payload.failed) {
+          setKaraokePassReasons((prev) => ({ ...prev, [payload.pass as string]: payload.message }));
+        }
+        return;
+      }
       setPassStates((prev) => {
         const next = { ...prev };
         for (const def of PASS_DEFS) {
@@ -254,7 +289,7 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
       unlisten = u;
     });
     return () => unlisten?.();
-  }, []);
+  }, [karaokeRunning]);
 
   const handleFetch = async () => {
     const track = await fetchAudio(url);
@@ -319,6 +354,21 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
     setSplitSuccess(true);
     onLibraryChanged?.();
     setTimeout(() => setSplitSuccess(false), 1500);
+  };
+
+  const handleKaraoke = async () => {
+    if (!engine.track) return;
+    setKaraokeRunning(true);
+    setKaraokePassStates(Object.fromEntries(KARAOKE_PASS_DEFS.filter((p) => splitLeadBacking || p.pass !== "lead").map((p) => [p.pass, "pending" as PassState])));
+    setKaraokePassReasons({});
+    try {
+      await separateKaraoke(engine.track.id, splitLeadBacking);
+      setKaraokeSuccess(true);
+      onLibraryChanged?.();
+      setTimeout(() => setKaraokeSuccess(false), 1500);
+    } finally {
+      setKaraokeRunning(false);
+    }
   };
 
   const handleQuickEq = async () => {
@@ -447,20 +497,62 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
             <EngineStatusCard status={engineStatus} installing={installing} onInstall={handleInstallEngine} />
           )}
 
-          {isSeparating && !useQuickEq && (
+          {isSeparating && !useQuickEq && !karaokeRunning && (
             <Surface variant="raised" className="p-4">
               <PassChecklist passStates={passStates} reasons={passReasons} />
             </Surface>
           )}
 
+          {karaokeRunning && (
+            <Surface variant="raised" className="p-4">
+              <PassChecklist
+                passStates={karaokePassStates}
+                reasons={karaokePassReasons}
+                defs={KARAOKE_PASS_DEFS.filter((p) => splitLeadBacking || p.pass !== "lead")}
+              />
+            </Surface>
+          )}
+
           {!engine.stems && !engine.instruments && (
             <div className="flex flex-col items-end gap-2">
-              <Button variant="primary" busy={isSeparating && !useQuickEq} busyLabel="Splitting" success={splitSuccess} onClick={handleSplit} disabled={!splitEnabled}>
-                Split
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button variant="primary" busy={isSeparating && !useQuickEq && !karaokeRunning} busyLabel="Splitting" success={splitSuccess} onClick={handleSplit} disabled={!splitEnabled}>
+                  Split
+                </Button>
+                {!engine.karaoke && (
+                  <Button busy={karaokeRunning} busyLabel="Splitting" success={karaokeSuccess} onClick={handleKaraoke} disabled={!splitEnabled}>
+                    Karaoke
+                  </Button>
+                )}
+              </div>
               <button type="button" onClick={handleQuickEq} className="text-xs text-muted underline hover:text-text">
                 Quick EQ bands instead
               </button>
+              {!engine.karaoke && (
+                <label className="flex items-center gap-1.5 text-xs text-muted">
+                  <input
+                    type="checkbox"
+                    checked={splitLeadBacking}
+                    onChange={(e) => setSplitLeadBacking(e.target.checked)}
+                  />
+                  Split lead &amp; backing
+                </label>
+              )}
+            </div>
+          )}
+          {(engine.stems || engine.instruments) && !engine.karaoke && (
+            <div className="flex flex-col items-end gap-2">
+              <Button busy={karaokeRunning} busyLabel="Splitting" success={karaokeSuccess} onClick={handleKaraoke} disabled={!splitEnabled}>
+                Karaoke
+              </Button>
+              <label className="flex items-center gap-1.5 text-xs text-muted">
+                <input
+                  type="checkbox"
+                  checked={splitLeadBacking}
+                  onChange={(e) => setSplitLeadBacking(e.target.checked)}
+                />
+                Split lead &amp; backing
+              </label>
             </div>
           )}
         </div>
@@ -506,6 +598,34 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
             mode={sync.mode}
             auditionId={sync.auditionId}
             analysis={engine.analysis}
+            onUpsertTrack={sync.upsertTrack}
+            onRegisterInstance={sync.registerInstance}
+            onUnregisterInstance={sync.unregisterInstance}
+            onTimeUpdate={sync.handleTimeUpdate}
+            onFinish={sync.handleFinish}
+            onAudition={sync.auditionTrack}
+            onSeek={sync.seek}
+            onSaved={onLibraryChanged}
+            songTitle={engine.track.title}
+            loopStartSec={engine.loop?.startSec}
+            loopEndSec={engine.loop?.endSec}
+            samples={samples}
+            onSampleSaved={onSampleSaved}
+          />
+        </div>
+      )}
+
+      {engine.karaoke && engine.track && (
+        <div className="flex flex-col gap-3" id="step-karaoke">
+          <h2 className="text-sm font-semibold text-muted uppercase tracking-wide">Karaoke</h2>
+          <InstrumentTrackList
+            key={`${engine.track.id}:karaoke`}
+            trackId={engine.track.id}
+            stems={engine.karaoke}
+            tracks={sync.tracks}
+            currentTime={sync.currentTime}
+            mode={sync.mode}
+            auditionId={sync.auditionId}
             onUpsertTrack={sync.upsertTrack}
             onRegisterInstance={sync.registerInstance}
             onUnregisterInstance={sync.unregisterInstance}

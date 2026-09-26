@@ -23,6 +23,7 @@ export interface AudioEngineState {
   stems: StemInfo[] | null;
   instruments: InstrumentStem[] | null;
   instrumentsMeta: Omit<InstrumentsResult, "stems"> | null;
+  karaoke: InstrumentStem[] | null;
   analysis: LoopAnalysis | null;
   progress: ProgressPayload | null;
   error: string | null;
@@ -55,6 +56,7 @@ export function useAudioEngine() {
     stems: null,
     instruments: null,
     instrumentsMeta: null,
+    karaoke: null,
     analysis: null,
     progress: null,
     error: null,
@@ -127,6 +129,7 @@ export function useAudioEngine() {
       stems: null,
       instruments: null,
       instrumentsMeta: null,
+      karaoke: null,
       analysis: null,
       progress: null,
       error: null,
@@ -173,6 +176,20 @@ export function useAudioEngine() {
     }
   }, []);
 
+  const separateKaraoke = useCallback(async (trackId: string, splitLeadBacking?: boolean, options?: { lowPriority?: boolean }) => {
+    markJobStarted(trackId);
+    setEngine((prev) => ({ ...prev, state: "separating", error: null }));
+    try {
+      const lowPriority = options?.lowPriority ?? getLowPriority();
+      const { stems } = await backend.separateKaraoke({ trackId, splitLeadBacking, lowPriority });
+      setEngine((prev) => ({ ...prev, state: "ready", karaoke: stems, progress: null }));
+      return stems;
+    } catch (err) {
+      setEngine((prev) => ({ ...prev, state: "error", error: String(err) }));
+      throw err;
+    }
+  }, []);
+
   const analyzeLoop = useCallback(async (trackId: string) => {
     setEngine((prev) => ({ ...prev, state: "analyzing" }));
     try {
@@ -193,11 +210,12 @@ export function useAudioEngine() {
       stems: null,
       instruments: null,
       instrumentsMeta: null,
+      karaoke: null,
       analysis: null,
       progress: null,
       error: null,
     });
   }, []);
 
-  return { engine, fetchAudio, importLocal, trimLoop, separateStems, separateInstruments, analyzeLoop, reset, openTrack, newLink };
+  return { engine, fetchAudio, importLocal, trimLoop, separateStems, separateInstruments, separateKaraoke, analyzeLoop, reset, openTrack, newLink };
 }
