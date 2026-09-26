@@ -384,6 +384,72 @@ def pass_tag(stems: dict[str, Path], device: str) -> dict[str, dict]:
     return out
 
 
+KARAOKE_META = {
+    "instrumental": ("Instrumental", "other", None, 5),
+    "vocals": ("Vocals", "vocals", None, 10),
+    "lead_vocals": ("Lead vocals", "vocals", "vocals", 11),
+    "backing_vocals": ("Backing vocals", "vocals", "vocals", 12),
+}
+
+
+def run_karaoke(sep_factory, inp: Path, out: Path, sr: int, stems: dict[str, Path], lead: bool, work: Path, device: str = "cpu") -> int:
+    t0 = time.time()
+    try:
+        sep = sep_factory("vocals")
+        res = run_model(sep, MODELS["vocals"], inp, "vocals")
+        rof_key = next((k for k in res if "vocal" in k and "instrument" not in k), None)
+        inst_key = next((k for k in res if k != rof_key), None)
+        if rof_key is None or inst_key is None:
+            raise RuntimeError(f"Roformer returned {sorted(res)}")
+        vocals_data, _ = read_wav(res[rof_key])
+        inst_data, _ = read_wav(res[inst_key])
+        write_wav(out / "vocals.wav", vocals_data, sr)
+        write_wav(out / "instrumental.wav", inst_data, sr)
+        stems["vocals"] = out / "vocals.wav"
+        stems["instrumental"] = out / "instrumental.wav"
+        emit({"event": "pass_done", "pass": "vocals", "seconds": round(time.time() - t0, 1)})
+    except Exception as e:  # noqa: BLE001
+        emit({"event": "fatal", "error": f"vocals pass failed: {e}"})
+        return 1
+
+    if lead:
+        t0 = time.time()
+        try:
+            sep = sep_factory("lead")
+            res = run_model(sep, MODELS["lead"], stems["vocals"], "lead")
+            lead_key = next((k for k in res if "vocal" in k), None)
+            back_key = next((k for k in res if k != lead_key), None)
+            if lead_key is None or back_key is None:
+                raise RuntimeError(f"karaoke model returned {sorted(res)}")
+            lead_data, _ = read_wav(res[lead_key])
+            back_data, _ = read_wav(res[back_key])
+            write_wav(out / "lead_vocals.wav", lead_data, sr)
+            write_wav(out / "backing_vocals.wav", back_data, sr)
+            stems["lead_vocals"] = out / "lead_vocals.wav"
+            stems["backing_vocals"] = out / "backing_vocals.wav"
+            emit({"event": "pass_done", "pass": "lead", "seconds": round(time.time() - t0, 1)})
+        except Exception as e:  # noqa: BLE001
+            emit({"event": "pass_failed", "pass": "lead", "error": str(e)[:400]})
+
+    shutil.rmtree(work, ignore_errors=True)
+
+    listing = []
+    for key, path in stems.items():
+        label, group, parent, order = KARAOKE_META[key]
+        listing.append({
+            "key": key,
+            "label": label,
+            "group": group,
+            "parent": parent,
+            "path": str(path),
+            "model": MODELS["lead"] if key in ("lead_vocals", "backing_vocals") else MODELS["vocals"],
+            "order": order,
+        })
+    listing.sort(key=lambda s: s["order"])
+    emit({"event": "done", "stems": listing, "device": device})
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
@@ -392,6 +458,8 @@ def main() -> int:
     ap.add_argument("--models-dir", required=True)
     ap.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     ap.add_argument("--low-priority", action="store_true")
+    ap.add_argument("--mode", default="full", choices=["full", "karaoke"])
+    ap.add_argument("--lead", action="store_true")
     args = ap.parse_args()
 
     inp = Path(args.input).resolve()
@@ -403,8 +471,6 @@ def main() -> int:
     work.mkdir()
     model_dir = Path(args.models_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
-
-    passes = [p.strip() for p in args.passes.split(",") if p.strip()]
 
     import torch
 
@@ -419,6 +485,11 @@ def main() -> int:
 
     _, sr = read_wav(inp)
     stems: dict[str, Path] = {}
+
+    if args.mode == "karaoke":
+        return run_karaoke(sep_factory, inp, out, sr, stems, args.lead, work, device)
+
+    passes = [p.strip() for p in args.passes.split(",") if p.strip()]
 
     t0 = time.time()
     try:

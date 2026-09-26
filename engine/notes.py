@@ -143,14 +143,45 @@ def detect_chords(notes: list[dict], bpm: float | None, total_dur: float) -> lis
     return merged
 
 
+def run_drums(inp: Path, bpm: float, label: str) -> int:
+    import librosa
+
+    y, sr = librosa.load(str(inp), sr=None, mono=True)
+    duration = len(y) / sr if sr else 0.0
+    onsets = librosa.onset.onset_detect(y=y, sr=sr, units="time", backtrack=True)
+    step_dur = (60.0 / bpm) / 4.0
+    steps = max(16, int(np.ceil(duration / step_dur)) if step_dur > 0 else 16)
+    hits = sorted({int(round(t / step_dur)) for t in onsets if step_dur > 0})
+    hits = [h for h in hits if 0 <= h < steps]
+    emit({
+        "event": "done",
+        "drum": {
+            "bpm": bpm,
+            "steps": steps,
+            "lanes": [{"key": label.lower().replace(" ", "_"), "label": label, "hits": hits}],
+        },
+    })
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", default=None)
     ap.add_argument("--bpm", type=float, default=None)
+    ap.add_argument("--mode", default="melodic", choices=["melodic", "drums"])
+    ap.add_argument("--label", default="Drums")
     args = ap.parse_args()
 
     inp = Path(args.input).resolve()
+
+    if args.mode == "drums":
+        if args.bpm is None:
+            raise SystemExit("--bpm is required for --mode drums")
+        return run_drums(inp, args.bpm, args.label)
+
+    if not args.out:
+        raise SystemExit("--out is required for melodic mode")
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     stem = inp.stem
