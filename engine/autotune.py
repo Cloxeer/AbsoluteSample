@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -36,12 +38,58 @@ CREPE_SR = 16000
 CREPE_HOP = 160          # 10 ms frames
 CREPE_FMIN = 50.0
 CREPE_FMAX = 1100.0
-CONF_THRESHOLD = 0.5     # periodicity below this is treated as unvoiced
+CONF_THRESHOLD = 0.5
+_DEVICE = "cpu"  # set to the real device when CREPE (torch) actually runs     # periodicity below this is treated as unvoiced
 
 
 def emit(obj: dict) -> None:
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
+
+
+def _peak_rss_mb() -> float | None:
+    try:
+        import psutil
+
+        proc = psutil.Process()
+        info = proc.memory_info()
+        peak = getattr(info, "peak_wset", None) or info.rss
+        return round(peak / (1024 * 1024), 1)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def emit_metrics(start_time: float) -> None:
+    # Do NOT import torch here: the light apply paths (region + pitch cache) use
+    # only pyworld, and importing torch would build a ~1GB CUDA context for nothing.
+    tmod = sys.modules.get("torch")
+    if tmod is not None:
+        try:
+            device = "cuda" if tmod.cuda.is_available() else "cpu"
+        except Exception:  # noqa: BLE001
+            device = _DEVICE
+    else:
+        device = _DEVICE
+    try:
+        emit({
+            "event": "metrics",
+            "seconds": round(time.time() - start_time, 3),
+            "peakRssMb": _peak_rss_mb(),
+            "device": device,
+        })
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def cleanup_torch() -> None:
+    tmod = sys.modules.get("torch")
+    if tmod is None:
+        return
+    try:
+        if tmod.cuda.is_available():
+            tmod.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def load_mono(path: str, sr_target: int) -> np.ndarray:
@@ -160,7 +208,7 @@ def segment_notes(times: np.ndarray, f0: np.ndarray, conf: np.ndarray) -> list[d
     return notes
 
 
-def analyze(inp: Path) -> int:
+def analyze(inp: Path, start_time: float) -> int:
     times, f0, conf = crepe_f0(str(inp))
     midi = hz_to_midi(f0)
     voiced = f0 > 0
@@ -180,6 +228,9 @@ def analyze(inp: Path) -> int:
     notes = segment_notes(times, f0, conf)
     key = krumhansl_key(midi, voiced)
 
+    del times, f0, conf, midi, voiced
+    cleanup_torch()
+
     emit({
         "event": "done",
         "sampleRate": CREPE_SR,
@@ -188,6 +239,7 @@ def analyze(inp: Path) -> int:
         "notes": notes,
         "key": key,
     })
+    emit_metrics(start_time)
     return 0
 
 
@@ -211,7 +263,51 @@ def nearest_scale_midi(midi: float, scale: list[int] | None) -> float:
     return float(min(candidates, key=lambda c: abs(c - midi)))
 
 
-def apply_edits(inp: Path, edits_path: Path, out_path: Path | None) -> int:
+def _load_region(inp: Path, fs: int, region_start: float | None, region_end: float | None) -> np.ndarray:
+    """Load only [region_start, region_end) seconds (or the whole file) as float64 mono at fs."""
+    if region_start is None and region_end is None:
+        return load_mono(str(inp), fs).astype(np.float64)
+    info = sf.info(str(inp))
+    src_sr = info.samplerate
+    start_frame = int(round((region_start or 0.0) * src_sr))
+    stop_frame = int(round(region_end * src_sr)) if region_end is not None else None
+    data, read_sr = sf.read(str(inp), start=max(0, start_frame), stop=stop_frame, dtype="float32", always_2d=True)
+    y = data.mean(axis=1)
+    if read_sr != fs:
+        import librosa
+
+        y = librosa.resample(y, orig_sr=read_sr, target_sr=fs)
+    return y.astype(np.float64)
+
+
+def _cached_pitch(pitch_cache_path: Path, region_start: float | None, region_end: float | None) -> tuple[np.ndarray, np.ndarray] | None:
+    """Load {times, midi, voiced} arrays from an analyze-shaped pitch cache JSON, sliced to the region."""
+    try:
+        data = json.loads(Path(pitch_cache_path).read_text(encoding="utf-8"))
+        f0_list = data["f0"]
+    except Exception:  # noqa: BLE001
+        return None
+    times = np.array([f["t"] for f in f0_list], dtype=np.float64)
+    midi = np.array([f["midi"] if f["midi"] is not None else 0.0 for f in f0_list], dtype=np.float64)
+    voiced = np.array([bool(f["voiced"]) for f in f0_list], dtype=bool)
+    if region_start is not None or region_end is not None:
+        lo = region_start if region_start is not None else times[0]
+        hi = region_end if region_end is not None else times[-1] + 1.0
+        mask = (times >= lo) & (times < hi)
+        times = times[mask] - lo
+        midi = midi[mask]
+        voiced = voiced[mask]
+    return times, midi, voiced
+
+
+def apply_edits(
+    inp: Path,
+    edits_path: Path,
+    out_path: Path | None,
+    region_start: float | None = None,
+    region_end: float | None = None,
+    pitch_cache: Path | None = None,
+) -> int:
     import pyworld as pw
 
     edits = json.loads(Path(edits_path).read_text(encoding="utf-8"))
@@ -220,15 +316,28 @@ def apply_edits(inp: Path, edits_path: Path, out_path: Path | None) -> int:
     transition_ms = float(edits.get("transitionMs", 40.0))
     note_edits = edits.get("notes", [])
 
-    # WORLD provides the spectral envelope + aperiodicity for natural resynthesis.
-    y = load_mono(str(inp), 44100).astype(np.float64)
     fs = 44100
+    # WORLD provides the spectral envelope + aperiodicity for natural resynthesis.
+    y = _load_region(inp, fs, region_start, region_end)
     w_f0, t, sp, ap = _world(y, fs)
+    del y
 
-    # CREPE provides the accurate pitch track; resample it onto WORLD's frame grid.
-    c_times, c_f0, _conf = crepe_f0(str(inp))
-    c_midi = hz_to_midi(c_f0)
-    c_voiced = c_f0 > 0
+    # CREPE provides the accurate pitch track; reuse a cached one when given, else recompute.
+    cached = _cached_pitch(pitch_cache, region_start, region_end) if pitch_cache else None
+    if cached is not None:
+        c_times, c_midi, c_voiced = cached
+    else:
+        c_times, c_f0, _conf = crepe_f0(str(inp))
+        c_midi = hz_to_midi(c_f0)
+        c_voiced = c_f0 > 0
+        if region_start is not None or region_end is not None:
+            lo = region_start if region_start is not None else c_times[0]
+            hi = region_end if region_end is not None else c_times[-1] + 1.0
+            mask = (c_times >= lo) & (c_times < hi)
+            c_times = c_times[mask] - lo
+            c_midi = c_midi[mask]
+            c_voiced = c_voiced[mask]
+        del _conf
     orig_midi = _interp_midi(t, c_times, c_midi, c_voiced)
     voiced = orig_midi > 0
 
@@ -260,6 +369,8 @@ def apply_edits(inp: Path, edits_path: Path, out_path: Path | None) -> int:
         out_path = inp.parent / f"{inp.stem}_tuned.wav"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(out_path), np.clip(y_out, -1.0, 1.0), fs, subtype="PCM_24")
+    del sp, ap, w_f0, new_f0, target_midi, smoothed, blended, orig_midi, y_out
+    cleanup_torch()
     emit({"event": "done", "path": str(out_path)})
     return 0
 
@@ -293,20 +404,28 @@ def _interp_midi(t_target: np.ndarray, t_src: np.ndarray, midi_src: np.ndarray, 
 
 
 def main() -> int:
+    start_time = time.time()
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", required=True, choices=["analyze", "apply"])
     ap.add_argument("--input", required=True)
     ap.add_argument("--edits", default=None)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--region-start", type=float, default=None)
+    ap.add_argument("--region-end", type=float, default=None)
+    ap.add_argument("--pitch-cache", default=None)
     args = ap.parse_args()
 
     inp = Path(args.input).resolve()
     if args.mode == "analyze":
-        return analyze(inp)
+        return analyze(inp, start_time)
     if not args.edits:
         raise SystemExit("--edits is required for --mode apply")
     out_path = Path(args.out).resolve() if args.out else None
-    return apply_edits(inp, Path(args.edits).resolve(), out_path)
+    pitch_cache = Path(args.pitch_cache).resolve() if args.pitch_cache else None
+    rc = apply_edits(inp, Path(args.edits).resolve(), out_path, args.region_start, args.region_end, pitch_cache)
+    emit_metrics(start_time)
+    return rc
 
 
 if __name__ == "__main__":

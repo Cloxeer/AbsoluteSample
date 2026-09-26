@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 
 import numpy as np
 
@@ -40,6 +41,28 @@ BANDS = [
 def emit(obj: dict) -> None:
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
+
+
+def emit_metrics(start_time: float) -> None:
+    try:
+        peak_mb = None
+        try:
+            import psutil
+
+            info = psutil.Process().memory_info()
+            peak = getattr(info, "peak_wset", None) or info.rss
+            peak_mb = round(peak / (1024 * 1024), 1)
+        except Exception:  # noqa: BLE001
+            peak_mb = None
+        try:
+            import torch
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:  # noqa: BLE001
+            device = "cpu"
+        emit({"event": "metrics", "seconds": round(time.time() - start_time, 3), "peakRssMb": peak_mb, "device": device})
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def midi_to_name(m: int) -> str:
@@ -73,6 +96,7 @@ def detect_key(y: np.ndarray, sr: int) -> dict:
 
 
 def main() -> int:
+    start_time = time.time()
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--bpm", type=float, default=None)
@@ -172,6 +196,7 @@ def main() -> int:
         "key": key,
         "durationSec": round(duration_sec, 3),
     })
+    emit_metrics(start_time)
     return 0
 
 

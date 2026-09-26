@@ -90,6 +90,32 @@ def emit(obj: dict) -> None:
     sys.stdout.flush()
 
 
+def emit_metrics(start_time: float, device: str) -> None:
+    try:
+        peak_mb = None
+        try:
+            import psutil
+
+            info = psutil.Process().memory_info()
+            peak = getattr(info, "peak_wset", None) or info.rss
+            peak_mb = round(peak / (1024 * 1024), 1)
+        except Exception:  # noqa: BLE001
+            peak_mb = None
+        emit({"event": "metrics", "seconds": round(time.time() - start_time, 3), "peakRssMb": peak_mb, "device": device})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def cleanup_torch() -> None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def progress(pass_name: str, percent: float, message: str) -> None:
     emit({"event": "progress", "pass": pass_name, "percent": round(float(percent), 1), "message": message})
 
@@ -392,7 +418,7 @@ KARAOKE_META = {
 }
 
 
-def run_karaoke(sep_factory, inp: Path, out: Path, sr: int, stems: dict[str, Path], lead: bool, work: Path, device: str = "cpu") -> int:
+def run_karaoke(sep_factory, inp: Path, out: Path, sr: int, stems: dict[str, Path], lead: bool, work: Path, device: str = "cpu", t_start: float | None = None) -> int:
     t0 = time.time()
     try:
         sep = sep_factory("vocals")
@@ -446,7 +472,10 @@ def run_karaoke(sep_factory, inp: Path, out: Path, sr: int, stems: dict[str, Pat
             "order": order,
         })
     listing.sort(key=lambda s: s["order"])
+    cleanup_torch()
     emit({"event": "done", "stems": listing, "device": device})
+    if t_start is not None:
+        emit_metrics(t_start, device)
     return 0
 
 
@@ -462,6 +491,7 @@ def main() -> int:
     ap.add_argument("--lead", action="store_true")
     args = ap.parse_args()
 
+    t_start = time.time()
     inp = Path(args.input).resolve()
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -473,6 +503,8 @@ def main() -> int:
     model_dir.mkdir(parents=True, exist_ok=True)
 
     import torch
+
+    torch.set_num_threads(min(4, os.cpu_count() or 4))
 
     if args.low_priority:
         apply_low_priority()
@@ -487,7 +519,7 @@ def main() -> int:
     stems: dict[str, Path] = {}
 
     if args.mode == "karaoke":
-        return run_karaoke(sep_factory, inp, out, sr, stems, args.lead, work, device)
+        return run_karaoke(sep_factory, inp, out, sr, stems, args.lead, work, device, t_start)
 
     passes = [p.strip() for p in args.passes.split(",") if p.strip()]
 
@@ -562,7 +594,9 @@ def main() -> int:
             "confidence": confidence,
         })
     listing.sort(key=lambda s: s["order"])
+    cleanup_torch()
     emit({"event": "done", "stems": listing, "device": device})
+    emit_metrics(t_start, device)
     return 0
 
 

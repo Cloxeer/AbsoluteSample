@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
@@ -63,6 +64,28 @@ def midi_to_name(m: int) -> str:
 def emit(obj: dict) -> None:
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
+
+
+def emit_metrics(start_time: float) -> None:
+    try:
+        peak_mb = None
+        try:
+            import psutil
+
+            info = psutil.Process().memory_info()
+            peak = getattr(info, "peak_wset", None) or info.rss
+            peak_mb = round(peak / (1024 * 1024), 1)
+        except Exception:  # noqa: BLE001
+            peak_mb = None
+        try:
+            import torch
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:  # noqa: BLE001
+            device = "cpu"
+        emit({"event": "metrics", "seconds": round(time.time() - start_time, 3), "peakRssMb": peak_mb, "device": device})
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def detect_key(notes: list[dict]) -> dict:
@@ -143,7 +166,7 @@ def detect_chords(notes: list[dict], bpm: float | None, total_dur: float) -> lis
     return merged
 
 
-def run_drums(inp: Path, bpm: float, label: str) -> int:
+def run_drums(inp: Path, bpm: float, label: str, start_time: float) -> int:
     import librosa
 
     y, sr = librosa.load(str(inp), sr=None, mono=True)
@@ -161,10 +184,12 @@ def run_drums(inp: Path, bpm: float, label: str) -> int:
             "lanes": [{"key": label.lower().replace(" ", "_"), "label": label, "hits": hits}],
         },
     })
+    emit_metrics(start_time)
     return 0
 
 
 def main() -> int:
+    start_time = time.time()
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--out", default=None)
@@ -178,7 +203,7 @@ def main() -> int:
     if args.mode == "drums":
         if args.bpm is None:
             raise SystemExit("--bpm is required for --mode drums")
-        return run_drums(inp, args.bpm, args.label)
+        return run_drums(inp, args.bpm, args.label, start_time)
 
     if not args.out:
         raise SystemExit("--out is required for melodic mode")
@@ -223,6 +248,7 @@ def main() -> int:
     midi_data.write(str(mid_path))
 
     emit({"event": "done", "json": str(json_path), "mid": str(mid_path)})
+    emit_metrics(start_time)
     return 0
 
 
