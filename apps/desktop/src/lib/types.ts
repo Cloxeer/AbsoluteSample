@@ -158,6 +158,7 @@ export interface LibraryEntry {
   hasInstruments: boolean;
   instrumentCount: number;
   bytes: number;
+  hasKaraoke?: boolean;
 }
 
 export interface TrackSession {
@@ -271,6 +272,18 @@ export interface NotesKey {
   confidence: number;
 }
 
+export interface DrumLane {
+  key: string;
+  label: string;
+  hits: number[];
+}
+
+export interface DrumResult {
+  bpm: number;
+  steps: number;
+  lanes: DrumLane[];
+}
+
 export interface NotesResult {
   notes: NoteEvent[];
   key: NotesKey | null;
@@ -279,4 +292,92 @@ export interface NotesResult {
   bpm: number | null;
   midPath: string;
   elapsedSec: number;
+  drum?: DrumResult;
+}
+
+// v7 addendum: Karaoke, Frequencies, Autotune
+
+export interface KaraokeResult {
+  stems: InstrumentStem[];
+  elapsedSec: number;
+  device: string;
+}
+
+export interface SpectrumPoint {
+  hz: number;
+  db: number;
+}
+
+export interface FrequencyBand {
+  key: string;
+  name: string;
+  lowHz: number;
+  highHz: number;
+  db: number;
+  sharePct: number;
+}
+
+export interface FrequencyNoteStat {
+  name: string;
+  cents: number;
+  count: number;
+}
+
+export interface FrequencyTuning {
+  referenceHz: number;
+  avgCentsOff: number;
+  inTunePct: number;
+  estimatedRefHz: number;
+  perNote?: FrequencyNoteStat[];
+}
+
+export interface FrequencyResult {
+  spectrum: SpectrumPoint[];
+  bands: FrequencyBand[];
+  tuning: FrequencyTuning;
+  key: KeyDetection | null;
+  durationSec: number;
+}
+
+export interface PitchPoint {
+  t: number;
+  hz: number;
+  midi: number;
+  cents: number;
+  voiced: boolean;
+}
+
+export interface PitchNote {
+  startSec: number;
+  endSec: number;
+  midi: number;
+  cents: number;
+  confidence: number;
+}
+
+export interface PitchResult {
+  sampleRate: number;
+  hopSec: number;
+  f0: PitchPoint[];
+  notes: PitchNote[];
+  key: NotesKey | null;
+}
+
+export interface AutotuneNoteEdit {
+  startSec: number;
+  endSec: number;
+  targetMidi: number;
+}
+
+export interface AutotuneEdits {
+  snapStrength: number;
+  scale: number[] | null;
+  transitionMs: number;
+  notes: AutotuneNoteEdit[];
+}
+
+export interface AutotuneResult {
+  path: string;
+  peaks: number[];
+  durationSec: number;
 }

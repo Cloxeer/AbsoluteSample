@@ -2,18 +2,24 @@
 const FIXTURES_BASE = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/fixtures`;
 import { emitMockEngineProgress, emitMockProgress } from "./events";
 import type {
+  AutotuneEdits,
+  AutotuneResult,
   ChordEvent,
   CutRegionResult,
   CutSampleResult,
   DependencyReport,
+  DrumResult,
   EngineStatus,
+  FrequencyResult,
   InstrumentGroup,
   InstrumentStem,
+  KaraokeResult,
   LibraryEntry,
   LoopAnalysis,
   LoopInfo,
   NoteEvent,
   NotesResult,
+  PitchResult,
   RegionParams,
   Sample,
   SliceInfo,
@@ -1299,10 +1305,36 @@ function midiName(midi: number): string {
   return `${name}${octave}`;
 }
 
+const DRUM_KEYS = ["drums", "kick", "snare", "toms", "hihat", "ride", "crash"];
+
+function synthesizeDrumPattern(bpm: number, path: string): DrumResult {
+  const steps = 16;
+  const rand = seededRandom(hashString(path));
+  const lanes = [
+    { key: "kick", label: "Kick", hits: [0, 4, 8, 10] },
+    { key: "snare", label: "Snare", hits: [4, 12] },
+    { key: "hihat", label: "Hi-Hat", hits: [0, 2, 4, 6, 8, 10, 12, 14] },
+  ].map((lane) => ({ ...lane, hits: lane.hits.filter(() => rand() > 0.05) }));
+  return { bpm, steps, lanes };
+}
+
 /** Deterministic fake notes: a C major arpeggio over 8 seconds, used by the Notes tab in mock/dev mode. */
-export async function extractNotes(args: { path: string; bpm?: number }): Promise<NotesResult> {
+export async function extractNotes(args: { path: string; bpm?: number; kind?: "melodic" | "drums" }): Promise<NotesResult> {
   await delay(150);
   const bpm = args.bpm ?? 120;
+  const isDrums = args.kind === "drums" || DRUM_KEYS.some((k) => args.path.toLowerCase().includes(k));
+  if (isDrums) {
+    return {
+      notes: [],
+      key: null,
+      chords: [],
+      scale: [],
+      bpm,
+      midPath: `mock/${hashString(args.path)}/notes.mid`,
+      elapsedSec: 0.3,
+      drum: synthesizeDrumPattern(bpm, args.path),
+    };
+  }
   const step = 60 / bpm;
   const arpeggio = [60, 64, 67, 72];
   const durationSec = 8;
@@ -1342,4 +1374,174 @@ export async function extractNotes(args: { path: string; bpm?: number }): Promis
 export async function exportMidi(args: { path: string; destPath?: string }): Promise<string> {
   await delay(80);
   return args.destPath ?? args.path.replace(/\.notes\.json$/, "").replace(/[^/\\]*$/, "notes.mid");
+}
+
+// v7 addendum: Karaoke
+
+export async function separateKaraoke(args: { trackId: string; splitLeadBacking?: boolean; lowPriority?: boolean }): Promise<KaraokeResult> {
+  engineBusyTrackId = args.trackId;
+  const startedAt = new Date().toISOString();
+  const startedMs = Date.now();
+  const passes: { pass: string; message: string }[] = [{ pass: "vocals", message: "Splitting vocals from instrumental..." }];
+  if (args.splitLeadBacking) passes.push({ pass: "lead", message: "Splitting lead and backing vocals..." });
+  for (let i = 0; i < passes.length; i++) {
+    const { pass, message } = passes[i];
+    await delay(220);
+    emitMockProgress({
+      stage: "separate",
+      pass,
+      percent: Math.round(((i + 1) / passes.length) * 100),
+      message,
+      trackId: args.trackId,
+      startedAt,
+      elapsedSec: (Date.now() - startedMs) / 1000,
+    });
+  }
+  const stems: InstrumentStem[] = [
+    {
+      key: "instrumental",
+      label: "Instrumental",
+      group: "other",
+      parent: null,
+      path: `${FIXTURES_BASE}/instruments/other.wav`,
+      bytes: 1_400_000,
+      peakDb: -2.0,
+      rmsDb: -15.0,
+      model: "BS-Roformer",
+      order: 5,
+    },
+    {
+      key: "vocals",
+      label: "Vocals",
+      group: "vocals",
+      parent: null,
+      path: `${FIXTURES_BASE}/instruments/vocals.wav`,
+      bytes: 500_000,
+      peakDb: -2.5,
+      rmsDb: -16.0,
+      model: "BS-Roformer",
+      order: 10,
+    },
+  ];
+  if (args.splitLeadBacking) {
+    stems.push(
+      {
+        key: "vocals_lead",
+        label: "Lead vocal",
+        group: "vocals",
+        parent: "vocals",
+        path: `${FIXTURES_BASE}/instruments/lead_vocals.wav`,
+        bytes: 500_000,
+        peakDb: -2.5,
+        rmsDb: -16.0,
+        model: "BS-Roformer (lead/backing pass)",
+        order: 11,
+      },
+      {
+        key: "vocals_backing",
+        label: "Backing vocal",
+        group: "vocals",
+        parent: "vocals",
+        path: `${FIXTURES_BASE}/instruments/backing_vocals.wav`,
+        bytes: 500_000,
+        peakDb: -3.0,
+        rmsDb: -17.0,
+        model: "BS-Roformer (lead/backing pass)",
+        order: 12,
+      },
+    );
+  }
+  const store = await getLibraryStore();
+  const rec = store.get(args.trackId);
+  if (rec) rec.entry = { ...rec.entry, hasKaraoke: true };
+  engineBusyTrackId = null;
+  const elapsedSec = (Date.now() - startedMs) / 1000;
+  return { stems, elapsedSec, device: "cpu (mock)" };
+}
+
+// v7 addendum: Frequencies
+
+export async function analyzeFrequencies(args: { path: string }): Promise<FrequencyResult> {
+  await delay(150);
+  const spectrum: { hz: number; db: number }[] = [];
+  const points = 120;
+  for (let i = 0; i < points; i++) {
+    const t = i / (points - 1);
+    const hz = 20 * Math.pow(1000, t); // log sweep 20Hz-20kHz
+    const db = -6 - 34 * t + 3 * Math.sin(t * Math.PI * 5);
+    spectrum.push({ hz: Number(hz.toFixed(1)), db: Number(db.toFixed(2)) });
+  }
+  const bandDefs: { key: string; name: string; lowHz: number; highHz: number; db: number; sharePct: number }[] = [
+    { key: "sub", name: "Sub", lowHz: 20, highHz: 60, db: -18, sharePct: 6 },
+    { key: "bass", name: "Bass", lowHz: 60, highHz: 250, db: -12, sharePct: 18 },
+    { key: "lowMid", name: "Low-Mid", lowHz: 250, highHz: 500, db: -10, sharePct: 15 },
+    { key: "mid", name: "Mid", lowHz: 500, highHz: 2000, db: -14, sharePct: 28 },
+    { key: "highMid", name: "High-Mid", lowHz: 2000, highHz: 4000, db: -20, sharePct: 14 },
+    { key: "presence", name: "Presence", lowHz: 4000, highHz: 6000, db: -26, sharePct: 10 },
+    { key: "air", name: "Air", lowHz: 6000, highHz: 20000, db: -34, sharePct: 9 },
+  ];
+  return {
+    spectrum,
+    bands: bandDefs,
+    tuning: {
+      referenceHz: 440,
+      avgCentsOff: 4,
+      inTunePct: 0.82,
+      estimatedRefHz: 441,
+      perNote: [
+        { name: "C4", cents: 3, count: 12 },
+        { name: "E4", cents: 5, count: 9 },
+        { name: "G4", cents: 4, count: 11 },
+      ],
+    },
+    key: { tonic: "C", mode: "major", confidence: 0.85, camelot: "8B" },
+    durationSec: 180,
+  };
+}
+
+// v7 addendum: Autotune
+
+export async function analyzePitch(args: { path: string }): Promise<PitchResult> {
+  await delay(150);
+  const hopSec = 0.01;
+  const phrase = [
+    { midi: 57, cents: 2 }, // A3
+    { midi: 60, cents: -4 }, // C4
+    { midi: 62, cents: 6 }, // D4
+    { midi: 60, cents: -3 }, // C4
+    { midi: 59, cents: 3 }, // B3
+    { midi: 57, cents: -2 }, // A3
+  ];
+  const noteDur = 0.7;
+  const notes = phrase.map((n, i) => ({
+    startSec: Number((i * noteDur).toFixed(3)),
+    endSec: Number((i * noteDur + noteDur * 0.9).toFixed(3)),
+    midi: n.midi,
+    cents: n.cents,
+    confidence: 0.9,
+  }));
+  const f0: { t: number; hz: number; midi: number; cents: number; voiced: boolean }[] = [];
+  const totalSec = phrase.length * noteDur;
+  for (let t = 0; t < totalSec; t += hopSec) {
+    const note = notes.find((n) => t >= n.startSec && t < n.endSec) ?? null;
+    const voiced = note !== null;
+    const midi = note ? note.midi : 57;
+    const cents = note ? note.cents : 0;
+    const hz = 440 * Math.pow(2, (midi - 69 + cents / 100) / 12);
+    f0.push({ t: Number(t.toFixed(3)), hz: Number(hz.toFixed(2)), midi, cents, voiced });
+  }
+  return {
+    sampleRate: 44100,
+    hopSec,
+    f0,
+    notes,
+    key: { tonic: "A", mode: "minor", confidence: 0.8 },
+  };
+}
+
+export async function applyAutotune(args: { path: string; edits: AutotuneEdits }): Promise<AutotuneResult> {
+  await delay(200);
+  const path = args.path.replace(/\.[^./\\]+$/, "") + "_tuned.wav";
+  const peaks = synthesizePeaks(`${args.path}|autotune|${JSON.stringify(args.edits)}`);
+  return { path, peaks, durationSec: 4.2 };
 }

@@ -1,16 +1,21 @@
 import { isTauri, mediaUrl } from "./mediaUrl";
 import * as mock from "./backend.mock";
 import type {
+  AutotuneEdits,
+  AutotuneResult,
   CutRegionResult,
   CutSampleResult,
   DependencyReport,
   EngineStatus,
+  FrequencyResult,
   InstrumentsResult,
+  KaraokeResult,
   LibraryEntry,
   LibrarySize,
   LoopAnalysis,
   LoopInfo,
   NotesResult,
+  PitchResult,
   RegionParams,
   Sample,
   SliceInfo,
@@ -206,9 +211,29 @@ export const backend = {
     return mock.revealSample(args);
   },
 
-  async extractNotes(args: { path: string; bpm?: number }): Promise<NotesResult> {
+  async extractNotes(args: { path: string; bpm?: number; kind?: "melodic" | "drums" }): Promise<NotesResult> {
     if (isTauri()) return invokeTauri<NotesResult>("extract_notes", args);
     return mock.extractNotes(args);
+  },
+
+  async separateKaraoke(args: { trackId: string; splitLeadBacking?: boolean; lowPriority?: boolean }): Promise<KaraokeResult> {
+    if (isTauri()) return invokeTauri<KaraokeResult>("separate_karaoke", args);
+    return mock.separateKaraoke(args);
+  },
+
+  async analyzeFrequencies(args: { path: string }): Promise<FrequencyResult> {
+    if (isTauri()) return invokeTauri<FrequencyResult>("analyze_frequencies", args);
+    return mock.analyzeFrequencies(args);
+  },
+
+  async analyzePitch(args: { path: string }): Promise<PitchResult> {
+    if (isTauri()) return invokeTauri<PitchResult>("analyze_pitch", args);
+    return mock.analyzePitch(args);
+  },
+
+  async applyAutotune(args: { path: string; edits: AutotuneEdits }): Promise<AutotuneResult> {
+    if (isTauri()) return invokeTauri<AutotuneResult>("apply_autotune", args);
+    return mock.applyAutotune(args);
   },
 
   async exportMidi(args: { path: string; destPath?: string }): Promise<string | null> {
