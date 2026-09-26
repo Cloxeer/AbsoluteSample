@@ -8,21 +8,21 @@ and inspects the loop's transients, BPM and beat grid. Built with Tauri v2 (Rust
 
 ```
 absolutesample/
-â”œâ”€â”€ apps/desktop/
-â”‚   â”œâ”€â”€ src/                 React 18 + TypeScript + Tailwind UI (neumorphic dark dashboard)
-â”‚   â”‚   â”œâ”€â”€ components/      neumorphic/, stems/, waveform/, layout/
-â”‚   â”‚   â”œâ”€â”€ hooks/           useAudioEngine (pipeline state), useSyncPlayback (multi-track sync + gain matrix)
-â”‚   â”‚   â”œâ”€â”€ lib/             backend.ts (Tauri invoke), backend.mock.ts (browser-only dev), events, format
-â”‚   â”‚   â””â”€â”€ views/           SlicerTab (Stem Slicer & Downloader), InspectorTab (Loop & Beat Matrix)
-â”‚   â”œâ”€â”€ src-tauri/
-â”‚   â”‚   â”œâ”€â”€ src/audio/       downloader.rs (yt-dlp), slicer.rs (-c copy trim, beat slicing),
-â”‚   â”‚   â”‚                    dsp_filters.rs (LR4 stem graph), analysis.rs (onset/BPM), workspace.rs
-â”‚   â”‚   â”œâ”€â”€ src/commands.rs  Tauri commands, src/pipeline.rs (shared with CLI), src/bin/cli.rs
-â”‚   â”‚   â””â”€â”€ tauri.conf.json
-â”‚   â””â”€â”€ public/fixtures/     output of the seed run, used by the browser-only mock backend
-â”œâ”€â”€ docs/CONTRACT.md         authoritative frontend/backend API contract
-â”œâ”€â”€ test-seed.sh             end-to-end test (fetch â†’ trim 0:30â€“0:45 â†’ 4 stems â†’ verify)
-â””â”€â”€ README.md
+Ã¢â€Å“Ã¢â€â‚¬Ã¢â€â‚¬ apps/desktop/
+Ã¢â€â€š   Ã¢â€Å“Ã¢â€â‚¬Ã¢â€â‚¬ src/                 React 18 + TypeScript + Tailwind UI (neumorphic dark dashboard)
+Ã¢â€â€š   Ã¢â€â€š   Ã¢â€Å“Ã¢â€â‚¬Ã¢â€â‚¬ components/      neumorphic/, stems/, waveform/, layout/
+Ã¢â€â€š   Ã¢â€â€š   Ã¢â€Å“Ã¢â€â‚¬Ã¢â€â‚¬ hooks/           useAudioEngine (pipeline state), useSyncPlayback (multi-track sync + gain matrix)
+Ã¢â€â€š   Ã¢â€â€š   Ã¢â€Å“Ã¢â€â‚¬Ã¢â€â‚¬ lib/             backend.ts (Tauri invoke), backend.mock.ts (browser-only dev), events, format
+Ã¢â€â€š   Ã¢â€â€š   Ã¢â€â€Ã¢â€â‚¬Ã¢â€â‚¬ views/           SlicerTab (Stem Slicer & Downloader), InspectorTab (Loop & Beat Matrix)
+Ã¢â€â€š   Ã¢â€Å“Ã¢â€â‚¬Ã¢â€â‚¬ src-tauri/
+Ã¢â€â€š   Ã¢â€â€š   Ã¢â€Å“Ã¢â€â‚¬Ã¢â€â‚¬ src/audio/       downloader.rs (yt-dlp), slicer.rs (-c copy trim, beat slicing),
+Ã¢â€â€š   Ã¢â€â€š   Ã¢â€â€š                    dsp_filters.rs (LR4 stem graph), analysis.rs (onset/BPM), workspace.rs
+Ã¢â€â€š   Ã¢â€â€š   Ã¢â€Å“Ã¢â€â‚¬Ã¢â€â‚¬ src/commands.rs  Tauri commands, src/pipeline.rs (shared with CLI), src/bin/cli.rs
+Ã¢â€â€š   Ã¢â€â€š   Ã¢â€â€Ã¢â€â‚¬Ã¢â€â‚¬ tauri.conf.json
+Ã¢â€â€š   Ã¢â€â€Ã¢â€â‚¬Ã¢â€â‚¬ public/fixtures/     output of the seed run, used by the browser-only mock backend
+Ã¢â€Å“Ã¢â€â‚¬Ã¢â€â‚¬ docs/CONTRACT.md         authoritative frontend/backend API contract
+Ã¢â€Å“Ã¢â€â‚¬Ã¢â€â‚¬ test-seed.sh             end-to-end test (fetch Ã¢â€ â€™ trim 0:30Ã¢â‚¬â€œ0:45 Ã¢â€ â€™ 4 stems Ã¢â€ â€™ verify)
+Ã¢â€â€Ã¢â€â‚¬Ã¢â€â‚¬ README.md
 ```
 
 ## Prerequisites
@@ -93,7 +93,7 @@ The old crossover splitter is still available as "Quick EQ bands".
 
 ## Pitch editor engine
 
-The Autotune tab is a Melodyne-style note editor running on `crates/pitchcore`, a Rust engine compiled to WebAssembly, so it works on the web too. It analyses a vocal once (a few seconds), then every note edit re-renders in a few milliseconds. Rebuild it with `node scripts/build-wasm.mjs`. Details in docs/CONTRACT.md (v9).
+The Autotune tab is a Melodyne-style note editor running on `crates/pitchcore`, a Rust engine compiled to WebAssembly, so it works on the web too. It analyses a vocal once (a few seconds), then every note edit re-renders in a few milliseconds. Rebuild it with `node scripts/build-wasm.mjs`. Build the standalone desktop exe (frontend embedded, no dev server needed) with `node scripts/build-desktop.mjs`. Details in docs/CONTRACT.md (v9).
 
 ## Safety and performance
 
@@ -140,12 +140,12 @@ Loop is cyan. Esc stops, L toggles loop, ? in the transport lists the shortcuts.
 3. **Stems**: one ffmpeg `filter_complex` run. Each crossover is a Linkwitz-Riley 8th order filter (48 dB/oct)
    (four cascaded Q=0.7071 Butterworth 2nd-order sections).
    * `01_drums_sub`   LP 130 Hz
-   * `02_bass_lowmid` HP 130 Hz â†’ LP 800 Hz
-   * `03_mid_vocals`  HP 800 Hz â†’ LP 4.5 kHz â†’ Mid channel (L+R)/2, which cancels side-panned instruments
-   * `04_highs_air`   HP 4.5 kHz â†’ `stereotools` mid down / side up for width
+   * `02_bass_lowmid` HP 130 Hz Ã¢â€ â€™ LP 800 Hz
+   * `03_mid_vocals`  HP 800 Hz Ã¢â€ â€™ LP 4.5 kHz Ã¢â€ â€™ Mid channel (L+R)/2, which cancels side-panned instruments
+   * `04_highs_air`   HP 4.5 kHz Ã¢â€ â€™ `stereotools` mid down / side up for width
    Outputs are 44.1 kHz 24-bit PCM. Peak and RMS come from `astats`.
 4. **Analyze** (pure Rust): mono 22.05 kHz decode, log-energy onset envelope (1024/256), half-wave
-   rectified flux, peak picking with a 50 ms gap, autocorrelation tempo search 60â€“200 BPM with
+   rectified flux, peak picking with a 50 ms gap, autocorrelation tempo search 60Ã¢â‚¬â€œ200 BPM with
    parabolic refinement and octave disambiguation, and a beat grid anchored on the strongest onset.
 
 Work files live under `~/.absolutesample/work/<video id>/`.
@@ -157,5 +157,5 @@ Work files live under `~/.absolutesample/work/<video id>/`.
 ```
 
 Builds the CLI, runs the Rust unit tests, executes the seed pipeline on `https://youtu.be/nRKgT3d6xoE`
-(0:30â€“0:45) and asserts that all four stem WAVs exist, are non-empty, decode with zero ffmpeg errors,
+(0:30Ã¢â‚¬â€œ0:45) and asserts that all four stem WAVs exist, are non-empty, decode with zero ffmpeg errors,
 match the expected duration, and carry signal.
