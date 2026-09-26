@@ -44,7 +44,26 @@ pub struct Chord {
     pub notes: Vec<String>,
 }
 
-/// The `<stem>.notes.json` shape written by `notes.py`.
+/// A drum lane's step hits, contract v7 addendum "Notes drums".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DrumLane {
+    pub key: String,
+    pub label: String,
+    pub hits: Vec<u32>,
+}
+
+/// `notes.py --mode drums`'s inline result (no file output).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DrumResult {
+    pub bpm: f64,
+    pub steps: u32,
+    pub lanes: Vec<DrumLane>,
+}
+
+/// The `<stem>.notes.json` shape written by `notes.py` (melodic mode) or by
+/// this module itself (drums mode, so repeat calls still hit the cache).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 struct NotesJson {
@@ -58,6 +77,8 @@ struct NotesJson {
     scale: Vec<String>,
     #[serde(default)]
     bpm: Option<f64>,
+    #[serde(default)]
+    drum: Option<DrumResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -70,12 +91,32 @@ pub struct NotesResult {
     pub bpm: Option<f64>,
     pub mid_path: String,
     pub elapsed_sec: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drum: Option<DrumResult>,
+}
+
+/// Stem-name keys that `extract_notes` treats as drums (contract v7
+/// addendum "Notes drums"), when `kind` isn't given explicitly.
+const DRUM_STEM_KEYS: &[&str] = &["drums", "kick", "snare", "toms", "hihat", "ride", "crash"];
+
+fn drum_label_for(stem_key: &str) -> String {
+    match stem_key {
+        "kick" => "Kick",
+        "snare" => "Snare",
+        "toms" => "Toms",
+        "hihat" => "Hi-hat",
+        "ride" => "Ride",
+        "crash" => "Crash",
+        _ => "Drums",
+    }
+    .to_string()
 }
 
 /// One parsed line of `notes.py`'s final-JSON-line protocol.
 #[derive(Debug, Clone, PartialEq)]
 enum NotesEvent {
     Done { json: String, mid: String },
+    DrumDone { drum: DrumResult },
     Fatal { error: String },
     Unknown,
 }
@@ -87,10 +128,17 @@ fn parse_notes_line(line: &str) -> NotesEvent {
         Err(_) => return NotesEvent::Unknown,
     };
     match value.get("event").and_then(|v| v.as_str()).unwrap_or("") {
-        "done" => NotesEvent::Done {
-            json: value.get("json").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            mid: value.get("mid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        },
+        "done" => {
+            if let Some(drum_value) = value.get("drum") {
+                if let Ok(drum) = serde_json::from_value::<DrumResult>(drum_value.clone()) {
+                    return NotesEvent::DrumDone { drum };
+                }
+            }
+            NotesEvent::Done {
+                json: value.get("json").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                mid: value.get("mid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            }
+        }
         "fatal" => NotesEvent::Fatal {
             error: value.get("error").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         },
@@ -133,13 +181,16 @@ fn load_notes_result(json_path: &Path, mid_path: &Path, elapsed_sec: f64) -> Res
         bpm: parsed.bpm,
         mid_path: mid_path.to_string_lossy().to_string(),
         elapsed_sec,
+        drum: parsed.drum,
     })
 }
 
-/// Extracts notes/key/chords/scale from `path` (any wav) via `notes.py`.
-/// Cached next to the wav as `<wav dir>/notes/<stem>.notes.json`; a fresh
-/// cache (mtime >= wav's mtime) is returned without re-running the script.
-pub fn extract_notes(path: &Path, bpm: Option<f64>) -> Result<NotesResult, String> {
+/// Extracts notes/key/chords/scale (melodic) or a drum step grid (`kind ==
+/// Some("drums")`, or the wav's filename stem looks like a drum stem, e.g.
+/// `kick.wav`) from `path` (any wav) via `notes.py`. Cached next to the wav
+/// as `<wav dir>/notes/<stem>.notes.json`; a fresh cache (mtime >= wav's
+/// mtime) is returned without re-running the script.
+pub fn extract_notes(path: &Path, bpm: Option<f64>, kind: Option<&str>) -> Result<NotesResult, String> {
     let dir = notes_dir_for(path);
     let cache = cache_path_for(path);
     let mid_path = dir.join(format!(
@@ -150,6 +201,10 @@ pub fn extract_notes(path: &Path, bpm: Option<f64>) -> Result<NotesResult, Strin
     if cache_is_fresh(&cache, path) {
         return load_notes_result(&cache, &mid_path, 0.0);
     }
+
+    let stem_key = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    let is_drums = kind.map(|k| k.eq_ignore_ascii_case("drums")).unwrap_or(false)
+        || DRUM_STEM_KEYS.contains(&stem_key.as_str());
 
     let start = Instant::now();
     let engine = engine_dir()?;
@@ -168,14 +223,20 @@ pub fn extract_notes(path: &Path, bpm: Option<f64>) -> Result<NotesResult, Strin
     cmd.arg(&script_path)
         .arg("--input")
         .arg(path)
-        .arg("--out")
-        .arg(&dir)
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONUNBUFFERED", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(bpm) = bpm {
-        cmd.arg("--bpm").arg(bpm.to_string());
+
+    if is_drums {
+        let bpm = bpm.ok_or_else(|| "bpm is required to extract drums".to_string())?;
+        let label = drum_label_for(&stem_key);
+        cmd.arg("--mode").arg("drums").arg("--bpm").arg(bpm.to_string()).arg("--label").arg(&label);
+    } else {
+        cmd.arg("--out").arg(&dir);
+        if let Some(bpm) = bpm {
+            cmd.arg("--bpm").arg(bpm.to_string());
+        }
     }
 
     let mut child = cmd.spawn().map_err(|e| format!("failed to spawn notes.py: {e}"))?;
@@ -195,6 +256,7 @@ pub fn extract_notes(path: &Path, bpm: Option<f64>) -> Result<NotesResult, Strin
     });
 
     let mut done: Option<(String, String)> = None;
+    let mut drum_done: Option<DrumResult> = None;
     let mut fatal: Option<String> = None;
     if let Some(stdout) = stdout {
         use std::io::{BufRead, BufReader};
@@ -202,6 +264,7 @@ pub fn extract_notes(path: &Path, bpm: Option<f64>) -> Result<NotesResult, Strin
         for line in reader.lines().map_while(Result::ok) {
             match parse_notes_line(&line) {
                 NotesEvent::Done { json, mid } => done = Some((json, mid)),
+                NotesEvent::DrumDone { drum } => drum_done = Some(drum),
                 NotesEvent::Fatal { error } => fatal = Some(error),
                 NotesEvent::Unknown => {}
             }
@@ -225,10 +288,36 @@ pub fn extract_notes(path: &Path, bpm: Option<f64>) -> Result<NotesResult, Strin
         return Err(msg);
     }
 
+    let elapsed_sec = start.elapsed().as_secs_f64();
+
+    if is_drums {
+        let drum = drum_done.ok_or_else(|| "notes.py did not emit a drum done event".to_string())?;
+        let cache_json = NotesJson {
+            notes: Vec::new(),
+            key: None,
+            chords: Vec::new(),
+            scale: Vec::new(),
+            bpm,
+            drum: Some(drum.clone()),
+        };
+        let cache_str = serde_json::to_string_pretty(&cache_json)
+            .map_err(|e| format!("failed to serialize drum notes cache: {e}"))?;
+        std::fs::write(&cache, cache_str).map_err(|e| format!("failed to write drum notes cache: {e}"))?;
+        return Ok(NotesResult {
+            notes: Vec::new(),
+            key: None,
+            chords: Vec::new(),
+            scale: Vec::new(),
+            bpm,
+            mid_path: String::new(),
+            elapsed_sec,
+            drum: Some(drum),
+        });
+    }
+
     let (json_str, mid_str) = done.ok_or_else(|| "notes.py did not emit a done event".to_string())?;
     let json_path = PathBuf::from(json_str);
     let mid_path = PathBuf::from(mid_str);
-    let elapsed_sec = start.elapsed().as_secs_f64();
     load_notes_result(&json_path, &mid_path, elapsed_sec)
 }
 
@@ -292,6 +381,38 @@ mod tests {
             NotesEvent::Fatal { error } => assert_eq!(error, "boom"),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_drum_done_line() {
+        let line = r#"{"event":"done","drum":{"bpm":128.0,"steps":32,"lanes":[{"key":"kick","label":"Kick","hits":[0,4,8,12]}]}}"#;
+        match parse_notes_line(line) {
+            NotesEvent::DrumDone { drum } => {
+                assert_eq!(drum.bpm, 128.0);
+                assert_eq!(drum.steps, 32);
+                assert_eq!(drum.lanes.len(), 1);
+                assert_eq!(drum.lanes[0].key, "kick");
+                assert_eq!(drum.lanes[0].hits, vec![0, 4, 8, 12]);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drum_label_for_known_and_fallback_keys() {
+        assert_eq!(drum_label_for("kick"), "Kick");
+        assert_eq!(drum_label_for("hihat"), "Hi-hat");
+        assert_eq!(drum_label_for("drums"), "Drums");
+        assert_eq!(drum_label_for("unknown"), "Drums");
+    }
+
+    #[test]
+    fn notes_json_with_drum_field_round_trips() {
+        let sample = r#"{"notes":[],"key":null,"chords":[],"scale":[],"bpm":128.0,"drum":{"bpm":128.0,"steps":16,"lanes":[{"key":"snare","label":"Snare","hits":[2,6]}]}}"#;
+        let parsed: NotesJson = serde_json::from_str(sample).expect("parse");
+        let drum = parsed.drum.expect("drum");
+        assert_eq!(drum.steps, 16);
+        assert_eq!(drum.lanes[0].label, "Snare");
     }
 
     #[test]

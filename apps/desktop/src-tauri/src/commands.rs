@@ -542,6 +542,33 @@ pub async fn separate_instruments(
     .map_err(|e| format!("task join error: {e}"))?
 }
 
+/// Result of `separate_karaoke` (contract v7 addendum "Karaoke").
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeparateKaraokeOut {
+    pub stems: Vec<InstrumentStem>,
+    pub elapsed_sec: f64,
+    pub device: String,
+}
+
+#[tauri::command]
+pub async fn separate_karaoke(
+    app: AppHandle,
+    track_id: String,
+    split_lead_backing: Option<bool>,
+    low_priority: Option<bool>,
+) -> Result<SeparateKaraokeOut, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let progress = TauriProgress::new(app, track_id.clone());
+        let result = pipeline::run_karaoke(&track_id, split_lead_backing.unwrap_or(false), low_priority.unwrap_or(false), |p| {
+            progress.report_pass(&p.stage, p.pass.as_deref().unwrap_or(""), p.percent, &p.message, p.failed, &HashMap::new());
+        })?;
+        Ok(SeparateKaraokeOut { stems: result.stems, elapsed_sec: result.elapsed_sec, device: result.device })
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
 // ---------------------------------------------------------------------
 // v3: Song library
 // ---------------------------------------------------------------------
@@ -792,10 +819,16 @@ pub async fn reveal_sample(id: String) -> Result<(), String> {
 // ---------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn extract_notes(path: String, bpm: Option<f64>) -> Result<crate::audio::notes::NotesResult, String> {
-    tauri::async_runtime::spawn_blocking(move || crate::audio::notes::extract_notes(std::path::Path::new(&path), bpm))
-        .await
-        .map_err(|e| format!("task join error: {e}"))?
+pub async fn extract_notes(
+    path: String,
+    bpm: Option<f64>,
+    kind: Option<String>,
+) -> Result<crate::audio::notes::NotesResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::audio::notes::extract_notes(std::path::Path::new(&path), bpm, kind.as_deref())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
 }
 
 #[tauri::command]
@@ -805,4 +838,35 @@ pub async fn export_midi(path: String, dest_path: String) -> Result<(), String> 
     })
     .await
     .map_err(|e| format!("task join error: {e}"))?
+}
+
+// ---------------------------------------------------------------------
+// v7: Frequencies
+// ---------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn analyze_frequencies(path: String, bpm: Option<f64>) -> Result<crate::audio::frequencies::FrequencyResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::audio::frequencies::analyze_frequencies(std::path::Path::new(&path), bpm)
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+// ---------------------------------------------------------------------
+// v7: Autotune
+// ---------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn analyze_pitch(path: String) -> Result<crate::audio::autotune::PitchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::audio::autotune::analyze_pitch(std::path::Path::new(&path)))
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn apply_autotune(path: String, edits: serde_json::Value) -> Result<crate::audio::autotune::AutotuneResult, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::audio::autotune::apply_autotune(std::path::Path::new(&path), &edits))
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
 }

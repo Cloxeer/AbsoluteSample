@@ -1,8 +1,10 @@
 pub mod analysis;
+pub mod autotune;
 pub mod cuts;
 pub mod dsp_filters;
 pub mod downloader;
 pub mod engine;
+pub mod frequencies;
 pub mod library;
 pub mod notes;
 pub mod peaks;

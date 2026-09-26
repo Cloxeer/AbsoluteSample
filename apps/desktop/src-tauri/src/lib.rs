@@ -50,6 +50,10 @@ pub fn run() {
             commands::empty_trash,
             commands::extract_notes,
             commands::export_midi,
+            commands::separate_karaoke,
+            commands::analyze_frequencies,
+            commands::analyze_pitch,
+            commands::apply_autotune,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

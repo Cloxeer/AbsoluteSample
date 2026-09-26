@@ -157,6 +157,36 @@ enum Commands {
         path: PathBuf,
         #[arg(long)]
         bpm: Option<f64>,
+        /// "drums" to force the drum step-grid mode instead of melodic
+        /// note extraction.
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Fast 2-stem karaoke split (contract v7 "Karaoke").
+    Karaoke {
+        #[arg(long)]
+        track: String,
+        /// Also split the vocals stem into lead/backing vocals.
+        #[arg(long)]
+        lead: bool,
+        #[arg(long)]
+        low_priority: bool,
+    },
+    /// Spectrum/band/tuning analysis (contract v7 "Frequencies").
+    Frequencies {
+        path: PathBuf,
+        #[arg(long)]
+        bpm: Option<f64>,
+    },
+    /// Pitch analysis via WORLD (contract v7 "Autotune").
+    Pitch {
+        path: PathBuf,
+    },
+    /// Apply pitch-correction edits (contract v7 "Autotune").
+    Autotune {
+        path: PathBuf,
+        #[arg(long)]
+        edits: PathBuf,
     },
 }
 
@@ -528,12 +558,54 @@ fn main() -> ExitCode {
                 Err(e) => print_err("hits", &e),
             }
         }
-        Commands::Notes { path, bpm } => match notes::extract_notes(&path, bpm) {
+        Commands::Notes { path, bpm, kind } => match notes::extract_notes(&path, bpm, kind.as_deref()) {
             Ok(result) => {
                 print_json(&result);
                 ExitCode::SUCCESS
             }
             Err(e) => print_err("notes", &e),
         },
+        Commands::Karaoke { track, lead, low_priority } => {
+            match pipeline::run_karaoke(&track, lead, low_priority, |p| eprint_engine_progress(&p)) {
+                Ok(result) => {
+                    print_json(&result.stems);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("karaoke", &e),
+            }
+        }
+        Commands::Frequencies { path, bpm } => {
+            match absolutesample_lib::audio::frequencies::analyze_frequencies(&path, bpm) {
+                Ok(result) => {
+                    print_json(&result);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("frequencies", &e),
+            }
+        }
+        Commands::Pitch { path } => match absolutesample_lib::audio::autotune::analyze_pitch(&path) {
+            Ok(result) => {
+                print_json(&result);
+                ExitCode::SUCCESS
+            }
+            Err(e) => print_err("pitch", &e),
+        },
+        Commands::Autotune { path, edits } => {
+            let edits_text = match std::fs::read_to_string(&edits) {
+                Ok(t) => t,
+                Err(e) => return print_err("autotune", &format!("failed to read edits json: {e}")),
+            };
+            let edits_value: serde_json::Value = match serde_json::from_str(&edits_text) {
+                Ok(v) => v,
+                Err(e) => return print_err("autotune", &format!("failed to parse edits json: {e}")),
+            };
+            match absolutesample_lib::audio::autotune::apply_autotune(&path, &edits_value) {
+                Ok(result) => {
+                    print_json(&result);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_err("autotune", &e),
+            }
+        }
     }
 }

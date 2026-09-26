@@ -896,6 +896,201 @@ pub fn separate(
     Ok(SeparateResult { stems, device, failed_passes, elapsed_sec, pass_seconds })
 }
 
+/// Fast 2-stem karaoke split (contract v7 addendum "Karaoke"): runs
+/// `separate.py --mode karaoke` (+ `--lead` when `split_lead_backing`) over
+/// `source_wav`, writing `<work_dir>/karaoke/{vocals,instrumental[,lead_vocals,backing_vocals]}.wav`
+/// plus a `karaoke.json` manifest (same shape as `instruments.json`).
+pub fn separate_karaoke(
+    source_wav: &Path,
+    work_dir: &Path,
+    split_lead_backing: bool,
+    low_priority: bool,
+    label: &str,
+    mut progress: impl FnMut(EngineProgress),
+) -> Result<SeparateResult, String> {
+    let _busy_guard = BusyGuard::acquire(label)?;
+
+    let timer = super::progress::Timer::start();
+    let engine = engine_dir()?;
+    std::fs::create_dir_all(&engine).map_err(|e| format!("failed to create engine dir: {e}"))?;
+
+    let script_path = engine.join("separate.py");
+    std::fs::write(&script_path, SEPARATE_PY)
+        .map_err(|e| format!("failed to write separate.py: {e}"))?;
+
+    let venv_python = venv_python_path(&engine);
+    if !venv_python.exists() {
+        return Err(format!(
+            "engine not installed: {} not found",
+            venv_python.display()
+        ));
+    }
+
+    let karaoke_out = work_dir.join("karaoke");
+    std::fs::create_dir_all(&karaoke_out).map_err(|e| format!("failed to create karaoke dir: {e}"))?;
+
+    let mut cmd = silent_command(&venv_python.to_string_lossy());
+    cmd.arg(&script_path)
+        .arg("--input")
+        .arg(source_wav)
+        .arg("--out")
+        .arg(&karaoke_out)
+        .arg("--models-dir")
+        .arg(models_dir(&engine))
+        .arg("--device")
+        .arg("auto")
+        .arg("--mode")
+        .arg("karaoke")
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUNBUFFERED", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if split_lead_backing {
+        cmd.arg("--lead");
+    }
+    if low_priority {
+        cmd.arg("--low-priority");
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+            cmd.creation_flags(BELOW_NORMAL_PRIORITY_CLASS | super::CREATE_NO_WINDOW);
+        }
+    }
+
+    let mut child = cmd.spawn().map_err(|e| format!("failed to spawn separate.py: {e}"))?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let stderr_lines = std::thread::spawn(move || -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(stderr) = stderr {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                lines.push(line);
+            }
+        }
+        lines
+    });
+
+    let mut device = String::new();
+    let mut raw_stems: Vec<RawStem> = Vec::new();
+    let mut failed_passes: Vec<(String, String)> = Vec::new();
+    let mut fatal_error: Option<String> = None;
+    let mut pass_seconds: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+
+    if let Some(stdout) = stdout {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            match parse_separate_line(&line) {
+                SeparateEvent::Device { device: d, .. } => device = d,
+                SeparateEvent::Progress { pass, percent, message } => {
+                    progress(EngineProgress {
+                        stage: "karaoke".to_string(),
+                        percent,
+                        message,
+                        pass: Some(pass),
+                        failed: false,
+                    });
+                }
+                SeparateEvent::PassDone { pass, seconds } => {
+                    pass_seconds.insert(pass.clone(), seconds);
+                    progress(EngineProgress {
+                        stage: "karaoke".to_string(),
+                        percent: 100.0,
+                        message: format!("done in {seconds:.1}s"),
+                        pass: Some(pass),
+                        failed: false,
+                    });
+                }
+                SeparateEvent::PassFailed { pass, error } => {
+                    progress(EngineProgress {
+                        stage: "karaoke".to_string(),
+                        percent: -1.0,
+                        message: error.clone(),
+                        pass: Some(pass.clone()),
+                        failed: true,
+                    });
+                    failed_passes.push((pass, error));
+                }
+                SeparateEvent::Done { stems, device: d } => {
+                    raw_stems = stems;
+                    device = d;
+                }
+                SeparateEvent::Fatal { error } => fatal_error = Some(error),
+                SeparateEvent::Unknown => {}
+            }
+        }
+    }
+
+    let status = child.wait().map_err(|e| format!("failed to wait on separate.py: {e}"))?;
+    let stderr_all = stderr_lines.join().unwrap_or_default();
+    let stderr_tail: Vec<String> = stderr_all.iter().rev().take(20).rev().cloned().collect();
+
+    if !status.success() || fatal_error.is_some() {
+        let mut msg = String::new();
+        if let Some(err) = &fatal_error {
+            msg.push_str(&format!("separate.py fatal error: {err}\n"));
+        } else {
+            msg.push_str(&format!("separate.py exited with {:?}\n", status.code()));
+        }
+        if !stderr_tail.is_empty() {
+            msg.push_str("--- stderr tail ---\n");
+            msg.push_str(&stderr_tail.join("\n"));
+        }
+        return Err(msg);
+    }
+
+    let mut stems = Vec::with_capacity(raw_stems.len());
+    for raw in raw_stems {
+        let path = PathBuf::from(&raw.path);
+        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let loudness = dsp_filters::measure_loudness(&path).unwrap_or(dsp_filters::StemLoudness {
+            peak_db: 0.0,
+            rms_db: 0.0,
+            duration_sec: 0.0,
+            peaks: Vec::new(),
+        });
+        let stem_peaks = super::peaks::compute_peaks_for_path(&path).unwrap_or_default();
+        let duration_sec = super::downloader::probe(&path).map(|p| p.duration_sec).unwrap_or(0.0);
+        stems.push(InstrumentStem {
+            key: raw.key,
+            label: raw.label,
+            group: raw.group,
+            parent: raw.parent,
+            path: raw.path,
+            bytes,
+            peak_db: loudness.peak_db,
+            rms_db: loudness.rms_db,
+            model: raw.model,
+            order: raw.order,
+            duration_sec,
+            peaks: stem_peaks,
+            tags: raw.tags,
+            sounds_like: raw.sounds_like,
+            display_label: raw.display_label,
+            detections: raw.detections,
+            confidence: raw.confidence,
+        });
+    }
+
+    let elapsed_sec = timer.elapsed_sec();
+
+    let manifest = InstrumentsManifest {
+        stems: stems.clone(),
+        device: device.clone(),
+        failed_passes: failed_passes.iter().map(|(p, e)| FailedPass { pass: p.clone(), error: e.clone() }).collect(),
+        elapsed_sec,
+        pass_seconds: pass_seconds.clone(),
+    };
+    let manifest_path = work_dir.join("karaoke").join("karaoke.json");
+    let manifest_json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| format!("failed to serialize karaoke manifest: {e}"))?;
+    std::fs::write(&manifest_path, manifest_json).map_err(|e| format!("failed to write karaoke.json: {e}"))?;
+
+    Ok(SeparateResult { stems, device, failed_passes, elapsed_sec, pass_seconds })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

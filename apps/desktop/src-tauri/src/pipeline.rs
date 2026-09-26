@@ -417,7 +417,7 @@ pub fn run_analyze(
 
 /// Ensures `<workdir>/source.wav` exists, decoding it lazily from
 /// `source.<ext>` via ffmpeg (soxr, 24-bit) if missing.
-fn ensure_source_wav(dir: &Path) -> Result<PathBuf, String> {
+pub(crate) fn ensure_source_wav(dir: &Path) -> Result<PathBuf, String> {
     let source_wav = dir.join("source.wav");
     if source_wav.exists() {
         return Ok(source_wav);
@@ -459,6 +459,32 @@ pub fn run_instruments(
     // Ensure the whole-song analysis is cached (used by cut_region's
     // beat/bar snapping) before returning.
     let _ = analysis::analyze_file(&source_wav)?;
+
+    Ok(result)
+}
+
+/// karaoke: fast 2-stem split (contract v7 addendum "Karaoke"). Runs over
+/// `source.wav` (same as `run_instruments`, so the stems are full-length),
+/// records `state.json.karaokeScope = true`.
+pub fn run_karaoke(
+    track_id: &str,
+    split_lead_backing: bool,
+    low_priority: bool,
+    progress: impl FnMut(engine::EngineProgress),
+) -> Result<engine::SeparateResult, String> {
+    let dir = workspace::work_dir(track_id)?;
+    let source_wav = ensure_source_wav(&dir)?;
+
+    let label = library::read_track(track_id)
+        .ok()
+        .flatten()
+        .map(|t| t.title)
+        .unwrap_or_else(|| track_id.to_string());
+    let result = engine::separate_karaoke(&source_wav, &dir, split_lead_backing, low_priority, &label, progress)?;
+
+    let mut state = library::load_state(track_id);
+    state.karaoke_scope = Some(true);
+    library::write_state(track_id, &state)?;
 
     Ok(result)
 }

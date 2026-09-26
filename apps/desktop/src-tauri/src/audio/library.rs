@@ -75,6 +75,10 @@ pub struct StateFile {
     /// `"loop"` for older loop-scoped splits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruments_scope: Option<String>,
+    /// Set (contract v7 addendum "Karaoke") once `separate_karaoke` has run
+    /// for this track.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub karaoke_scope: Option<bool>,
 }
 
 impl Default for StateFile {
@@ -88,6 +92,7 @@ impl Default for StateFile {
             analysis: None,
             band_stats: None,
             instruments_scope: None,
+            karaoke_scope: None,
         }
     }
 }
@@ -192,6 +197,9 @@ pub struct LibraryEntry {
     pub has_bands: bool,
     pub has_instruments: bool,
     pub instrument_count: u32,
+    /// True when `<workdir>/karaoke/karaoke.json` exists (contract v7
+    /// addendum "Karaoke").
+    pub has_karaoke: bool,
     pub bytes: u64,
     #[serde(default)]
     pub source_kind: crate::pipeline::SourceKind,
@@ -266,6 +274,7 @@ fn dir_entry_to_library_entry(id: &str, dir: &Path) -> Result<Option<LibraryEntr
     let instruments = instruments_manifest_at(dir);
     let has_instruments = instruments.as_ref().is_some_and(|m| !m.stems.is_empty());
     let instrument_count = instruments.map(|m| m.stems.len() as u32).unwrap_or(0);
+    let has_karaoke = dir.join("karaoke").join("karaoke.json").exists();
 
     Ok(Some(LibraryEntry {
         id: id.to_string(),
@@ -283,6 +292,7 @@ fn dir_entry_to_library_entry(id: &str, dir: &Path) -> Result<Option<LibraryEntr
         has_bands,
         has_instruments,
         instrument_count,
+        has_karaoke,
         bytes,
         source_kind: track.source_kind,
     }))
@@ -794,6 +804,26 @@ mod tests {
         assert!(created[2].1.exists(), "scan_3 should survive");
         assert!(!created[3].1.exists(), "scan_4 (has split output but old) should be pruned");
         assert!(!created[4].1.exists(), "scan_5 (oldest) should be pruned");
+
+        std::env::remove_var("ABSOLUTESAMPLE_HOME");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn has_karaoke_reflects_karaoke_json_presence() {
+        let _guard = workspace::ENV_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let root = temp_dir("has_karaoke");
+        std::env::set_var("ABSOLUTESAMPLE_HOME", &root);
+
+        let dir = make_track("kar_track");
+        let entry = dir_entry_to_library_entry("kar_track", &dir).unwrap().unwrap();
+        assert!(!entry.has_karaoke);
+
+        let karaoke_dir = dir.join("karaoke");
+        std::fs::create_dir_all(&karaoke_dir).unwrap();
+        std::fs::write(karaoke_dir.join("karaoke.json"), b"{}").unwrap();
+        let entry = dir_entry_to_library_entry("kar_track", &dir).unwrap().unwrap();
+        assert!(entry.has_karaoke);
 
         std::env::remove_var("ABSOLUTESAMPLE_HOME");
         let _ = std::fs::remove_dir_all(&root);
