@@ -297,7 +297,7 @@ fn verify_import(python: &Path) -> Option<(String, bool, Option<String>)> {
     let out = silent_command(python.to_str()?)
         .arg("-c")
         .arg(
-            "import torch,audio_separator,soundfile;\
+            "import torch,audio_separator,soundfile,torchcrepe,pyworld,librosa,transformers;\
 print(torch.__version__, torch.cuda.is_available(), \
 torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')",
         )
@@ -532,8 +532,9 @@ pub fn install(mut progress: impl FnMut(EngineProgress)) -> Result<EngineStatus,
         "-m",
         "pip",
         "install",
-        "torch",
-        "torchaudio",
+        "torch==2.6.0+cu124",
+        "torchaudio==2.6.0+cu124",
+        "torchvision==0.21.0+cu124",
         "--index-url",
         "https://download.pytorch.org/whl/cu124",
     ]);
@@ -554,6 +555,49 @@ pub fn install(mut progress: impl FnMut(EngineProgress)) -> Result<EngineStatus,
     if !ok {
         return Err(format!("audio-separator install failed:\n{}", tail.join("\n")));
     }
+
+    // 4b. Feature engines: CREPE (accurate pitch), pyworld (autotune resynth),
+    // basic-pitch (MIDI), transformers (instrument tags), plus audio helpers.
+    progress(EngineProgress::install("separator", -1.0, "installing analysis engines".to_string()));
+    let mut cmd = silent_command(&venv_python.to_string_lossy());
+    cmd.args([
+        "-m", "pip", "install",
+        "torchcrepe", "pyworld", "librosa", "audioread", "transformers",
+        "pretty_midi", "mir_eval", "scipy",
+    ]);
+    let (ok, tail) = run_streaming(cmd, |line| {
+        progress(EngineProgress::install("separator", -1.0, line.to_string()));
+    })?;
+    if !ok {
+        return Err(format!("analysis engine install failed:
+{}", tail.join("
+")));
+    }
+    let mut cmd = silent_command(&venv_python.to_string_lossy());
+    cmd.args(["-m", "pip", "install", "--no-deps", "basic-pitch"]);
+    let _ = run_streaming(cmd, |line| {
+        progress(EngineProgress::install("separator", -1.0, line.to_string()));
+    });
+    progress(EngineProgress::install("torch", -1.0, "pinning CUDA torch stack".to_string()));
+    let mut cmd = silent_command(&venv_python.to_string_lossy());
+    cmd.args([
+        "-m", "pip", "install",
+        "torch==2.6.0+cu124", "torchaudio==2.6.0+cu124", "torchvision==0.21.0+cu124",
+        "--index-url", "https://download.pytorch.org/whl/cu124",
+    ]);
+    let (ok, tail) = run_streaming(cmd, |line| {
+        progress(EngineProgress::install("torch", -1.0, line.to_string()));
+    })?;
+    if !ok {
+        return Err(format!("torch re-pin failed:
+{}", tail.join("
+")));
+    }
+    let mut cmd = silent_command(&venv_python.to_string_lossy());
+    cmd.args(["-m", "pip", "install", "--upgrade", "--force-reinstall", "onnxruntime"]);
+    let _ = run_streaming(cmd, |line| {
+        progress(EngineProgress::install("separator", -1.0, line.to_string()));
+    });
 
     // 5. verify.
     progress(EngineProgress::install("verify", -1.0, "verifying install".to_string()));
