@@ -13,6 +13,7 @@ import { isTauri } from "@/lib/mediaUrl";
 import { samplePlayer } from "@/lib/samplePlayer";
 import { mixEngine } from "@/lib/mixEngine";
 import {
+  noteAtTime,
   allowedPitchClasses,
   applyNoteParams,
   computePeaks,
@@ -207,6 +208,9 @@ export function AutotuneTab({ instruments, samples = [], deps: depsProp }: Autot
   const [driftPct, setDriftPct] = useState(70);
 
   const [playing, setPlaying] = useState(false);
+  const [playheadSec, setPlayheadSec] = useState(0);
+  /** Index of the note the info panel shows (selection, else the note at the playhead). */
+  const focusRef = useRef<number | null>(null);
   const [abSource, setAbSource] = useState<PlaySource>("tuned");
   const [busy, setBusy] = useState(0);
   const [exporting, setExporting] = useState(false);
@@ -243,10 +247,18 @@ export function AutotuneTab({ instruments, samples = [], deps: depsProp }: Autot
     const sync = () => {
       setPlaying(player.isPlaying());
       setAbSource(player.getSource());
+      setPlayheadSec(player.currentTime());
     };
     sync();
     return player.subscribe(sync);
   }, [player]);
+
+  // While playing, keep the info panel on the note being heard (10x per second is plenty).
+  useEffect(() => {
+    if (!playing) return;
+    const id = window.setInterval(() => setPlayheadSec(player.currentTime()), 100);
+    return () => window.clearInterval(id);
+  }, [playing, player]);
 
   useEffect(
     () => () => {
@@ -515,7 +527,9 @@ export function AutotuneTab({ instruments, samples = [], deps: depsProp }: Autot
   };
 
   const handleParamSlider = (param: "modulation" | "drift") => (pct: number) => {
-    const edits = [...selectedRef.current]
+    // Acts on the selection, or on the note at the playhead when nothing is selected.
+    const idx = selectedRef.current.size > 0 ? [...selectedRef.current] : focusRef.current !== null ? [focusRef.current] : [];
+    const edits = idx
       .map((i) => noteEdit(i, { [param]: pct / 100 }))
       .filter((e): e is NoteEdit => e !== null);
     commitEdits(edits, { undoKey: param, live: true });
@@ -598,7 +612,10 @@ export function AutotuneTab({ instruments, samples = [], deps: depsProp }: Autot
   };
 
   // ---- Inspector values ----
-  const primary = selected.size > 0 ? Math.min(...selected) : null;
+  // The panel shows the selected note, or (with nothing selected) the note at the playhead.
+  const atPlayhead = selected.size === 0 && analysis ? noteAtTime(analysis.notes, playheadSec) : null;
+  const primary = selected.size > 0 ? Math.min(...selected) : atPlayhead?.index ?? null;
+  focusRef.current = primary;
   const primaryNote = primary !== null ? analysis?.notes[primary] ?? null : null;
   const primaryPitch = primaryNote && primary !== null ? overrides?.get(primary) ?? primaryNote.target : null;
   const readout = primaryPitch !== null ? pitchReadout(primaryPitch) : null;
@@ -614,7 +631,7 @@ export function AutotuneTab({ instruments, samples = [], deps: depsProp }: Autot
       {loading && (
         <Surface variant="raised" className="p-5 flex flex-col gap-3" data-testid="autotune-loading">
           <div className="flex items-center justify-between text-sm">
-            <span className="text-text font-medium">{status === "decoding" ? "Opening audioâ€¦" : "Analyzing vocalâ€¦"}</span>
+            <span className="text-text font-medium">{status === "decoding" ? "Opening audio…" : "Analyzing vocal…"}</span>
             <span className="text-xs text-muted tabular-nums font-mono">{elapsed.toFixed(1)} s</span>
           </div>
           <div className="h-2 rounded-full neu-surface-inset overflow-hidden">
@@ -726,7 +743,7 @@ export function AutotuneTab({ instruments, samples = [], deps: depsProp }: Autot
             {/* Inspector + Correct Pitch macro */}
             <div className="flex flex-wrap items-end gap-5 px-1">
               <div className="flex flex-col gap-1.5 min-w-[150px]">
-                <Label>Selected note</Label>
+                <Label>{hasSelection ? "Selected note" : atPlayhead && !atPlayhead.sounding ? "Next note" : "Note at playhead"}</Label>
                 <div data-testid="autotune-readout" className="flex items-baseline gap-2 h-8">
                   {readout ? (
                     <>
@@ -737,7 +754,7 @@ export function AutotuneTab({ instruments, samples = [], deps: depsProp }: Autot
                       {selected.size > 1 && <span className="text-[10px] text-muted">+{selected.size - 1} more</span>}
                     </>
                   ) : (
-                    <span className="text-xs text-muted">Click a note to select it</span>
+                    <span className="text-xs text-muted">No singing here</span>
                   )}
                 </div>
               </div>
@@ -747,7 +764,7 @@ export function AutotuneTab({ instruments, samples = [], deps: depsProp }: Autot
                 min={0}
                 max={200}
                 onChange={handleParamSlider("modulation")}
-                disabled={!hasSelection}
+                disabled={primaryNote === null}
                 tip={{ term: "Vibrato", text: "100% keeps the singer's vibrato, 0% flattens it, 200% doubles it." }}
               />
               <SliderField
@@ -756,7 +773,7 @@ export function AutotuneTab({ instruments, samples = [], deps: depsProp }: Autot
                 min={0}
                 max={100}
                 onChange={handleParamSlider("drift")}
-                disabled={!hasSelection}
+                disabled={primaryNote === null}
                 tip={{ term: "Pitch drift", text: "100% keeps the slow wobble inside a note, 0% holds it perfectly steady." }}
               />
               <Button type="button" onClick={handleReset} className="inline-flex items-center gap-1.5" title="Put notes back to how they were sung">
@@ -821,9 +838,9 @@ export function AutotuneTab({ instruments, samples = [], deps: depsProp }: Autot
             <div className="flex flex-wrap items-center gap-3 px-1">
               <span className="text-[11px] text-muted tabular-nums">
                 {analysis.notes.length} notes
-                {analyzeSec !== null && ` Â· analyzed in ${analyzeSec.toFixed(1)} s`}
+                {analyzeSec !== null && ` · analyzed in ${analyzeSec.toFixed(1)} s`}
               </span>
-              {busy > 0 && <span className="text-[10px] text-muted uppercase tracking-wide animate-pulse">Renderingâ€¦</span>}
+              {busy > 0 && <span className="text-[10px] text-muted uppercase tracking-wide animate-pulse">Rendering…</span>}
               <div className="flex items-center gap-2 ml-auto">
                 {isTauri() && (
                   <Button type="button" disabled title="Saving into your sample library needs a desktop write command that isn't available yet. Use Download WAV.">

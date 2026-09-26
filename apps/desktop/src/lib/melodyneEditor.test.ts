@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   allowedPitchClasses,
+  edgeScrollPx,
+  EDGE_MAX_PX_PER_FRAME,
+  noteAtTime,
   applyNoteParams,
   blobProfile,
   BLOB_MAX_THICKNESS,
@@ -559,5 +562,31 @@ describe("audio helpers", () => {
       [0, 1.5],
       [2, 4],
     ]);
+  });
+});
+
+describe("playhead helpers", () => {
+  const notes = [
+    { startSec: 1, endSec: 2 },
+    { startSec: 3, endSec: 4 },
+  ];
+  it("noteAtTime finds the sung note, else the next one coming up, else the last one", () => {
+    expect(noteAtTime(notes, 1.5)).toEqual({ index: 0, sounding: true });
+    expect(noteAtTime(notes, 3.0)).toEqual({ index: 1, sounding: true });
+    expect(noteAtTime(notes, 0)).toEqual({ index: 0, sounding: false }); // silence before the first note
+    expect(noteAtTime(notes, 2.2)).toEqual({ index: 1, sounding: false }); // gap: the next note
+    expect(noteAtTime(notes, 10)).toEqual({ index: 1, sounding: false }); // after the end: the last note
+    expect(noteAtTime([], 1)).toBeNull();
+  });
+
+  it("edgeScrollPx scrolls left/right only near the edges, faster deeper in", () => {
+    const layout = computeLayout(1000);
+    const mid = layout.gridLeft + layout.gridWidth / 2;
+    expect(edgeScrollPx(mid, layout)).toBe(0);
+    expect(edgeScrollPx(layout.gridLeft + 30, layout)).toBeLessThan(0);
+    expect(edgeScrollPx(layout.gridLeft + 2, layout)).toBeLessThan(edgeScrollPx(layout.gridLeft + 30, layout));
+    expect(edgeScrollPx(layout.gridLeft - 500, layout)).toBe(-EDGE_MAX_PX_PER_FRAME);
+    expect(edgeScrollPx(layout.gridLeft + layout.gridWidth - 10, layout)).toBeGreaterThan(0);
+    expect(edgeScrollPx(layout.gridLeft + layout.gridWidth + 500, layout)).toBe(EDGE_MAX_PX_PER_FRAME);
   });
 });

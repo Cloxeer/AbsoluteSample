@@ -10,6 +10,9 @@ export type PlaySource = "original" | "tuned";
 /** Sample rate the editor works at (decoded audio is resampled to this by Web Audio). */
 export const EDITOR_SAMPLE_RATE = 44100;
 
+/** Every start/stop/switch is a crossfade this long, so the player itself never clicks. */
+export const FADE_SEC = 0.012;
+
 /** Decodes any browser-supported audio file and mixes it to mono at `sampleRate`. */
 export async function decodeToMono(bytes: ArrayBuffer, sampleRate = EDITOR_SAMPLE_RATE): Promise<{ samples: Float32Array; sampleRate: number }> {
   const OAC: typeof OfflineAudioContext | undefined =
@@ -62,6 +65,8 @@ export function createTunePlayer(): TunePlayer {
   let length = 0;
   let source: PlaySource = "tuned";
   let node: AudioBufferSourceNode | null = null;
+  let nodeGain: GainNode | null = null;
+  let restartScheduled = false;
   let playing = false;
   let startCtxTime = 0;
   let startPos = 0;
@@ -84,26 +89,45 @@ export function createTunePlayer(): TunePlayer {
     return Math.min(durationSec(), startPos + (ctx.currentTime - startCtxTime));
   };
 
+  /** Fades the current voice out (no click) and stops it right after. */
   const stopNode = () => {
     if (!node) return;
-    node.onended = null;
+    const n = node;
+    const g = nodeGain;
+    node = null;
+    nodeGain = null;
+    n.onended = () => {
+      n.disconnect();
+      g?.disconnect();
+    };
     try {
-      node.stop();
+      if (g && ctx) {
+        const t = ctx.currentTime;
+        g.gain.cancelScheduledValues(t);
+        g.gain.setValueAtTime(g.gain.value, t);
+        g.gain.linearRampToValueAtTime(0, t + FADE_SEC);
+        n.stop(t + FADE_SEC + 0.005);
+      } else {
+        n.stop();
+      }
     } catch {
       /* already stopped */
     }
-    node.disconnect();
-    node = null;
   };
 
   const startAt = (sec: number) => {
     const c = ensureCtx();
     const buf = source === "original" ? original : output;
     if (!c || !buf) return;
-    stopNode();
+    stopNode(); // the old voice fades out while the new one fades in: a crossfade, never a cut
     const n = c.createBufferSource();
     n.buffer = buf;
-    n.connect(c.destination);
+    const g = c.createGain();
+    const t = c.currentTime;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(1, t + FADE_SEC);
+    n.connect(g).connect(c.destination);
+    nodeGain = g;
     const from = Math.max(0, Math.min(durationSec(), sec));
     n.onended = () => {
       if (node !== n) return;
@@ -157,8 +181,15 @@ export function createTunePlayer(): TunePlayer {
       const count = Math.max(0, Math.min(samples.length - skip, output.length - start));
       if (count <= 0) return;
       output.copyToChannel(abuf(samples.subarray(skip, skip + count)), 0, start);
-      // An already-started source keeps the data it acquired; restart so the edit is heard right away.
-      if (playing && source === "tuned") startAt(livePos());
+      // An already-started source keeps the data it acquired; restart (crossfaded) so the edit is
+      // heard right away. A burst of patches (e.g. Tune all) coalesces into ONE restart.
+      if (playing && source === "tuned" && !restartScheduled) {
+        restartScheduled = true;
+        setTimeout(() => {
+          restartScheduled = false;
+          if (playing && source === "tuned") startAt(livePos());
+        }, 0);
+      }
     },
     play() {
       if (playing) return;

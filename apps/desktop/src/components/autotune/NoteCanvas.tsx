@@ -13,6 +13,7 @@ import {
   snapPitch,
   xToTime,
   zoomHorizontal,
+  edgeScrollPx,
   OPEN_WINDOW_SEC,
   type Analysis,
   type Rect,
@@ -258,6 +259,33 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
     propsRef.current.onSeek(sec);
   };
 
+  // ---- Edge auto-scroll while dragging the playhead ----
+  const lastPointerX = useRef(0);
+  const edgeRaf = useRef(0);
+  const startEdgeScroll = () => {
+    if (edgeRaf.current || typeof requestAnimationFrame === "undefined") return;
+    const tick = () => {
+      const g = gestureRef.current;
+      if (!g || g.kind !== "seek") {
+        edgeRaf.current = 0;
+        return;
+      }
+      const px = edgeScrollPx(lastPointerX.current, layout);
+      if (px !== 0) {
+        const dur = propsRef.current.analysis.durationSec;
+        const next = clampScroll({ ...vpRef.current, scrollSec: vpRef.current.scrollSec + px / vpRef.current.pxPerSec }, dur, layout);
+        vpRef.current = next;
+        setVp(next);
+        seekTo(Math.max(layout.gridLeft, Math.min(layout.gridLeft + layout.gridWidth, lastPointerX.current)));
+      }
+      edgeRaf.current = requestAnimationFrame(tick);
+    };
+    edgeRaf.current = requestAnimationFrame(tick);
+  };
+  useEffect(() => () => {
+    if (edgeRaf.current && typeof cancelAnimationFrame !== "undefined") cancelAnimationFrame(edgeRaf.current);
+  }, []);
+
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) return;
     const { x, y } = localPoint(e);
@@ -268,9 +296,11 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
     } catch {
       /* jsdom / synthetic pointers */
     }
-    if (region === "time-ruler") {
+    if (region === "time-ruler" || region === "wave") {
       if (x >= layout.gridLeft) seekTo(x);
       gestureRef.current = { kind: "seek", pointerId: e.pointerId };
+      lastPointerX.current = x;
+      startEdgeScroll();
       return;
     }
     if (region !== "grid") return;
@@ -322,6 +352,7 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
       return;
     }
     if (g.kind === "seek") {
+      lastPointerX.current = x;
       seekTo(x);
       return;
     }

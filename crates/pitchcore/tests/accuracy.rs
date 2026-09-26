@@ -140,3 +140,39 @@ fn flattening_vibrato_removes_it() {
     eprintln!("vibrato after flattening: max deviation {:.1} cents over {} frames", max_dev * 100.0, pts.len());
     assert!(max_dev < 0.08, "vibrato still {} cents", max_dev * 100.0);
 }
+
+/// Crackle guard: two sung phrases separated by a short dropout, retuned by +-3 semitones,
+/// must render without any sample discontinuity that is sharper than the voice itself.
+#[test]
+fn retuning_adds_no_clicks_or_pops() {
+    let n = secs(2.0);
+    let curve: Vec<f32> = (0..n).map(|i| 57.3 + 0.2 * (2.0 * PI * 5.0 * i as f32 / SR).sin()).collect();
+    let mut x = voice(&curve);
+    for (i, v) in x.iter_mut().enumerate() {
+        let t = i as f32 / SR;
+        let env = (t / 0.02).min(1.0) * ((1.9 - t) / 0.05).clamp(0.0, 1.0);
+        // 25 ms dropout in the middle, like a consonant the detector can't pitch
+        let gap = if (0.9..0.925).contains(&t) { 0.0 } else { 1.0 };
+        *v *= env * gap;
+    }
+    for off in [-3.0f32, 3.0] {
+        let mut s = Session::new(x.clone(), SR);
+        for i in 0..s.notes().len() {
+            let c = s.notes()[i].center;
+            s.set_note(i, c.round() + off, 0.5, 1.0);
+        }
+        let y = s.render_all();
+        let w = (SR * 0.015) as usize;
+        let mut bad = 0;
+        for i in 1..y.len() {
+            let dy = (y[i] - y[i - 1]).abs();
+            let lo = i.saturating_sub(w);
+            let hi = (i + w).min(x.len());
+            let dx = (lo + 1..hi).map(|k| (x[k] - x[k - 1]).abs()).fold(0.0f32, f32::max);
+            if dy > 2.5 * dx + 0.01 {
+                bad += 1;
+            }
+        }
+        assert_eq!(bad, 0, "offset {off}: {bad} click samples");
+    }
+}

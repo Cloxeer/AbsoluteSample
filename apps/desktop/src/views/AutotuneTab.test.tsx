@@ -241,13 +241,16 @@ describe("AutotuneTab (Melodyne-style editor)", () => {
   it("clicking a blob selects it and the inspector shows note + cents", async () => {
     const { canvas } = await setup();
     const g = geometry();
-    expect(readout()).toHaveTextContent(/click a note/i);
+    // With nothing selected the panel follows the playhead (no "click a note" instruction).
+    expect(screen.getByText(/^(Note at playhead|Next note)$/)).toBeInTheDocument();
+    expect(readout()).not.toHaveTextContent(/click a note/i);
     click(canvas, g.at(1));
+    expect(screen.getByText("Selected note")).toBeInTheDocument();
     expect(readout()).toHaveTextContent("E4");
     expect(readout()).toHaveTextContent("+30 cents");
-    // clicking empty grid deselects
+    // clicking empty grid deselects and the panel goes back to the playhead note
     click(canvas, { clientX: g.at(1).clientX, clientY: midiToY(58, g.vp, g.layout) });
-    expect(readout()).toHaveTextContent(/click a note/i);
+    expect(screen.getByText(/^(Note at playhead|Next note)$/)).toBeInTheDocument();
   });
 
   it("shift-click adds to the selection", async () => {
@@ -349,12 +352,13 @@ describe("AutotuneTab (Melodyne-style editor)", () => {
     expect(player.seek.mock.calls[0][0]).toBeCloseTo(2, 5);
   });
 
-  it("clicking the grid or waveform lane does not seek", async () => {
+  it("clicking the note grid does not seek; the waveform lane works like the timeline", async () => {
     const { canvas, player } = await setup();
     const g = geometry();
-    click(canvas, { clientX: timeToX(2, g.vp, g.layout), clientY: g.layout.waveTop + 10 });
     click(canvas, { clientX: timeToX(2, g.vp, g.layout), clientY: midiToY(58, g.vp, g.layout) });
     expect(player.seek).not.toHaveBeenCalled();
+    click(canvas, { clientX: timeToX(2, g.vp, g.layout), clientY: g.layout.waveTop + 10 });
+    expect(player.seek).toHaveBeenCalledWith(expect.closeTo(2, 2));
   });
 
   it("Tune all to key puts every note exactly on the scale", async () => {

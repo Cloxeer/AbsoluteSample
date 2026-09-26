@@ -399,6 +399,43 @@ export function zoomHorizontal(vp: Viewport, factor: number, anchorX: number, du
   return clampScroll({ ...vp, pxPerSec, scrollSec }, durationSec, layout);
 }
 
+/**
+ * The note the info panel shows when nothing is selected: the note being sung at `sec`
+ * (`sounding: true`), else the next note coming up, else the last note before `sec`.
+ */
+export function noteAtTime(
+  notes: readonly Pick<EngineNote, "startSec" | "endSec">[],
+  sec: number
+): { index: number; sounding: boolean } | null {
+  let next: number | null = null;
+  let prev: number | null = null;
+  for (let i = 0; i < notes.length; i++) {
+    const n = notes[i];
+    if (sec >= n.startSec && sec < n.endSec) return { index: i, sounding: true };
+    if (n.startSec >= sec && (next === null || n.startSec < notes[next].startSec)) next = i;
+    if (n.endSec <= sec && (prev === null || n.endSec > notes[prev].endSec)) prev = i;
+  }
+  const i = next ?? prev;
+  return i === null ? null : { index: i, sounding: false };
+}
+
+/** Width of the hot zone at each side of the grid that scrolls the view while dragging. */
+export const EDGE_ZONE_PX = 40;
+/** Scroll speed at the very edge (and beyond), in pixels per animation frame. */
+export const EDGE_MAX_PX_PER_FRAME = 14;
+
+/**
+ * Edge auto-scroll while dragging the playhead (or a selection box): negative near/past the left
+ * edge, positive near/past the right edge, 0 elsewhere; faster the deeper the pointer goes.
+ */
+export function edgeScrollPx(x: number, layout: EditorLayout): number {
+  const left = layout.gridLeft + EDGE_ZONE_PX;
+  const right = layout.gridLeft + layout.gridWidth - EDGE_ZONE_PX;
+  if (x < left) return -EDGE_MAX_PX_PER_FRAME * Math.min(1, (left - x) / EDGE_ZONE_PX);
+  if (x > right) return EDGE_MAX_PX_PER_FRAME * Math.min(1, (x - right) / EDGE_ZONE_PX);
+  return 0;
+}
+
 /** Auto-scroll during playback: page forward/back when the playhead leaves the visible window. */
 export function followPlayhead(vp: Viewport, sec: number, durationSec: number, layout: EditorLayout): Viewport {
   const visibleSec = layout.gridWidth / vp.pxPerSec;

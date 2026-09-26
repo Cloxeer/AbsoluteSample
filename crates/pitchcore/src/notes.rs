@@ -246,10 +246,27 @@ pub fn shift_curve(midi: &[f32], notes: &[Note]) -> Vec<f32> {
         }
     }
     let mut sm = moving_average(&shift, 5);
-    for i in 0..n {
-        if midi[i].is_nan() {
-            sm[i] = 0.0;
+    // Real silences get no shift; short dropouts inside a sung line (bridged into one phrase
+    // by the renderer) keep the surrounding shift so the pitch does not blip back and forth.
+    let voiced: Vec<bool> = midi.iter().map(|m| !m.is_nan()).collect();
+    let v = runs(&voiced);
+    let mut prev_end: Option<usize> = None;
+    let mut zero = |a: usize, b: usize, sm: &mut Vec<f32>| {
+        for x in &mut sm[a..b] {
+            *x = 0.0;
         }
+    };
+    for &(s, e) in &v {
+        match prev_end {
+            None => zero(0, s, &mut sm),
+            Some(pe) if s - pe > crate::psola::BRIDGE_FRAMES => zero(pe, s, &mut sm),
+            _ => {}
+        }
+        prev_end = Some(e);
+    }
+    match prev_end {
+        Some(pe) => zero(pe, n, &mut sm),
+        None => zero(0, n, &mut sm),
     }
     sm
 }

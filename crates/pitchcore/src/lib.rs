@@ -118,6 +118,28 @@ impl Session {
         self.render(0.0, self.x.len() as f32 / self.sr)
     }
 
+    /// Diagnostics for artifact hunting: the phrase, nearby epoch spacing and shift at a sample.
+    pub fn debug_at(&self, sample: usize) -> String {
+        let shift = notes::shift_curve(&self.midi, &self.notes);
+        let f = (sample as f32 / self.sr / pitch::HOP_SEC) as usize;
+        let sh: Vec<String> = (f.saturating_sub(3)..(f + 4).min(shift.len())).map(|i| format!("{:.2}", shift[i])).collect();
+        let pm: Vec<String> = (f.saturating_sub(3)..(f + 4).min(self.midi.len())).map(|i| format!("{:.1}", self.midi[i])).collect();
+        for r in &self.runs {
+            if sample + 2000 >= r.start && sample <= r.end + 2000 {
+                let k = r.epochs.partition_point(|&e| e < sample);
+                let lo = k.saturating_sub(3);
+                let hi = (k + 3).min(r.epochs.len());
+                let gaps: Vec<String> = (lo.max(1)..hi).map(|i| (r.epochs[i] - r.epochs[i - 1]).to_string()).collect();
+                return format!(
+                    "run {:.3}-{:.3}s ({} epochs) dist-from-start {} dist-to-end {} | epoch gaps {:?} | shift {:?} | midi {:?}",
+                    r.start as f32 / self.sr, r.end as f32 / self.sr, r.epochs.len(),
+                    sample as isize - r.start as isize, r.end as isize - sample as isize, gaps, sh, pm
+                );
+            }
+        }
+        format!("not in a phrase | shift {sh:?} | midi {pm:?}")
+    }
+
     /// The phrase (voiced run) bounds in seconds that contain `sec`, so the UI can
     /// re-render just that phrase after editing a note in it.
     pub fn phrase_bounds(&self, sec: f32) -> (f32, f32) {
