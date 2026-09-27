@@ -448,3 +448,97 @@ free model or combination tested removed them without costing drum quality.
 
 Playback: the stem mixer now fades every start/stop/seek/loop seam (8 ms) and anchors every gain
 ramp; beat slices get 2 ms / 4 ms edge fades.
+
+## v11 addendum: quick split, Enhance, lazy sub-parts, compact stems, resident models
+
+Goal: fast first listen, heavy work only where the user asks, small on disk, gentle on a gaming PC.
+
+### Python engine server (engine/separate.py --serve)
+Start: `python separate.py --serve --models-dir <dir> [--device auto] [--low-priority]`.
+Emits `{"event":"ready","device":"cuda|cpu","gpu":str|null}` once, then reads one JSON request per
+line on stdin and answers with JSON lines on stdout. Every reply to a request carries its `"id"`.
+Job failures are `{"event":"error","id","error"}` (the server keeps running); `{"event":"fatal"}`
+only for process-level failure. Models stay loaded in the process until `unload`/`shutdown`.
+
+Requests (all have "id": str):
+- `{"cmd":"load","set":"quick"}` -> loads the quick-split models -> `{"event":"loaded","id","models":[str],"vramMb":int|null}`
+- `{"cmd":"unload"}` -> frees every model + CUDA cache -> `{"event":"unloaded","id","vramMb":int|null}`
+- `{"cmd":"status"}` -> `{"event":"status","id","models":[str],"vramMb":int|null}`
+- `{"cmd":"shutdown"}` -> `{"event":"bye","id"}` then exit 0
+- `{"cmd":"split","input":path,"out":dir,"quality":"quick"|"full","lowPriority":bool}` -> progress events
+  (`{"event":"progress","id","pass","percent","message"}`, `pass_done`, `pass_failed`), then
+  `{"event":"stem_ready","id","stem":<StemEntry>}` for each stem as soon as it exists (vocals first,
+  before the instrument pass starts), then `{"event":"done","id",<SplitResult>}`.
+- `{"cmd":"substems","parent":"vocals"|"drums","input":path_of_parent_stem,"out":dir,"mixGain":float}`
+  -> progress..., `{"event":"done","id","stems":[<StemEntry> children only]}`
+  vocals -> lead_vocals (file) + backing_vocals (derived = vocals - lead_vocals);
+  drums  -> kick, snare, toms, hihat, ride, crash (files).
+- `{"cmd":"enhance","input":mix_path,"out":dir,"start":sec,"end":sec,"stems":[<StemEntry> current list],"mixGain":float}`
+  -> runs the FULL chain on [start-4s, end+4s], crossfades (100 ms) the result into every stored top-level
+  stem inside the padded span (stems still sum to the mix), re-derives nothing (derived stems are
+  recipes), re-runs existing sub-stems on the same span, writes NEW versioned files
+  (`<key>.<n>.flac`, deletes the previous file) and replies
+  `{"event":"done","id",<SplitResult>}` with the full updated list + `"enhanced":[{start,end}...]`.
+- `{"cmd":"karaoke","input":path,"out":dir,"lead":bool}` -> done with stems vocals (file),
+  instrumental (derived = mix*mixGain - vocals), and if lead: lead_vocals (file), backing_vocals (derived).
+
+One-shot CLI mode stays (`--input/--out/--passes/--mode/--quality`, default quality "full" for the
+bench) and uses the same functions.
+
+StemEntry (same keys as today) + `"derived": null | {"plus":[key|"mix"], "minus":[key], "mixGain":float}`.
+A derived stem has `"path": ""`. SplitResult: `{"stems":[StemEntry],"device","quality","mixPath",
+"mixGain","enhanced":[{"start","end"}]}`. Stored stems are FLAC 24-bit (`<key>.flac`, versioned
+after enhance). `mixGain` (<= 1) is one shared scale so no stored stem exceeds 0.999:
+stored stems sum to mixGain*mix; derived `other = mixGain*mix - (vocals+drums+bass+guitar+piano)`.
+Quick split writes top-level stems only (vocals, drums, bass, guitar, piano, other[derived]).
+
+### Rust (Tauri) additions
+- One `EngineServer` (global): spawns the server lazily, routes replies by id, keeps the
+  existing single-job gate. When models are NOT kept, the server is shut down after each job.
+- Commands: `engine_models_status() -> ModelsStatus{loaded,loading,kept,models,vramMb}`,
+  `engine_keep_loaded() -> ModelsStatus` (start + load quick set, kept=true),
+  `engine_offload() -> ModelsStatus` (shutdown, wait for exit, kept=false),
+  `system_load() -> SystemLoad{ramTotalGb,ramFreeGb,vramTotalGb?,vramFreeGb?,gpuUtil?,verdict:"ok"|"busy"|"insufficient",reasons:[str]}`,
+  `separate_instruments(trackId, passes?, lowPriority?, quality?)` (default "quick"),
+  `enhance_region(trackId, startSec, endSec) -> InstrumentsResult`,
+  `split_substems(trackId, parent) -> InstrumentsResult`,
+  `stem_file(trackId, key) -> String` (real file path; derived stems are materialized with ffmpeg
+  into `instruments/_derived/<key>.wav`, cached until the stems change).
+- Events: `pipeline://stem {trackId, stem}` (a stem is ready early), `engine://models <ModelsStatus + reason?>`
+  (e.g. auto-offload because a game needs the GPU/RAM).
+- Manifest (`instruments.json`) gains `quality, mixPath, mixGain, enhanced`; stems gain `derived`.
+- All stem-path consumers resolve through the manifest (never rebuild `instruments/<key>.wav`).
+- Resource rule (pure fn, unit-tested): split needs RAM free >= 5 GB and, on CUDA, VRAM free >= 3 GB
+  ("insufficient" otherwise); GPU util >= 50% sampled while our engine is idle => "busy" (a game).
+  While models are kept and the engine is idle, a 20 s watcher offloads them if RAM free < 2 GB or
+  VRAM free < 1 GB or GPU util >= 70% twice in a row, and emits `engine://models` with a reason.
+
+### v11 measured results (RTX 2070 Super, 3.5 min song unless noted)
+| | Result |
+|---|---|
+| Quick split (vocals viperx + SW, Roformer overlap 2) | 3.1 min; vocals playable after 1.6 min |
+| Full-quality split (previous default) | 6.4 min |
+| Enhance 15 s region (full chain, +-4 s context) | ~40 s |
+| Lead & backing on request / drum kit on request | 61 s / 25 s |
+| Keep models loaded (quick set) | 6.6-9.4 s, 2.2 GB VRAM; offload -> back to idle VRAM, no process left |
+| Stored stems | FLAC 24-bit + derived "other"/"backing": 90 MB vs ~440 MB float WAV |
+| Models folder after pruning obsolete models | 6.3 GB -> 2.8 GB |
+| Auto-offload under sustained GPU load (real test) | 35 s |
+MUSDB18 (10 tracks, median SDR) quick: vocals 12.12, drums 9.75, bass 8.54, other 7.79;
+full / Enhance: 12.25, 9.84, 10.14, 7.50. Stems + derived recipes rebuild the mix to 121 dB.
+Keeping models loaded saves only ~6-13 s per job (inference dominates); its value is instant
+Enhance/sub-part starts and not re-reading ~1.5 GB of weights.
+
+Tests: scripts/engine_server_test.py (29 checks, real models: protocol, FLAC, recipes, enhance
+seams/untouched audio, errors, unload/shutdown), scripts/separation_selftest.py, Rust (112 + 2 real-
+engine ignored tests: server routing/crash/offload with a fake server, assess() thresholds, manifest
+compat, derived-stem exactness), frontend (297), bench: scripts/bench_separation.py.
+
+### Specialist models researched (not added)
+BS-Roformer SW is already the best downloadable model for full drums/bass/guitar/piano; only MVSEP
+server-side models beat it, by small margins. Worth benchmarking next: SW+htdemucs_ft averaging for
+drums/bass (+0.2-0.5 dB expected, no extra compute in "full"); feeding SW an instrumental built from a
+fuller vocal estimate or Bleed Suppressor v1 (targets the vocal-consonant leak into drums); jarredou's
+5-stem MDX23C drumsep (+1.7-2.1 dB kick/snare/toms, ride+crash merged); anvuew karaoke or an average
+with frazer (+0.1-0.4 dB lead). Not worth it: guitar/piano specialists (below SW), inagoy/larsnet
+drumsep. Several community checkpoints need registering in download_checks.json or MSST code.

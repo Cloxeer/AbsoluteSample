@@ -7,6 +7,7 @@
 type Listener = (trackId: string, startedAt: string) => void;
 
 const listeners = new Set<Listener>();
+const endListeners = new Set<(trackId: string) => void>();
 const starts = new Map<string, string>();
 
 /** Records "now" as the start time for trackId, unless one is already recorded. Returns the recorded ISO time. */
@@ -22,6 +23,20 @@ export function markJobStarted(trackId: string): string {
 /** Clears the recorded local start time, e.g. once a job completes or fails. */
 export function clearJobStart(trackId: string): void {
   starts.delete(trackId);
+}
+
+/**
+ * Marks a job as finished (its command promise settled). Multi-pass engine jobs report 100% per
+ * pass, so a pass reaching 100% is NOT the end of the job; this is.
+ */
+export function markJobEnded(trackId: string): void {
+  starts.delete(trackId);
+  for (const l of endListeners) l(trackId);
+}
+
+export function onJobEnded(cb: (trackId: string) => void): () => void {
+  endListeners.add(cb);
+  return () => endListeners.delete(cb);
 }
 
 export function getJobStart(trackId: string): string | undefined {

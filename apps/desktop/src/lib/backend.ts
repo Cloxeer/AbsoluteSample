@@ -14,6 +14,7 @@ import type {
   LibrarySize,
   LoopAnalysis,
   LoopInfo,
+  ModelsStatus,
   NotesResult,
   PitchResult,
   RegionParams,
@@ -21,6 +22,8 @@ import type {
   SliceInfo,
   StemInfo,
   StemKey,
+  SplitQuality,
+  SystemLoad,
   TrackInfo,
   TrackSession,
   TrashEntry,
@@ -122,9 +125,49 @@ export const backend = {
     return mock.engineInstall();
   },
 
-  async separateInstruments(args: { trackId: string; passes?: string[]; lowPriority?: boolean }): Promise<InstrumentsResult> {
+  async separateInstruments(args: { trackId: string; passes?: string[]; lowPriority?: boolean; quality?: SplitQuality }): Promise<InstrumentsResult> {
     if (isTauri()) return invokeTauri<InstrumentsResult>("separate_instruments", args);
     return mock.separateInstruments(args);
+  },
+
+  /** v11: re-runs the full-quality chain on [startSec, endSec] for every stem; returns the updated list (new versioned paths). */
+  async enhanceRegion(args: { trackId: string; startSec: number; endSec: number }): Promise<InstrumentsResult> {
+    if (isTauri()) return invokeTauri<InstrumentsResult>("enhance_region", args);
+    return mock.enhanceRegion(args);
+  },
+
+  /** v11: splits a top-level stem into its sub-parts on demand (vocals -> lead/backing, drums -> kit). */
+  async splitSubstems(args: { trackId: string; parent: string }): Promise<InstrumentsResult> {
+    if (isTauri()) return invokeTauri<InstrumentsResult>("split_substems", args);
+    return mock.splitSubstems(args);
+  },
+
+  /** v11: a real file path for any stem key (derived stems are materialized on demand). */
+  async stemFile(args: { trackId: string; key: string }): Promise<string> {
+    if (isTauri()) return invokeTauri<string>("stem_file", args);
+    return mock.stemFile(args);
+  },
+
+  async modelsStatus(): Promise<ModelsStatus> {
+    if (isTauri()) return invokeTauri<ModelsStatus>("engine_models_status");
+    return mock.modelsStatus();
+  },
+
+  /** v11: loads the quick-split models and keeps them in GPU memory until offloaded. */
+  async keepModelsLoaded(): Promise<ModelsStatus> {
+    if (isTauri()) return invokeTauri<ModelsStatus>("engine_keep_loaded");
+    return mock.keepModelsLoaded();
+  },
+
+  async offloadModels(): Promise<ModelsStatus> {
+    if (isTauri()) return invokeTauri<ModelsStatus>("engine_offload");
+    return mock.offloadModels();
+  },
+
+  /** v11: whether the PC has room for a split right now ("ok" | "busy" | "insufficient"). */
+  async systemLoad(): Promise<SystemLoad> {
+    if (isTauri()) return invokeTauri<SystemLoad>("system_load");
+    return mock.systemLoad();
   },
 
   async analyzeFile(args: { path: string }): Promise<LoopAnalysis> {

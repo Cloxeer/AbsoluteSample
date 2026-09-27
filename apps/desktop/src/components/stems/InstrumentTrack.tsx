@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Download, Drum, Guitar, Mic2, Piano, Sparkles } from "lucide-react";
 import WaveSurfer from "wavesurfer.js";
 import { Button } from "@/components/neumorphic/Button";
@@ -8,9 +8,12 @@ import { Slider } from "@/components/neumorphic/Slider";
 import { Playhead } from "@/components/waveform/Playhead";
 import { useLaneSelection, LaneSelectionChips } from "@/components/waveform/LaneSelection";
 import { LaneSelectionActions } from "./LaneSelectionActions";
+import type { LaneSelectionRange } from "@/components/waveform/LaneSelection";
+import type { GateFn } from "./BusyGate";
+import { isDerived } from "@/lib/stemFiles";
 import { formatDb } from "@/lib/format";
 import { peaksOptions } from "@/lib/wavePeaks";
-import type { InstrumentGroup, InstrumentStem, Sample } from "@/lib/types";
+import type { EnhancedSpan, InstrumentGroup, InstrumentStem, Sample } from "@/lib/types";
 import clsx from "clsx";
 
 const GROUP_COLORS: Record<InstrumentGroup, string> = {
@@ -111,6 +114,23 @@ export interface InstrumentTrackProps {
   samples?: Sample[];
   /** Called after a lane-selection save/download/slice completes. */
   onSampleSaved?: () => void;
+  /** v11: spans re-run by Enhance, drawn as a subtle band on the lane. */
+  enhanced?: EnhancedSpan[];
+  /** v11: playable url on demand (derived stems have no file until materialized). */
+  resolveUrl?: () => Promise<string>;
+  /** v11: runs before a selection cut/save/slice (materializes a derived stem). */
+  prepare?: () => Promise<unknown>;
+  /** v11: Enhance the selected time span (all stems). */
+  onEnhance?: (range: LaneSelectionRange) => Promise<unknown>;
+  gate?: GateFn;
+}
+
+/** Cheap signature of a peaks array, so a derived (peaks-only) lane redraws when its peaks change. */
+function peaksSignature(peaks: number[] | undefined, durationSec: number | undefined): string {
+  if (!peaks || peaks.length === 0) return "";
+  let sum = 0;
+  for (let i = 0; i < peaks.length; i++) sum += Math.abs(peaks[i]) * ((i % 7) + 1);
+  return `${peaks.length}:${durationSec ?? 0}:${sum.toFixed(4)}`;
 }
 
 export function InstrumentTrack({
@@ -133,6 +153,11 @@ export function InstrumentTrack({
   songTitle,
   samples = [],
   onSampleSaved,
+  enhanced,
+  resolveUrl,
+  prepare,
+  onEnhance,
+  gate,
 }: InstrumentTrackProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
@@ -141,9 +166,13 @@ export function InstrumentTrack({
   const color = GROUP_COLORS[stem.group];
   const Icon = GROUP_ICONS[stem.group];
   const { regionsPlugin, selection, clear } = useLaneSelection(ws);
+  const derived = isDerived(stem);
+  // Derived stems have no file: their lane draws from the stem's peaks alone (no url to fetch).
+  const peaksSig = useMemo(() => (derived ? peaksSignature(stem.peaks, stem.durationSec) : ""), [derived, stem.peaks, stem.durationSec]);
+  const peaksOnly = derived && !wavUrl && peaksSig !== "";
 
   useEffect(() => {
-    if (!containerRef.current || !wavUrl) return;
+    if (!containerRef.current || (!wavUrl && !peaksOnly)) return;
     const ws = WaveSurfer.create({
       container: containerRef.current,
       waveColor: color,
@@ -154,7 +183,7 @@ export function InstrumentTrack({
       barWidth: 2,
       barGap: 1,
       cursorWidth: 1,
-      url: wavUrl,
+      ...(wavUrl ? { url: wavUrl } : {}),
       plugins: [regionsPlugin],
       ...peaksOptions(stem.peaks, stem.durationSec),
     });
@@ -175,7 +204,9 @@ export function InstrumentTrack({
       clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wavUrl]);
+  }, [wavUrl, peaksOnly ? peaksSig : ""]);
+
+  const laneDuration = duration || stem.durationSec || 0;
 
   return (
     <div role="group" aria-label={`${stem.displayLabel ?? stem.label} track`} className={clsx("flex items-stretch gap-3", indented && "ml-9")}>
@@ -201,7 +232,7 @@ export function InstrumentTrack({
         </div>
 
         <div className="flex items-center gap-1">
-          <Button aria-label={`Download ${stem.label} WAV`} onClick={onDownload} className="!px-2 !py-1 shrink-0">
+          <Button aria-label={`Download ${stem.label}`} title="Download this track" onClick={onDownload} className="!px-2 !py-1 shrink-0">
             <Download size={14} />
           </Button>
           {extraAction}
@@ -248,10 +279,14 @@ export function InstrumentTrack({
       <div className="flex-1 min-w-0 flex flex-col gap-1">
         <div className="relative rounded-2xl bg-surface neu-surface-raised p-2 transition-opacity duration-150">
           <div className="min-w-0" ref={containerRef} data-testid={`waveform-${stem.key}`} />
+          {laneDuration > 0 &&
+            (enhanced ?? []).map((span) => (
+              <EnhancedBand key={`${span.start}-${span.end}`} span={span} durationSec={laneDuration} />
+            ))}
           <Playhead currentTime={currentTime} duration={duration} />
           <LaneSelectionChips selection={selection} durationSec={duration} />
         </div>
-        {selection && trackId && songTitle && wavUrl && (
+        {selection && trackId && songTitle && (wavUrl || resolveUrl) && (
           <LaneSelectionActions
             trackId={trackId}
             stemKey={stem.key}
@@ -261,9 +296,30 @@ export function InstrumentTrack({
             selection={selection}
             samples={samples}
             onSaved={onSampleSaved}
+            resolveUrl={resolveUrl}
+            prepare={prepare}
+            onEnhance={onEnhance}
+            gate={gate}
           />
         )}
       </div>
+    </div>
+  );
+}
+
+/** Subtle band marking a span that was re-run by Enhance. */
+function EnhancedBand({ span, durationSec }: { span: EnhancedSpan; durationSec: number }) {
+  const left = Math.min(100, Math.max(0, (span.start / durationSec) * 100));
+  const right = Math.min(100, Math.max(0, (span.end / durationSec) * 100));
+  if (right <= left) return null;
+  return (
+    <div
+      className="pointer-events-none absolute top-2 bottom-2 z-10 rounded-md bg-cyan/[0.07] border-x border-cyan/30"
+      style={{ left: `${left}%`, width: `${right - left}%` }}
+      title="Enhanced"
+      data-testid="enhanced-band"
+    >
+      <span className="absolute bottom-0.5 left-1 text-[9px] leading-none text-cyan/80">Enhanced</span>
     </div>
   );
 }
@@ -277,7 +333,8 @@ export function DisclosureToggle({ open, count, label, onToggle }: { open: boole
       aria-expanded={open}
     >
       {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-      {open ? "Hide" : "Show"} {label} ({count})
+      {open ? "Hide" : "Show"} {label}
+      {count > 0 ? ` (${count})` : ""}
     </button>
   );
 }

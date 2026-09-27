@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { backend } from "@/lib/backend";
-import { onProgress } from "@/lib/events";
-import { markJobStarted } from "@/lib/localJobs";
+import { onProgress, onStemReady } from "@/lib/events";
+import { markJobEnded, markJobStarted } from "@/lib/localJobs";
 import { getLowPriority } from "@/lib/lowPriority";
-import type { InstrumentsResult, InstrumentStem, LoopAnalysis, LoopInfo, ProgressPayload, StemInfo, TrackInfo, TrackSession } from "@/lib/types";
+import type { InstrumentsResult, InstrumentStem, LoopAnalysis, LoopInfo, ProgressPayload, SplitQuality, StemInfo, TrackInfo, TrackSession } from "@/lib/types";
 
 export type EngineState =
   | "idle"
@@ -23,7 +23,11 @@ export interface AudioEngineState {
   stems: StemInfo[] | null;
   instruments: InstrumentStem[] | null;
   instrumentsMeta: Omit<InstrumentsResult, "stems"> | null;
+  /** v11: stems that arrived early (pipeline://stem) while a split of the current track is running. */
+  partialInstruments: InstrumentStem[] | null;
   karaoke: InstrumentStem[] | null;
+  /** v11: source mix of the karaoke stems (derived "instrumental" = mix * mixGain - vocals). */
+  karaokeMixPath: string | null;
   analysis: LoopAnalysis | null;
   progress: ProgressPayload | null;
   error: string | null;
@@ -48,21 +52,63 @@ export function sessionToState(session: TrackSession): Pick<AudioEngineState, "s
   };
 }
 
+/** Adds or replaces one stem (by key) in a partial list, keeping the existing order stable. */
+export function upsertStem(list: InstrumentStem[] | null, stem: InstrumentStem): InstrumentStem[] {
+  const current = list ?? [];
+  const idx = current.findIndex((s) => s.key === stem.key);
+  if (idx === -1) return [...current, stem];
+  const next = [...current];
+  next[idx] = stem;
+  return next;
+}
+
+/**
+ * Applies a split_substems result: a full list (it contains top-level stems) replaces everything;
+ * a children-only list replaces just that parent's children.
+ */
+export function mergeSubstems(current: InstrumentStem[] | null, parent: string, returned: InstrumentStem[]): InstrumentStem[] {
+  if (returned.some((s) => s.parent === null)) return returned;
+  const kept = (current ?? []).filter((s) => s.parent !== parent && !returned.some((r) => r.key === s.key));
+  return [...kept, ...returned];
+}
+
+const EMPTY_STATE: AudioEngineState = {
+  state: "idle",
+  track: null,
+  loop: null,
+  stems: null,
+  instruments: null,
+  instrumentsMeta: null,
+  partialInstruments: null,
+  karaoke: null,
+  karaokeMixPath: null,
+  analysis: null,
+  progress: null,
+  error: null,
+};
+
 export function useAudioEngine() {
-  const [engine, setEngine] = useState<AudioEngineState>({
-    state: "idle",
-    track: null,
-    loop: null,
-    stems: null,
-    instruments: null,
-    instrumentsMeta: null,
-    karaoke: null,
-    analysis: null,
-    progress: null,
-    error: null,
-  });
+  const [engine, setEngine] = useState<AudioEngineState>(EMPTY_STATE);
 
   const unlistenRef = useRef<(() => void) | null>(null);
+  /** The track whose split is running right now; early stems for any other track are ignored. */
+  const splittingTrackRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    onStemReady(({ trackId, stem }) => {
+      if (cancelled || splittingTrackRef.current !== trackId) return;
+      setEngine((prev) => (prev.track?.id === trackId ? { ...prev, partialInstruments: upsertStem(prev.partialInstruments, stem) } : prev));
+    }).then((u) => {
+      if (cancelled) u();
+      else unlisten = u;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -111,7 +157,7 @@ export function useAudioEngine() {
     setEngine((prev) => ({ ...prev, state: "fetching", error: null }));
     try {
       const session = await backend.openTrack(id);
-      setEngine((prev) => ({ ...prev, ...sessionToState(session), error: null, progress: null }));
+      setEngine((prev) => ({ ...prev, ...sessionToState(session), partialInstruments: null, error: null, progress: null }));
       return session;
     } catch (err) {
       setEngine((prev) => ({ ...prev, state: "error", error: String(err) }));
@@ -122,18 +168,7 @@ export function useAudioEngine() {
   /** Clears the current session back to the empty state without deleting any backend data. */
   const newLink = useCallback((teardown?: () => void) => {
     teardown?.();
-    setEngine({
-      state: "idle",
-      track: null,
-      loop: null,
-      stems: null,
-      instruments: null,
-      instrumentsMeta: null,
-      karaoke: null,
-      analysis: null,
-      progress: null,
-      error: null,
-    });
+    setEngine(EMPTY_STATE);
   }, []);
 
   const trimLoop = useCallback(async (trackId: string, startSec: number, endSec: number) => {
@@ -146,6 +181,8 @@ export function useAudioEngine() {
     } catch (err) {
       setEngine((prev) => ({ ...prev, state: "error", error: String(err) }));
       throw err;
+    } finally {
+      markJobEnded(trackId);
     }
   }, []);
 
@@ -159,20 +196,69 @@ export function useAudioEngine() {
     } catch (err) {
       setEngine((prev) => ({ ...prev, state: "error", error: String(err) }));
       throw err;
+    } finally {
+      markJobEnded(trackId);
     }
   }, []);
 
-  const separateInstruments = useCallback(async (trackId: string, options?: { lowPriority?: boolean }) => {
+  /** v11: quick split by default; stems that are ready early show up in `partialInstruments`. */
+  const separateInstruments = useCallback(async (trackId: string, options?: { lowPriority?: boolean; quality?: SplitQuality }) => {
     markJobStarted(trackId);
-    setEngine((prev) => ({ ...prev, state: "separating", error: null }));
+    splittingTrackRef.current = trackId;
+    setEngine((prev) => ({ ...prev, state: "separating", error: null, partialInstruments: null }));
     try {
       const lowPriority = options?.lowPriority ?? getLowPriority();
-      const { stems, ...instrumentsMeta } = await backend.separateInstruments({ trackId, lowPriority });
-      setEngine((prev) => ({ ...prev, state: "ready", instruments: stems, instrumentsMeta, progress: null }));
+      const quality = options?.quality ?? "quick";
+      const { stems, ...instrumentsMeta } = await backend.separateInstruments({ trackId, lowPriority, quality });
+      setEngine((prev) => ({ ...prev, state: "ready", instruments: stems, instrumentsMeta, partialInstruments: null, progress: null }));
       return stems;
     } catch (err) {
-      setEngine((prev) => ({ ...prev, state: "error", error: String(err) }));
+      setEngine((prev) => ({ ...prev, state: "error", error: String(err), partialInstruments: null }));
       throw err;
+    } finally {
+      if (splittingTrackRef.current === trackId) splittingTrackRef.current = null;
+      markJobEnded(trackId);
+    }
+  }, []);
+
+  /**
+   * v11: re-runs the best-quality separation on [startSec, endSec] for every stem. Enhanced files get
+   * new versioned paths, so lanes and the mix reload just the changed audio. Errors are rethrown for
+   * the caller to show; the current stems stay as they were.
+   */
+  const enhanceRegion = useCallback(async (trackId: string, startSec: number, endSec: number) => {
+    markJobStarted(trackId);
+    try {
+      const { stems, ...meta } = await backend.enhanceRegion({ trackId, startSec, endSec });
+      setEngine((prev) =>
+        prev.track?.id === trackId
+          ? { ...prev, instruments: stems, instrumentsMeta: prev.instrumentsMeta ? { ...prev.instrumentsMeta, ...meta } : meta, progress: null }
+          : prev
+      );
+      return stems;
+    } finally {
+      markJobEnded(trackId);
+    }
+  }, []);
+
+  /** v11: splits vocals (lead & backing) or drums (kit) on demand; returns the merged stem list. */
+  const splitSubstems = useCallback(async (trackId: string, parent: string) => {
+    markJobStarted(trackId);
+    try {
+      const { stems, ...meta } = await backend.splitSubstems({ trackId, parent });
+      setEngine((prev) =>
+        prev.track?.id === trackId
+          ? {
+              ...prev,
+              instruments: mergeSubstems(prev.instruments, parent, stems),
+              instrumentsMeta: prev.instrumentsMeta ? { ...prev.instrumentsMeta, ...meta } : meta,
+              progress: null,
+            }
+          : prev
+      );
+      return stems;
+    } finally {
+      markJobEnded(trackId);
     }
   }, []);
 
@@ -181,12 +267,14 @@ export function useAudioEngine() {
     setEngine((prev) => ({ ...prev, state: "separating", error: null }));
     try {
       const lowPriority = options?.lowPriority ?? getLowPriority();
-      const { stems } = await backend.separateKaraoke({ trackId, splitLeadBacking, lowPriority });
-      setEngine((prev) => ({ ...prev, state: "ready", karaoke: stems, progress: null }));
+      const { stems, mixPath } = await backend.separateKaraoke({ trackId, splitLeadBacking, lowPriority });
+      setEngine((prev) => ({ ...prev, state: "ready", karaoke: stems, karaokeMixPath: mixPath ?? null, progress: null }));
       return stems;
     } catch (err) {
       setEngine((prev) => ({ ...prev, state: "error", error: String(err) }));
       throw err;
+    } finally {
+      markJobEnded(trackId);
     }
   }, []);
 
@@ -203,19 +291,22 @@ export function useAudioEngine() {
   }, []);
 
   const reset = useCallback(() => {
-    setEngine({
-      state: "idle",
-      track: null,
-      loop: null,
-      stems: null,
-      instruments: null,
-      instrumentsMeta: null,
-      karaoke: null,
-      analysis: null,
-      progress: null,
-      error: null,
-    });
+    setEngine(EMPTY_STATE);
   }, []);
 
-  return { engine, fetchAudio, importLocal, trimLoop, separateStems, separateInstruments, separateKaraoke, analyzeLoop, reset, openTrack, newLink };
+  return {
+    engine,
+    fetchAudio,
+    importLocal,
+    trimLoop,
+    separateStems,
+    separateInstruments,
+    separateKaraoke,
+    enhanceRegion,
+    splitSubstems,
+    analyzeLoop,
+    reset,
+    openTrack,
+    newLink,
+  };
 }

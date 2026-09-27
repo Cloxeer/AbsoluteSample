@@ -106,4 +106,31 @@ describe("LaneSelectionActions", () => {
     expect(screen.queryByText("Create up to 64 one-shot samples from Drums?")).not.toBeInTheDocument();
     expect(backend.sliceHits).not.toHaveBeenCalled();
   });
+
+  it("Enhance re-runs the selected span through onEnhance (via the PC busy check) and shows progress", async () => {
+    let finish!: () => void;
+    const onEnhance = vi.fn(() => new Promise<void>((r) => (finish = r)));
+    const gate = vi.fn(async (_label: string, run: (o: { lowPriority?: boolean }) => Promise<unknown>) => {
+      void run({});
+    });
+    render(<LaneSelectionActions {...baseProps} onEnhance={onEnhance} gate={gate} />);
+
+    const button = screen.getByLabelText("Enhance Drums selection");
+    expect(button).toHaveAttribute("title", "Re-run the best-quality separation on just this part");
+    fireEvent.click(button);
+
+    await waitFor(() => expect(onEnhance).toHaveBeenCalledWith({ start: 30, end: 45 }));
+    expect(gate).toHaveBeenCalledWith("Enhance", expect.any(Function));
+    expect(await screen.findByText(/Enhancing \d+s/)).toBeInTheDocument();
+    finish();
+    await waitFor(() => expect(screen.queryByText(/Enhancing/)).not.toBeInTheDocument());
+  });
+
+  it("has no Enhance button without onEnhance, and plays a derived lane through resolveUrl", async () => {
+    const resolveUrl = vi.fn(async () => "blob:derived");
+    render(<LaneSelectionActions {...baseProps} wavUrl={null} resolveUrl={resolveUrl} />);
+    expect(screen.queryByLabelText("Enhance Drums selection")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Play Drums selection"));
+    await waitFor(() => expect(samplePlayer.playPath).toHaveBeenCalledWith("track1:drums_sub:selection", "blob:derived", expect.objectContaining({ start: 30, end: 45 })));
+  });
 });

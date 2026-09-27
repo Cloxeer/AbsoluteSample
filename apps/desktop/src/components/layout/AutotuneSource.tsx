@@ -4,6 +4,7 @@ import { UploadCloud } from "lucide-react";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
 import { isTauri } from "@/lib/mediaUrl";
+import { isVirtualPath, realPath, stemSourcePath } from "@/lib/stemFiles";
 import type { InstrumentStem, Sample } from "@/lib/types";
 
 const AUDIO_EXTENSIONS = ["wav", "flac", "mp3", "m4a", "aiff", "ogg"];
@@ -37,10 +38,12 @@ export interface AutotuneSourceProps {
   samples: Sample[];
   value: AutotuneSourceValue | null;
   onChange: (value: AutotuneSourceValue) => void;
+  /** v11: current song id, so derived stems can be materialized as a real file when picked. */
+  trackId?: string | null;
 }
 
 /** Builds the "Or use a vocal from this song" options: vocal-ish stems first, then other stems, then saved samples. */
-export function buildSongSourceOptions(instruments: InstrumentStem[] | null | undefined, samples: Sample[]): SongSourceOption[] {
+export function buildSongSourceOptions(instruments: InstrumentStem[] | null | undefined, samples: Sample[], trackId?: string | null): SongSourceOption[] {
   const options: SongSourceOption[] = [];
   const stems = instruments ?? [];
   const vocal = stems.filter((s) => VOCAL_KEYS.has(s.key));
@@ -49,7 +52,7 @@ export function buildSongSourceOptions(instruments: InstrumentStem[] | null | un
     options.push({
       key: stem.key,
       label: stem.displayLabel ?? stem.label,
-      path: stem.path,
+      path: stemSourcePath(stem, trackId),
       group: "Instrument stems",
       peaks: stem.peaks,
       durationSec: stem.durationSec,
@@ -81,11 +84,11 @@ async function pickTauriFile(): Promise<string | null> {
  * pattern in components/layout/SourcePicker.tsx but resolves straight to an absolute path (Tauri)
  * or a file name + object URL (browser/mock) instead of importing a whole new track.
  */
-export function AutotuneSource({ instruments, samples, value, onChange }: AutotuneSourceProps) {
+export function AutotuneSource({ instruments, samples, value, onChange, trackId }: AutotuneSourceProps) {
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const tauri = isTauri();
-  const songOptions = buildSongSourceOptions(instruments, samples);
+  const songOptions = buildSongSourceOptions(instruments, samples, trackId);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
 
@@ -157,6 +160,11 @@ export function AutotuneSource({ instruments, samples, value, onChange }: Autotu
     if (!path) return;
     const opt = songOptions.find((o) => o.path === path);
     if (!opt) return;
+    if (isVirtualPath(opt.path)) {
+      // A derived stem has no file yet: materialize it, then hand over the real path.
+      void realPath(opt.path).then((real) => onChange({ path: real, label: opt.label, kind: "song", peaks: opt.peaks, durationSec: opt.durationSec }));
+      return;
+    }
     onChange({ path: opt.path, label: opt.label, kind: "song", peaks: opt.peaks, durationSec: opt.durationSec });
   };
 

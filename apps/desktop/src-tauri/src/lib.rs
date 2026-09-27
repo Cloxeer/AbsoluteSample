@@ -58,7 +58,29 @@ pub fn run() {
             commands::read_audio_file,
             commands::save_to_downloads,
             commands::reveal_download,
+            commands::enhance_region,
+            commands::split_substems,
+            commands::stem_file,
+            commands::engine_models_status,
+            commands::engine_keep_loaded,
+            commands::engine_offload,
+            commands::system_load,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .setup(|app| {
+            use tauri::Emitter;
+            let handle = app.handle().clone();
+            audio::engine_server::global().set_listener(move |event| {
+                let _ = handle.emit("engine://models", event);
+            });
+            audio::sysload::start_watcher();
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_, event| {
+            // Never leave a python server (and its VRAM) behind.
+            if let tauri::RunEvent::Exit = event {
+                audio::engine_server::global().shutdown();
+            }
+        });
 }

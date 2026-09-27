@@ -40,6 +40,11 @@ step("engine memory guard", py, [join(root, "scripts", "engine_smoke.py")]);
 // 4. Stem-separation post-processing self-test (no AI models; seconds). Skipped without the venv.
 if (existsSync(venvPy)) {
   step("separation self-test", venvPy, [join(root, "scripts", "separation_selftest.py")]);
+  // Real models on a generated 12 s song: load, quick split, sub-parts, enhance, karaoke, errors,
+  // unload (GPU memory freed), shutdown. About a minute. Set ABSOLUTESAMPLE_SKIP_GPU_TESTS=1 to skip.
+  if (process.env.ABSOLUTESAMPLE_SKIP_GPU_TESTS !== "1") {
+    step("engine server integration", venvPy, [join(root, "scripts", "engine_server_test.py")]);
+  }
 } else {
   console.log("\n=== separation self-test ===\n[smoke] engine venv not found; skipping.");
 }

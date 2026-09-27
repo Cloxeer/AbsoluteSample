@@ -5,6 +5,7 @@ import { InfoTip } from "@/components/neumorphic/InfoTip";
 import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { backend } from "@/lib/backend";
 import { groupInstruments } from "@/lib/instruments";
+import { realPath, stemSourcePath } from "@/lib/stemFiles";
 import { camelotFor, explainKey } from "@/lib/notesTheory";
 import { computePianoRollLayout, isBlackKey } from "@/lib/pianoRoll";
 import { notePlayer, type NotePlayerState } from "@/lib/notePlayer";
@@ -36,14 +37,14 @@ interface SourceOption {
   isDrum: boolean;
 }
 
-function buildSourceOptions(instruments: InstrumentStem[] | null | undefined, samples: Sample[]): SourceOption[] {
+function buildSourceOptions(instruments: InstrumentStem[] | null | undefined, samples: Sample[], trackId?: string | null): SourceOption[] {
   const options: SourceOption[] = [];
   if (instruments && instruments.length > 0) {
     for (const node of groupInstruments(instruments)) {
       options.push({
         key: node.stem.key,
         label: node.stem.displayLabel ?? node.stem.label,
-        path: node.stem.path,
+        path: stemSourcePath(node.stem, trackId),
         group: "Instrument stems",
         isDrum: isDrumSource(node.stem.key, node.stem.group),
       });
@@ -51,7 +52,7 @@ function buildSourceOptions(instruments: InstrumentStem[] | null | undefined, sa
         options.push({
           key: child.key,
           label: `${node.stem.displayLabel ?? node.stem.label}  /  ${child.label}`,
-          path: child.path,
+          path: stemSourcePath(child, trackId),
           group: "Instrument stems",
           isDrum: isDrumSource(child.key, child.group),
         });
@@ -107,7 +108,7 @@ function velocityColor(velocity: number): string {
 }
 
 export function NotesTab({ track, loop: _loop, instruments, analysis, samples = [], onAnalyze: _onAnalyze }: NotesTabProps) {
-  const sources = useMemo(() => buildSourceOptions(instruments, samples), [instruments, samples]);
+  const sources = useMemo(() => buildSourceOptions(instruments, samples, track?.id), [instruments, samples, track?.id]);
   const [selectedPath, setSelectedPath] = useState<string>("");
   const [result, setResult] = useState<NotesResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -169,7 +170,7 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
     setLoading(true);
     try {
       const notes = await backend.extractNotes({
-        path: selectedSource.path,
+        path: await realPath(selectedSource.path),
         bpm: analysis?.bpm,
         kind: selectedSource.isDrum ? "drums" : undefined,
       });
@@ -189,7 +190,7 @@ export function NotesTab({ track, loop: _loop, instruments, analysis, samples = 
       if (isDrumPlaying) {
         samplePlayer.stop();
       } else if (selectedSource && drumId) {
-        void backend.resolveWavUrl(selectedSource.path).then((url) => {
+        void realPath(selectedSource.path).then((p) => backend.resolveWavUrl(p)).then((url) => {
           samplePlayer.playPath(drumId, url, { label: selectedSource.label, kind: "sample" });
         });
       }

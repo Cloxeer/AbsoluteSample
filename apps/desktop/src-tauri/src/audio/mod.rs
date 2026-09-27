@@ -4,6 +4,7 @@ pub mod cuts;
 pub mod dsp_filters;
 pub mod downloader;
 pub mod engine;
+pub mod engine_server;
 pub mod frequencies;
 pub mod library;
 pub mod notes;
@@ -11,6 +12,8 @@ pub mod peaks;
 pub mod progress;
 pub mod samples;
 pub mod slicer;
+pub mod stems;
+pub mod sysload;
 pub mod trash;
 pub mod workspace;
 

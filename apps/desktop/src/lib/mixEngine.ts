@@ -11,9 +11,33 @@
  * is derived arithmetically from `ctx.currentTime`, never read back from a node's own state.
  */
 
+/**
+ * v11: a derived track is a recipe over other tracks' decoded audio: sum(plus) - sum(minus), where the
+ * special id "mix" (the source mix) is scaled by mixGain. Computed by exact sample math, no file needed.
+ */
+export interface DerivedSpec {
+  plus: string[];
+  minus: string[];
+  mixGain?: number | null;
+}
+
 export interface MixTrackDef {
   id: string;
-  url: string;
+  /** Audio to fetch + decode (cached by url). Omit for a derived track. */
+  url?: string;
+  /** Derived track recipe; its inputs are other defs' ids in the same load() call. */
+  derive?: DerivedSpec;
+  /** Loaded only as an input for derived tracks (e.g. the source "mix"), never played. */
+  hidden?: boolean;
+}
+
+/** The id of the source-mix def that derived recipes reference. */
+export const MIX_ID = "mix";
+
+interface DerivedCacheEntry {
+  spec: string;
+  inputs: AudioBuffer[];
+  buffer: AudioBuffer;
 }
 
 type AudioContextFactory = () => AudioContext;
@@ -38,7 +62,12 @@ export class MixEngine {
   private _ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
 
+  /** Decoded audio by url. */
   private buffers = new Map<string, AudioBuffer>();
+  /** Derived buffers by track id, reused while the recipe and its input buffers are unchanged. */
+  private derivedCache = new Map<string, DerivedCacheEntry>();
+  /** The buffer each currently loaded track plays (url-decoded or derived). */
+  private trackBuffers = new Map<string, AudioBuffer>();
   private tracks: MixTrackDef[] = [];
   private gains = new Map<string, GainNode>();
   private sources = new Map<string, AudioBufferSourceNode>();
@@ -85,29 +114,106 @@ export class MixEngine {
   async load(defs: MixTrackDef[]): Promise<void> {
     const generation = ++this.loadGeneration;
     const ctx = this.ctx();
+    const urls = Array.from(new Set(defs.filter((d) => d.url && !d.derive).map((d) => d.url as string)));
     const decoded = await Promise.all(
-      defs.map(async (d) => {
-        const cached = this.buffers.get(d.url);
-        if (cached) return [d.url, cached] as const;
-        const res = await fetch(d.url);
+      urls.map(async (url) => {
+        const cached = this.buffers.get(url);
+        if (cached) return [url, cached] as const;
+        const res = await fetch(url);
         const arrayBuffer = await res.arrayBuffer();
         const buffer = await ctx.decodeAudioData(arrayBuffer);
-        return [d.url, buffer] as const;
+        return [url, buffer] as const;
       })
     );
 
     if (generation !== this.loadGeneration) return; // superseded by a newer load()
 
     for (const [url, buffer] of decoded) this.buffers.set(url, buffer);
-    this.tracks = defs;
-    for (const d of defs) this.gainFor(d.id);
+
+    const byId = new Map(defs.map((d) => [d.id, d] as const));
+    const resolved = new Map<string, AudioBuffer | null>();
+    const resolve = (id: string, stack: string[]): AudioBuffer | null => {
+      if (resolved.has(id)) return resolved.get(id)!;
+      const def = byId.get(id);
+      let buf: AudioBuffer | null = null;
+      if (def && !def.derive && def.url) {
+        buf = this.buffers.get(def.url) ?? null;
+      } else if (def?.derive && !stack.includes(id)) {
+        buf = this.deriveBuffer(id, def.derive, (inputId) => resolve(inputId, [...stack, id]));
+      }
+      resolved.set(id, buf);
+      return buf;
+    };
+
+    this.trackBuffers = new Map();
+    for (const d of defs) {
+      const buf = resolve(d.id, []);
+      if (buf) this.trackBuffers.set(d.id, buf);
+    }
+    this.tracks = defs.filter((d) => !d.hidden);
+    for (const d of this.tracks) this.gainFor(d.id);
+  }
+
+  /**
+   * Builds (or reuses) a derived track's buffer by exact per-sample math over its inputs'
+   * already-decoded buffers: out = sum(plus, "mix" scaled by mixGain) - sum(minus).
+   * Returns null when an input is missing. Cached per id until the recipe or any input buffer changes.
+   */
+  private deriveBuffer(id: string, spec: DerivedSpec, input: (id: string) => AudioBuffer | null): AudioBuffer | null {
+    const gain = spec.mixGain ?? 1;
+    const terms: { buf: AudioBuffer; scale: number }[] = [];
+    for (const p of spec.plus) {
+      const buf = input(p);
+      if (!buf) return null;
+      terms.push({ buf, scale: p === MIX_ID ? gain : 1 });
+    }
+    for (const m of spec.minus) {
+      const buf = input(m);
+      if (!buf) return null;
+      terms.push({ buf, scale: m === MIX_ID ? -gain : -1 });
+    }
+    if (terms.length === 0) return null;
+    const specKey = JSON.stringify([spec.plus, spec.minus, gain]);
+    const inputs = terms.map((t) => t.buf);
+    const cached = this.derivedCache.get(id);
+    if (cached && cached.spec === specKey && cached.inputs.length === inputs.length && cached.inputs.every((b, i) => b === inputs[i])) {
+      return cached.buffer;
+    }
+    const channels = Math.max(...inputs.map((b) => b.numberOfChannels));
+    const length = Math.max(...inputs.map((b) => b.length));
+    const out = this.ctx().createBuffer(channels, length, inputs[0].sampleRate);
+    for (let c = 0; c < channels; c++) {
+      const dst = out.getChannelData(c);
+      for (const { buf, scale } of terms) {
+        const src = buf.getChannelData(Math.min(c, buf.numberOfChannels - 1));
+        const n = Math.min(src.length, dst.length);
+        for (let i = 0; i < n; i++) dst[i] += scale * src[i];
+      }
+    }
+    this.derivedCache.set(id, { spec: specKey, inputs, buffer: out });
+    return out;
+  }
+
+  /** Drops a decoded url (e.g. a stem file replaced by a new version after Enhance). */
+  forget(url: string): void {
+    const buf = this.buffers.get(url);
+    this.buffers.delete(url);
+    if (!buf) return;
+    for (const [id, entry] of this.derivedCache) {
+      if (entry.inputs.includes(buf)) this.derivedCache.delete(id);
+    }
+  }
+
+  /** The buffer a loaded track plays (tests/inspection). */
+  bufferFor(id: string): AudioBuffer | null {
+    return this.trackBuffers.get(id) ?? null;
   }
 
   private longestTrackId(): string | null {
     let bestId: string | null = null;
     let bestDur = -1;
     for (const d of this.tracks) {
-      const buf = this.buffers.get(d.url);
+      const buf = this.trackBuffers.get(d.id);
       if (buf && buf.duration > bestDur) {
         bestDur = buf.duration;
         bestId = d.id;
@@ -154,7 +260,7 @@ export class MixEngine {
     const longestId = this.longestTrackId();
 
     for (const d of this.tracks) {
-      const buffer = this.buffers.get(d.url);
+      const buffer = this.trackBuffers.get(d.id);
       if (!buffer) continue;
       const src = ctx.createBufferSource();
       src.buffer = buffer;

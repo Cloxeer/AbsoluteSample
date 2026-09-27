@@ -6,8 +6,11 @@
 //! `separate.py` (this repo's `engine/separate.py`, embedded via
 //! `include_str!` and rewritten to disk before every run).
 
-use super::{dsp_filters, silent_command, workspace};
+use super::stems::{self, StemSetKind};
+use super::{engine_server, silent_command, workspace};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -118,7 +121,10 @@ pub struct InstrumentStem {
     pub parent: Option<String>,
     pub path: String,
     pub bytes: u64,
+    /// -inf was once written as null for silent stems: read it as silence.
+    #[serde(deserialize_with = "db_or_silent")]
     pub peak_db: f64,
+    #[serde(deserialize_with = "db_or_silent")]
     pub rms_db: f64,
     pub model: String,
     pub order: u32,
@@ -140,6 +146,35 @@ pub struct InstrumentStem {
     pub detections: Option<Vec<InstrumentTag>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<StemConfidence>,
+    /// v11: a derived stem is a recipe over other stems (its `path` is
+    /// empty); `stem_file` materializes it on demand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived: Option<Derived>,
+}
+
+fn db_or_silent<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    Ok(Option::<f64>::deserialize(d)?.unwrap_or(stems::SILENT_DB))
+}
+
+/// v11 derived-stem recipe: `sum(plus) - sum(minus)`, where the pseudo key
+/// `"mix"` is the song mix scaled by `mixGain` (falling back to the
+/// manifest's `mixGain`, then 1).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Derived {
+    #[serde(default)]
+    pub plus: Vec<String>,
+    #[serde(default)]
+    pub minus: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mix_gain: Option<f32>,
+}
+
+/// A time span in seconds (v11 `enhanced` regions).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Region {
+    pub start: f64,
+    pub end: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -157,7 +192,7 @@ pub struct FailedPass {
     pub error: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct InstrumentsManifest {
     pub stems: Vec<InstrumentStem>,
@@ -171,6 +206,18 @@ pub struct InstrumentsManifest {
     /// events.
     #[serde(default)]
     pub pass_seconds: std::collections::HashMap<String, f64>,
+    /// v11: "quick" | "full" (None for pre-v11 manifests).
+    #[serde(default)]
+    pub quality: Option<String>,
+    /// v11: the mix the stems were split from (derived stems' `"mix"`).
+    #[serde(default)]
+    pub mix_path: Option<String>,
+    /// v11: stored stems sum to `mixGain * mix` (None = 1).
+    #[serde(default)]
+    pub mix_gain: Option<f32>,
+    /// v11: regions re-run with the full chain by `enhance_region`.
+    #[serde(default)]
+    pub enhanced: Vec<Region>,
 }
 
 /// Returns the engine root dir: `<home>/engine`.
@@ -184,6 +231,25 @@ pub(crate) fn venv_python_path(engine: &Path) -> PathBuf {
 
 fn models_dir(engine: &Path) -> PathBuf {
     engine.join("models")
+}
+
+/// Writes the embedded `separate.py` into the engine dir and returns
+/// `(venv python, script, models dir)`; errors if the venv is missing.
+pub(crate) fn prepare_script() -> Result<(PathBuf, PathBuf, PathBuf), String> {
+    let engine = engine_dir()?;
+    std::fs::create_dir_all(&engine).map_err(|e| format!("failed to create engine dir: {e}"))?;
+    let script_path = engine.join("separate.py");
+    std::fs::write(&script_path, SEPARATE_PY).map_err(|e| format!("failed to write separate.py: {e}"))?;
+    let venv_python = venv_python_path(&engine);
+    if !venv_python.exists() {
+        return Err(format!("engine not installed: {} not found", venv_python.display()));
+    }
+    Ok((venv_python, script_path, models_dir(&engine)))
+}
+
+/// True while any engine job holds the global gate.
+pub fn engine_busy() -> bool {
+    BUSY.load(Ordering::SeqCst)
 }
 
 // ---------------------------------------------------------------------
@@ -689,14 +755,46 @@ pub struct RawStem {
     pub detections: Option<Vec<InstrumentTag>>,
     #[serde(default)]
     pub confidence: Option<StemConfidence>,
+    #[serde(default)]
+    pub derived: Option<Derived>,
+}
+
+impl From<RawStem> for InstrumentStem {
+    /// A stem with no measurements yet (see `stems::measure_all`).
+    fn from(raw: RawStem) -> Self {
+        InstrumentStem {
+            key: raw.key,
+            label: raw.label,
+            group: raw.group,
+            parent: raw.parent,
+            path: raw.path,
+            bytes: 0,
+            peak_db: 0.0,
+            rms_db: 0.0,
+            model: raw.model,
+            order: raw.order,
+            duration_sec: 0.0,
+            peaks: Vec::new(),
+            tags: raw.tags,
+            sounds_like: raw.sounds_like,
+            display_label: raw.display_label,
+            detections: raw.detections,
+            confidence: raw.confidence,
+            derived: raw.derived,
+        }
+    }
 }
 
 /// Parses one JSON line from separate.py's stdout into a `SeparateEvent`.
 pub fn parse_separate_line(line: &str) -> SeparateEvent {
-    let value: serde_json::Value = match serde_json::from_str(line) {
-        Ok(v) => v,
-        Err(_) => return SeparateEvent::Unknown,
-    };
+    match serde_json::from_str::<Value>(line) {
+        Ok(v) => parse_separate_value(&v),
+        Err(_) => SeparateEvent::Unknown,
+    }
+}
+
+/// `parse_separate_line` for an already-parsed reply.
+pub fn parse_separate_value(value: &Value) -> SeparateEvent {
     let event = value.get("event").and_then(|v| v.as_str()).unwrap_or("");
     match event {
         "device" => SeparateEvent::Device {
@@ -745,6 +843,14 @@ pub struct InstrumentsMeta {
     pub pass_seconds: std::collections::HashMap<String, f64>,
     pub device: String,
     pub failed_passes: Vec<FailedPass>,
+    #[serde(default)]
+    pub quality: Option<String>,
+    #[serde(default)]
+    pub mix_path: Option<String>,
+    #[serde(default)]
+    pub mix_gain: Option<f32>,
+    #[serde(default)]
+    pub enhanced: Vec<Region>,
 }
 
 impl From<&InstrumentsManifest> for InstrumentsMeta {
@@ -754,26 +860,305 @@ impl From<&InstrumentsManifest> for InstrumentsMeta {
             pass_seconds: m.pass_seconds.clone(),
             device: m.device.clone(),
             failed_passes: m.failed_passes.clone(),
+            quality: m.quality.clone(),
+            mix_path: m.mix_path.clone(),
+            mix_gain: m.mix_gain,
+            enhanced: m.enhanced.clone(),
         }
     }
 }
 
-/// Writes the embedded `separate.py` to `<engine>/separate.py`, runs it
-/// against `loop_wav`, streams progress, and returns the resulting stems
-/// (with bytes/peakDb/rmsDb filled in), the device used, and any failed
-/// passes.
+/// Result of the one-shot `separate` (CLI `full` pipeline).
 pub struct SeparateResult {
     pub stems: Vec<InstrumentStem>,
     pub device: String,
     pub failed_passes: Vec<(String, String)>,
     pub elapsed_sec: f64,
-    pub pass_seconds: std::collections::HashMap<String, f64>,
+    pub pass_seconds: HashMap<String, f64>,
     /// From the script's optional trailing `metrics` line (contract v8
     /// addendum "Performance metrics"); absent if the script didn't emit one.
     pub seconds: Option<f64>,
     pub peak_rss_mb: Option<f64>,
 }
 
+/// Pass timings/failures collected while a job runs, forwarding each
+/// progress event to the caller.
+#[derive(Default)]
+struct JobLog {
+    pass_seconds: HashMap<String, f64>,
+    failed: Vec<FailedPass>,
+}
+
+impl JobLog {
+    fn handle(&mut self, event: SeparateEvent, stage: &str, progress: &mut dyn FnMut(EngineProgress)) {
+        let (pass, percent, message, failed) = match event {
+            SeparateEvent::Progress { pass, percent, message } => (pass, percent, message, false),
+            SeparateEvent::PassDone { pass, seconds } => {
+                self.pass_seconds.insert(pass.clone(), seconds);
+                (pass, 100.0, format!("done in {seconds:.1}s"), false)
+            }
+            SeparateEvent::PassFailed { pass, error } => {
+                self.failed.push(FailedPass { pass: pass.clone(), error: error.clone() });
+                (pass, -1.0, error, true)
+            }
+            _ => return,
+        };
+        progress(EngineProgress { stage: stage.to_string(), percent, message, pass: Some(pass), failed });
+    }
+}
+
+/// Parses a `done` reply (the contract's SplitResult) into a manifest whose
+/// stems are not measured yet.
+pub fn manifest_from_done(done: &Value) -> InstrumentsManifest {
+    let text = |k: &str| done.get(k).and_then(|v| v.as_str()).map(String::from);
+    let stems: Vec<RawStem> = done
+        .get("stems")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    InstrumentsManifest {
+        stems: stems.into_iter().map(InstrumentStem::from).collect(),
+        device: text("device").unwrap_or_default(),
+        quality: text("quality"),
+        mix_path: text("mixPath").filter(|p| !p.is_empty()),
+        mix_gain: done.get("mixGain").and_then(|v| v.as_f64()).map(|g| g as f32),
+        enhanced: done
+            .get("enhanced")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
+        ..Default::default()
+    }
+}
+
+/// A stem as the engine's StemEntry (no measurements) for `enhance`.
+fn stem_entry(stem: &InstrumentStem) -> Value {
+    let mut v = serde_json::to_value(stem).unwrap_or(Value::Null);
+    if let Some(o) = v.as_object_mut() {
+        for k in ["bytes", "peakDb", "rmsDb", "durationSec", "peaks"] {
+            o.remove(k);
+        }
+        o.entry("derived").or_insert(Value::Null);
+    }
+    v
+}
+
+/// Measures, stamps timing on, and saves a finished job's manifest.
+/// `known` are stems whose measurements are still valid if unchanged.
+#[allow(clippy::too_many_arguments)]
+fn finish_job(
+    work_dir: &Path,
+    kind: StemSetKind,
+    mut manifest: InstrumentsManifest,
+    known: &[InstrumentStem],
+    log: JobLog,
+    timer: &super::progress::Timer,
+    label: &str,
+    perf_name: &str,
+    done: &Value,
+    keep_split_timing: Option<(f64, std::collections::HashMap<String, f64>, Vec<FailedPass>)>,
+) -> Result<InstrumentsManifest, String> {
+    // Materializations made mid-job may predate the final mixGain.
+    let _ = std::fs::remove_dir_all(kind.out_dir(work_dir).join(stems::DERIVED_DIR));
+    stems::measure_all(work_dir, kind, &mut manifest, known);
+    // Enhance / sub-parts refine an existing split: its "Split took" timing stays the split's.
+    if let Some((elapsed, pass_seconds, failed)) = keep_split_timing {
+        manifest.elapsed_sec = elapsed;
+        manifest.pass_seconds = pass_seconds;
+        manifest.failed_passes = failed;
+    } else {
+        manifest.elapsed_sec = timer.elapsed_sec();
+        manifest.pass_seconds = log.pass_seconds;
+        manifest.failed_passes = log.failed;
+    }
+    stems::save_manifest(work_dir, kind, &manifest)?;
+    let seconds = done.get("seconds").and_then(|v| v.as_f64()).unwrap_or(manifest.elapsed_sec);
+    let peak = done.get("peakRssMb").and_then(|v| v.as_f64());
+    let _ = workspace::log_perf(perf_name, Some(label), seconds, peak);
+    Ok(manifest)
+}
+
+/// Runs one engine-server job under the global gate: forwards progress,
+/// measures every `stem_ready` stem and hands it to `on_stem`, and returns
+/// the `done` reply, the pass log and the stems reported early.
+#[allow(clippy::too_many_arguments)]
+fn server_job(
+    label: &str,
+    stage: &str,
+    low_priority: bool,
+    cmd: Value,
+    work_dir: &Path,
+    kind: StemSetKind,
+    mix_path: &Path,
+    progress: &mut dyn FnMut(EngineProgress),
+    on_stem: &mut dyn FnMut(&InstrumentStem),
+) -> Result<(Value, JobLog, Vec<InstrumentStem>), String> {
+    let _gate = acquire_engine(label)?;
+    let mut log = JobLog::default();
+    let mut ready: Vec<InstrumentStem> = Vec::new();
+    let done = engine_server::global().job(low_priority, cmd, |v| {
+        if v.get("event").and_then(|e| e.as_str()) == Some("stem_ready") {
+            let raw = v.get("stem").cloned().and_then(|s| serde_json::from_value::<RawStem>(s).ok());
+            if let Some(raw) = raw {
+                let mut stem = InstrumentStem::from(raw);
+                stems::measure_one(work_dir, kind, &ready, mix_path, &mut stem);
+                on_stem(&stem);
+                ready.retain(|s| s.key != stem.key);
+                ready.push(stem);
+            }
+        } else {
+            log.handle(parse_separate_value(v), stage, progress);
+        }
+    })?;
+    Ok((done, log, ready))
+}
+
+/// v11 split through the resident engine server: `quality` "quick" (top-level
+/// stems, `other` derived) or "full" (the whole chain + sub-stems). Stems are
+/// passed to `on_stem` as soon as each exists; writes `instruments.json`.
+#[allow(clippy::too_many_arguments)]
+pub fn split_song(
+    source: &Path,
+    work_dir: &Path,
+    quality: &str,
+    passes: Option<&[String]>,
+    label: &str,
+    low_priority: bool,
+    mut progress: impl FnMut(EngineProgress),
+    mut on_stem: impl FnMut(&InstrumentStem),
+) -> Result<InstrumentsManifest, String> {
+    let timer = super::progress::Timer::start();
+    let kind = StemSetKind::Instruments;
+    let out = kind.out_dir(work_dir);
+    std::fs::create_dir_all(&out).map_err(|e| format!("failed to create instruments dir: {e}"))?;
+    let _ = std::fs::remove_dir_all(out.join(stems::DERIVED_DIR));
+    let mut cmd = json!({"cmd": "split", "input": source, "out": out, "quality": quality, "lowPriority": low_priority});
+    if let Some(p) = passes {
+        cmd["tag"] = json!(p.iter().any(|x| x == "tag"));
+    }
+    let (done, log, ready) =
+        server_job(label, "separate", low_priority, cmd, work_dir, kind, source, &mut progress, &mut on_stem)?;
+    let mut manifest = manifest_from_done(&done);
+    manifest.quality.get_or_insert_with(|| quality.to_string());
+    manifest.mix_path.get_or_insert_with(|| source.to_string_lossy().to_string());
+    finish_job(work_dir, kind, manifest, &ready, log, &timer, label, "separate", &done, None)
+}
+
+/// Fast 2-stem karaoke split (contract v7 "Karaoke", v11 server form):
+/// `vocals` (file) + `instrumental` (derived), and with `lead` also
+/// `lead_vocals` + `backing_vocals`; writes `karaoke/karaoke.json`.
+pub fn separate_karaoke(
+    source: &Path,
+    work_dir: &Path,
+    lead: bool,
+    low_priority: bool,
+    label: &str,
+    mut progress: impl FnMut(EngineProgress),
+) -> Result<InstrumentsManifest, String> {
+    let timer = super::progress::Timer::start();
+    let kind = StemSetKind::Karaoke;
+    let out = kind.out_dir(work_dir);
+    std::fs::create_dir_all(&out).map_err(|e| format!("failed to create karaoke dir: {e}"))?;
+    let cmd = json!({"cmd": "karaoke", "input": source, "out": out, "lead": lead});
+    let (done, log, ready) =
+        server_job(label, "karaoke", low_priority, cmd, work_dir, kind, source, &mut progress, &mut |_| {})?;
+    let mut manifest = manifest_from_done(&done);
+    manifest.mix_path.get_or_insert_with(|| source.to_string_lossy().to_string());
+    finish_job(work_dir, kind, manifest, &ready, log, &timer, label, "separate_karaoke", &done, None)
+}
+
+/// `enhance_region`: re-runs the full chain over `[start, end]` (the engine
+/// pads and crossfades it) and rewrites the affected stems as new versioned
+/// files. Updates `instruments.json` atomically.
+pub fn enhance(
+    work_dir: &Path,
+    start: f64,
+    end: f64,
+    label: &str,
+    mut progress: impl FnMut(EngineProgress),
+) -> Result<InstrumentsManifest, String> {
+    if !(end > start && start >= 0.0) {
+        return Err("enhance region end must be after start".to_string());
+    }
+    let timer = super::progress::Timer::start();
+    let kind = StemSetKind::Instruments;
+    let old = stems::load_manifest(work_dir, kind).ok_or("split the song before enhancing it")?;
+    let mix = stems::StemSet::new(work_dir, kind, &old).mix_path;
+    let cmd = json!({
+        "cmd": "enhance", "input": mix, "out": kind.out_dir(work_dir), "start": start, "end": end,
+        "stems": old.stems.iter().map(stem_entry).collect::<Vec<_>>(),
+        "mixGain": old.mix_gain.unwrap_or(1.0), "enhanced": old.enhanced, "quality": old.quality,
+    });
+    let (done, log, _) =
+        server_job(label, "enhance", false, cmd, work_dir, kind, &mix, &mut progress, &mut |_| {})?;
+    let mut manifest = manifest_from_done(&done);
+    if manifest.device.is_empty() {
+        manifest.device = old.device.clone();
+    }
+    manifest.quality = manifest.quality.or(old.quality.clone());
+    manifest.mix_path = manifest.mix_path.or(old.mix_path.clone());
+    manifest.mix_gain = manifest.mix_gain.or(old.mix_gain);
+    if done.get("enhanced").is_none() {
+        manifest.enhanced = old.enhanced.clone();
+        manifest.enhanced.push(Region { start, end });
+    }
+    drop_stale_analysis(work_dir, &old, &manifest);
+    // Derived stems keep their recipe but their inputs changed: re-measure.
+    let timing = Some((old.elapsed_sec, old.pass_seconds.clone(), old.failed_passes.clone()));
+    let known: Vec<InstrumentStem> = old.stems.into_iter().filter(|s| !stems::is_derived(s)).collect();
+    finish_job(work_dir, kind, manifest, &known, log, &timer, label, "enhance", &done, timing)
+}
+
+/// `split_substems`: splits `parent` ("vocals" | "drums") into its sub-parts
+/// and replaces that parent's existing children in `instruments.json`.
+pub fn substems(
+    work_dir: &Path,
+    parent: &str,
+    label: &str,
+    mut progress: impl FnMut(EngineProgress),
+    mut on_stem: impl FnMut(&InstrumentStem),
+) -> Result<InstrumentsManifest, String> {
+    if !matches!(parent, "vocals" | "drums") {
+        return Err(format!("no sub-parts for '{parent}' (vocals or drums only)"));
+    }
+    let timer = super::progress::Timer::start();
+    let kind = StemSetKind::Instruments;
+    let old = stems::load_manifest(work_dir, kind).ok_or("split the song before splitting its parts")?;
+    let set = stems::StemSet::new(work_dir, kind, &old);
+    let input = set.file_for(parent)?;
+    let mix = set.mix_path.clone();
+    let cmd = json!({
+        "cmd": "substems", "parent": parent, "input": input, "out": kind.out_dir(work_dir),
+        "mixGain": old.mix_gain.unwrap_or(1.0),
+    });
+    let (done, log, ready) =
+        server_job(label, "substems", false, cmd, work_dir, kind, &mix, &mut progress, &mut on_stem)?;
+    let children = manifest_from_done(&done).stems;
+    let timing = Some((old.elapsed_sec, old.pass_seconds.clone(), old.failed_passes.clone()));
+    let mut manifest = old.clone();
+    manifest.stems.retain(|s| s.parent.as_deref() != Some(parent));
+    manifest.stems.extend(children);
+    drop_stale_analysis(work_dir, &old, &manifest);
+    // Old children may be overwritten in place: never reuse their numbers.
+    let mut known: Vec<InstrumentStem> =
+        old.stems.into_iter().filter(|s| s.parent.as_deref() != Some(parent)).collect();
+    known.extend(ready);
+    finish_job(work_dir, kind, manifest, &known, log, &timer, label, "substems", &done, timing)
+}
+
+/// Removes per-file analysis caches (`analysis/<file stem>.json`) of stem
+/// files that are gone or may have been rewritten in place.
+fn drop_stale_analysis(work_dir: &Path, old: &InstrumentsManifest, new: &InstrumentsManifest) {
+    for s in old.stems.iter().filter(|s| !s.path.is_empty()) {
+        let replaced = !new.stems.iter().any(|n| n.path == s.path) || s.parent.is_some();
+        if let (true, Some(stem)) = (replaced, Path::new(&s.path).file_stem()) {
+            let _ = std::fs::remove_file(work_dir.join("analysis").join(format!("{}.json", stem.to_string_lossy())));
+        }
+    }
+}
+
+/// One-shot `separate.py` run (no server; used by the CLI `full` pipeline):
+/// writes `instruments.json` and returns the measured stems.
 pub fn separate(
     loop_wav: &Path,
     work_dir: &Path,
@@ -782,29 +1167,12 @@ pub fn separate(
     low_priority: bool,
     mut progress: impl FnMut(EngineProgress),
 ) -> Result<SeparateResult, String> {
-    // Only one split runs at a time; cleared on every exit path (including
-    // panics) via `Drop`.
     let _busy_guard = BusyGuard::acquire(label)?;
-
     let timer = super::progress::Timer::start();
-    let engine = engine_dir()?;
-    std::fs::create_dir_all(&engine).map_err(|e| format!("failed to create engine dir: {e}"))?;
-
-    let script_path = engine.join("separate.py");
-    std::fs::write(&script_path, SEPARATE_PY)
-        .map_err(|e| format!("failed to write separate.py: {e}"))?;
-
-    let venv_python = venv_python_path(&engine);
-    if !venv_python.exists() {
-        return Err(format!(
-            "engine not installed: {} not found",
-            venv_python.display()
-        ));
-    }
-
-    let instruments_out = work_dir.join("instruments");
-    std::fs::create_dir_all(&instruments_out)
-        .map_err(|e| format!("failed to create instruments dir: {e}"))?;
+    let (venv_python, script_path, models) = prepare_script()?;
+    let kind = StemSetKind::Instruments;
+    let instruments_out = kind.out_dir(work_dir);
+    std::fs::create_dir_all(&instruments_out).map_err(|e| format!("failed to create instruments dir: {e}"))?;
 
     let mut cmd = silent_command(&venv_python.to_string_lossy());
     cmd.arg(&script_path)
@@ -815,22 +1183,20 @@ pub fn separate(
         .arg("--passes")
         .arg(passes.join(","))
         .arg("--models-dir")
-        .arg(models_dir(&engine))
+        .arg(models)
         .arg("--device")
         .arg("auto")
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONUNBUFFERED", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-
     if low_priority {
         cmd.arg("--low-priority");
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            // BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW. `silent_command`
-            // already set CREATE_NO_WINDOW alone; this call replaces those
-            // flags, so CREATE_NO_WINDOW is included explicitly here too.
+            // BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW (this call
+            // replaces the flags `silent_command` set).
             const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
             cmd.creation_flags(BELOW_NORMAL_PRIORITY_CLASS | super::CREATE_NO_WINDOW);
         }
@@ -839,375 +1205,68 @@ pub fn separate(
     let mut child = cmd.spawn().map_err(|e| format!("failed to spawn separate.py: {e}"))?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-
     let stderr_lines = std::thread::spawn(move || -> Vec<String> {
-        let mut lines = Vec::new();
-        if let Some(stderr) = stderr {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines().map_while(Result::ok) {
-                lines.push(line);
-            }
-        }
-        lines
+        stderr.map(|s| BufReader::new(s).lines().map_while(Result::ok).collect()).unwrap_or_default()
     });
 
     let mut device = String::new();
-    let mut raw_stems: Vec<RawStem> = Vec::new();
-    let mut failed_passes: Vec<(String, String)> = Vec::new();
+    let mut done: Option<Value> = None;
     let mut fatal_error: Option<String> = None;
-    let mut pass_seconds: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     let mut metrics: Option<MetricsEvent> = None;
-
+    let mut log = JobLog::default();
     if let Some(stdout) = stdout {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(Result::ok) {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Some(m) = parse_metrics_line(&line) {
                 metrics = Some(m);
                 continue;
             }
-            match parse_separate_line(&line) {
-                SeparateEvent::Device { device: d, .. } => {
-                    device = d;
-                }
-                SeparateEvent::Progress { pass, percent, message } => {
-                    progress(EngineProgress {
-                        stage: "separate".to_string(),
-                        percent,
-                        message: message.clone(),
-                        pass: Some(pass),
-                        failed: false,
-                    });
-                }
-                SeparateEvent::PassDone { pass, seconds } => {
-                    pass_seconds.insert(pass.clone(), seconds);
-                    progress(EngineProgress {
-                        stage: "separate".to_string(),
-                        percent: 100.0,
-                        message: format!("done in {seconds:.1}s"),
-                        pass: Some(pass),
-                        failed: false,
-                    });
-                }
-                SeparateEvent::PassFailed { pass, error } => {
-                    progress(EngineProgress {
-                        stage: "separate".to_string(),
-                        percent: -1.0,
-                        message: error.clone(),
-                        pass: Some(pass.clone()),
-                        failed: true,
-                    });
-                    failed_passes.push((pass, error));
-                }
-                SeparateEvent::Done { stems, device: d } => {
-                    raw_stems = stems;
-                    device = d;
-                }
-                SeparateEvent::Fatal { error } => {
-                    fatal_error = Some(error);
-                }
-                SeparateEvent::Unknown => {}
-            }
-        }
-    }
-
-    let status = child
-        .wait()
-        .map_err(|e| format!("failed to wait on separate.py: {e}"))?;
-    let stderr_all = stderr_lines.join().unwrap_or_default();
-    let stderr_tail: Vec<String> = stderr_all
-        .iter()
-        .rev()
-        .take(20)
-        .rev()
-        .cloned()
-        .collect();
-
-    if !status.success() || fatal_error.is_some() {
-        let mut msg = String::new();
-        if let Some(err) = &fatal_error {
-            msg.push_str(&format!("separate.py fatal error: {err}\n"));
-        } else {
-            msg.push_str(&format!(
-                "separate.py exited with {:?}\n",
-                status.code()
-            ));
-        }
-        if !stderr_tail.is_empty() {
-            msg.push_str("--- stderr tail ---\n");
-            msg.push_str(&stderr_tail.join("\n"));
-        }
-        return Err(msg);
-    }
-
-    let mut stems = Vec::with_capacity(raw_stems.len());
-    for raw in raw_stems {
-        let path = PathBuf::from(&raw.path);
-        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let loudness = dsp_filters::measure_loudness(&path).unwrap_or(dsp_filters::StemLoudness {
-            peak_db: 0.0,
-            rms_db: 0.0,
-            duration_sec: 0.0,
-            peaks: Vec::new(),
-        });
-        let stem_peaks = super::peaks::compute_peaks_for_path(&path).unwrap_or_default();
-        let duration_sec = super::downloader::probe(&path).map(|p| p.duration_sec).unwrap_or(0.0);
-        stems.push(InstrumentStem {
-            key: raw.key,
-            label: raw.label,
-            group: raw.group,
-            parent: raw.parent,
-            path: raw.path,
-            bytes,
-            peak_db: loudness.peak_db,
-            rms_db: loudness.rms_db,
-            model: raw.model,
-            order: raw.order,
-            duration_sec,
-            peaks: stem_peaks,
-            tags: raw.tags,
-            sounds_like: raw.sounds_like,
-            display_label: raw.display_label,
-            detections: raw.detections,
-            confidence: raw.confidence,
-        });
-    }
-
-    let elapsed_sec = timer.elapsed_sec();
-
-    let manifest = InstrumentsManifest {
-        stems: stems.clone(),
-        device: device.clone(),
-        failed_passes: failed_passes
-            .iter()
-            .map(|(p, e)| FailedPass { pass: p.clone(), error: e.clone() })
-            .collect(),
-        elapsed_sec,
-        pass_seconds: pass_seconds.clone(),
-    };
-    let manifest_path = work_dir.join("instruments.json");
-    let manifest_json = serde_json::to_string_pretty(&manifest)
-        .map_err(|e| format!("failed to serialize instruments manifest: {e}"))?;
-    std::fs::write(&manifest_path, manifest_json)
-        .map_err(|e| format!("failed to write instruments.json: {e}"))?;
-
-    let (seconds, peak_rss_mb) = match &metrics {
-        Some(m) => {
-            let _ = super::workspace::log_perf("separate", Some(label), m.seconds, m.peak_rss_mb);
-            (Some(m.seconds), m.peak_rss_mb)
-        }
-        None => (None, None),
-    };
-
-    Ok(SeparateResult { stems, device, failed_passes, elapsed_sec, pass_seconds, seconds, peak_rss_mb })
-}
-
-/// Fast 2-stem karaoke split (contract v7 addendum "Karaoke"): runs
-/// `separate.py --mode karaoke` (+ `--lead` when `split_lead_backing`) over
-/// `source_wav`, writing `<work_dir>/karaoke/{vocals,instrumental[,lead_vocals,backing_vocals]}.wav`
-/// plus a `karaoke.json` manifest (same shape as `instruments.json`).
-pub fn separate_karaoke(
-    source_wav: &Path,
-    work_dir: &Path,
-    split_lead_backing: bool,
-    low_priority: bool,
-    label: &str,
-    mut progress: impl FnMut(EngineProgress),
-) -> Result<SeparateResult, String> {
-    let _busy_guard = BusyGuard::acquire(label)?;
-
-    let timer = super::progress::Timer::start();
-    let engine = engine_dir()?;
-    std::fs::create_dir_all(&engine).map_err(|e| format!("failed to create engine dir: {e}"))?;
-
-    let script_path = engine.join("separate.py");
-    std::fs::write(&script_path, SEPARATE_PY)
-        .map_err(|e| format!("failed to write separate.py: {e}"))?;
-
-    let venv_python = venv_python_path(&engine);
-    if !venv_python.exists() {
-        return Err(format!(
-            "engine not installed: {} not found",
-            venv_python.display()
-        ));
-    }
-
-    let karaoke_out = work_dir.join("karaoke");
-    std::fs::create_dir_all(&karaoke_out).map_err(|e| format!("failed to create karaoke dir: {e}"))?;
-
-    let mut cmd = silent_command(&venv_python.to_string_lossy());
-    cmd.arg(&script_path)
-        .arg("--input")
-        .arg(source_wav)
-        .arg("--out")
-        .arg(&karaoke_out)
-        .arg("--models-dir")
-        .arg(models_dir(&engine))
-        .arg("--device")
-        .arg("auto")
-        .arg("--mode")
-        .arg("karaoke")
-        .env("PYTHONIOENCODING", "utf-8")
-        .env("PYTHONUNBUFFERED", "1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if split_lead_backing {
-        cmd.arg("--lead");
-    }
-    if low_priority {
-        cmd.arg("--low-priority");
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
-            cmd.creation_flags(BELOW_NORMAL_PRIORITY_CLASS | super::CREATE_NO_WINDOW);
-        }
-    }
-
-    let mut child = cmd.spawn().map_err(|e| format!("failed to spawn separate.py: {e}"))?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    let stderr_lines = std::thread::spawn(move || -> Vec<String> {
-        let mut lines = Vec::new();
-        if let Some(stderr) = stderr {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines().map_while(Result::ok) {
-                lines.push(line);
-            }
-        }
-        lines
-    });
-
-    let mut device = String::new();
-    let mut raw_stems: Vec<RawStem> = Vec::new();
-    let mut failed_passes: Vec<(String, String)> = Vec::new();
-    let mut fatal_error: Option<String> = None;
-    let mut pass_seconds: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-    let mut metrics: Option<MetricsEvent> = None;
-
-    if let Some(stdout) = stdout {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(Result::ok) {
-            if let Some(m) = parse_metrics_line(&line) {
-                metrics = Some(m);
-                continue;
-            }
-            match parse_separate_line(&line) {
+            let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
+            match parse_separate_value(&value) {
                 SeparateEvent::Device { device: d, .. } => device = d,
-                SeparateEvent::Progress { pass, percent, message } => {
-                    progress(EngineProgress {
-                        stage: "karaoke".to_string(),
-                        percent,
-                        message,
-                        pass: Some(pass),
-                        failed: false,
-                    });
-                }
-                SeparateEvent::PassDone { pass, seconds } => {
-                    pass_seconds.insert(pass.clone(), seconds);
-                    progress(EngineProgress {
-                        stage: "karaoke".to_string(),
-                        percent: 100.0,
-                        message: format!("done in {seconds:.1}s"),
-                        pass: Some(pass),
-                        failed: false,
-                    });
-                }
-                SeparateEvent::PassFailed { pass, error } => {
-                    progress(EngineProgress {
-                        stage: "karaoke".to_string(),
-                        percent: -1.0,
-                        message: error.clone(),
-                        pass: Some(pass.clone()),
-                        failed: true,
-                    });
-                    failed_passes.push((pass, error));
-                }
-                SeparateEvent::Done { stems, device: d } => {
-                    raw_stems = stems;
-                    device = d;
-                }
+                SeparateEvent::Done { .. } => done = Some(value),
                 SeparateEvent::Fatal { error } => fatal_error = Some(error),
-                SeparateEvent::Unknown => {}
+                event => log.handle(event, "separate", &mut progress),
             }
         }
     }
 
     let status = child.wait().map_err(|e| format!("failed to wait on separate.py: {e}"))?;
     let stderr_all = stderr_lines.join().unwrap_or_default();
-    let stderr_tail: Vec<String> = stderr_all.iter().rev().take(20).rev().cloned().collect();
-
     if !status.success() || fatal_error.is_some() {
-        let mut msg = String::new();
-        if let Some(err) = &fatal_error {
-            msg.push_str(&format!("separate.py fatal error: {err}\n"));
-        } else {
-            msg.push_str(&format!("separate.py exited with {:?}\n", status.code()));
-        }
-        if !stderr_tail.is_empty() {
+        let mut msg = match &fatal_error {
+            Some(err) => format!("separate.py fatal error: {err}\n"),
+            None => format!("separate.py exited with {:?}\n", status.code()),
+        };
+        let tail = &stderr_all[stderr_all.len().saturating_sub(20)..];
+        if !tail.is_empty() {
             msg.push_str("--- stderr tail ---\n");
-            msg.push_str(&stderr_tail.join("\n"));
+            msg.push_str(&tail.join("\n"));
         }
         return Err(msg);
     }
 
-    let mut stems = Vec::with_capacity(raw_stems.len());
-    for raw in raw_stems {
-        let path = PathBuf::from(&raw.path);
-        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let loudness = dsp_filters::measure_loudness(&path).unwrap_or(dsp_filters::StemLoudness {
-            peak_db: 0.0,
-            rms_db: 0.0,
-            duration_sec: 0.0,
-            peaks: Vec::new(),
-        });
-        let stem_peaks = super::peaks::compute_peaks_for_path(&path).unwrap_or_default();
-        let duration_sec = super::downloader::probe(&path).map(|p| p.duration_sec).unwrap_or(0.0);
-        stems.push(InstrumentStem {
-            key: raw.key,
-            label: raw.label,
-            group: raw.group,
-            parent: raw.parent,
-            path: raw.path,
-            bytes,
-            peak_db: loudness.peak_db,
-            rms_db: loudness.rms_db,
-            model: raw.model,
-            order: raw.order,
-            duration_sec,
-            peaks: stem_peaks,
-            tags: raw.tags,
-            sounds_like: raw.sounds_like,
-            display_label: raw.display_label,
-            detections: raw.detections,
-            confidence: raw.confidence,
-        });
+    let done = done.unwrap_or(Value::Null);
+    let mut manifest = manifest_from_done(&done);
+    if manifest.device.is_empty() {
+        manifest.device = device;
     }
-
-    let elapsed_sec = timer.elapsed_sec();
-
-    let manifest = InstrumentsManifest {
-        stems: stems.clone(),
-        device: device.clone(),
-        failed_passes: failed_passes.iter().map(|(p, e)| FailedPass { pass: p.clone(), error: e.clone() }).collect(),
-        elapsed_sec,
-        pass_seconds: pass_seconds.clone(),
+    manifest.mix_path.get_or_insert_with(|| loop_wav.to_string_lossy().to_string());
+    let perf = match &metrics {
+        Some(m) => json!({"seconds": m.seconds, "peakRssMb": m.peak_rss_mb}),
+        None => json!({}),
     };
-    let manifest_path = work_dir.join("karaoke").join("karaoke.json");
-    let manifest_json = serde_json::to_string_pretty(&manifest)
-        .map_err(|e| format!("failed to serialize karaoke manifest: {e}"))?;
-    std::fs::write(&manifest_path, manifest_json).map_err(|e| format!("failed to write karaoke.json: {e}"))?;
-
-    let (seconds, peak_rss_mb) = match &metrics {
-        Some(m) => {
-            let _ = super::workspace::log_perf("separate_karaoke", Some(label), m.seconds, m.peak_rss_mb);
-            (Some(m.seconds), m.peak_rss_mb)
-        }
-        None => (None, None),
-    };
-
-    Ok(SeparateResult { stems, device, failed_passes, elapsed_sec, pass_seconds, seconds, peak_rss_mb })
+    let manifest = finish_job(work_dir, kind, manifest, &[], log, &timer, label, "separate", &perf, None)?;
+    Ok(SeparateResult {
+        stems: manifest.stems,
+        device: manifest.device,
+        failed_passes: manifest.failed_passes.into_iter().map(|f| (f.pass, f.error)).collect(),
+        elapsed_sec: manifest.elapsed_sec,
+        pass_seconds: manifest.pass_seconds,
+        seconds: metrics.as_ref().map(|m| m.seconds),
+        peak_rss_mb: metrics.and_then(|m| m.peak_rss_mb),
+    })
 }
+
 
 #[cfg(test)]
 mod tests {

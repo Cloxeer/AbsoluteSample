@@ -1,6 +1,6 @@
 // Fixture URLs respect Vite's base path so the GitHub Pages demo works under /AbsoluteSample/.
 const FIXTURES_BASE = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/fixtures`;
-import { emitMockEngineProgress, emitMockProgress } from "./events";
+import { emitMockEngineProgress, emitMockModelsChanged, emitMockProgress, emitMockStemReady } from "./events";
 import type {
   ApplyAutotuneArgs,
   AutotuneEdits,
@@ -14,10 +14,13 @@ import type {
   FrequencyResult,
   InstrumentGroup,
   InstrumentStem,
+  InstrumentsResult,
+  EnhancedSpan,
   KaraokeResult,
   LibraryEntry,
   LoopAnalysis,
   LoopInfo,
+  ModelsStatus,
   NoteEvent,
   NotesResult,
   PitchResult,
@@ -26,6 +29,8 @@ import type {
   SliceInfo,
   StemInfo,
   StemKey,
+  SplitQuality,
+  SystemLoad,
   TrackInfo,
   TrackSession,
   TrashEntry,
@@ -322,7 +327,7 @@ const GUITAR_CONFIDENCE = { score: 0.64, reasons: ["strong Cello tag 0.22", "som
 
 function decorateInstruments(stems: InstrumentStem[], loopDurationSec: number): InstrumentStem[] {
   return stems.map((s) => {
-    const out = withPeaks(s, s.path, loopDurationSec);
+    const out = withPeaks(s, s.path || `derived:${s.key}`, loopDurationSec);
     if (s.key === "guitar" || (s.group === "guitar" && s.parent === null)) {
       return {
         ...out,
@@ -533,6 +538,7 @@ function synthesizeSessionForEntry(rec: LibraryRecord): TrackSession {
     stems: rec.stems ? rec.stems.map((s) => withPeaks(s, s.path, loopDur)) : null,
     instruments: rec.instruments ? decorateInstruments(rec.instruments, loopDur) : null,
     analysis: rec.analysis,
+    instrumentsMeta: rec.instruments ? (({ stems: _stems, ...meta }) => meta)(resultFor(rec.track.id, [], 0, {}, [])) : null,
   };
 }
 
@@ -557,7 +563,8 @@ async function resolveWavUrl(path: string): Promise<string> {
   if (cachedWavUrls[path]) return cachedWavUrls[path];
   const manifest = await getManifest();
   const fromFixtures = await loadManifest();
-  const basename = path.split(/[\\/]/).pop() ?? path;
+  // v11: stored stems may be FLAC and versioned after Enhance (<key>.<n>.flac); the fixtures are <key>.wav.
+  const basename = (path.split(/[\\/]/).pop() ?? path).replace(/(\.\d+)?\.(flac|wav)$/i, ".wav");
 
   if (fromFixtures) {
     // Instrument stems live under /fixtures/instruments/<key>.wav, everything else at the top level.
@@ -969,32 +976,91 @@ export async function analyzeFile(args: { path: string }): Promise<LoopAnalysis>
   return synthesizeAnalysis(bpm, 15);
 }
 
-export async function separateInstruments(args: { trackId: string; passes?: string[]; lowPriority?: boolean }): Promise<{ stems: InstrumentStem[]; elapsedSec: number; passSeconds: Record<string, number>; device: string; failedPasses: string[] }> {
+/** v11: per-track split metadata the mock keeps beside rec.instruments (mix path, gain, enhanced spans, file versions). */
+interface MockSplitMeta {
+  quality: SplitQuality;
+  mixPath: string;
+  mixGain: number;
+  enhanced: EnhancedSpan[];
+  version: number;
+  device: string;
+}
+const splitMeta = new Map<string, MockSplitMeta>();
+
+const QUICK_TOP_LEVEL = ["vocals", "drums", "bass", "guitar", "piano", "keys", "other"];
+
+/** Quick split: top-level stems only, with "other" derived as mixGain*mix - (every other stored stem). */
+function toQuickStems(all: InstrumentStem[], mixGain: number): InstrumentStem[] {
+  const top = all.filter((s) => s.parent === null && QUICK_TOP_LEVEL.includes(s.key));
+  const storedKeys = top.filter((s) => s.key !== "other").map((s) => s.key);
+  return top.map((s) =>
+    s.key === "other"
+      ? { ...s, path: "", bytes: 0, derived: { plus: ["mix"], minus: storedKeys, mixGain } }
+      : { ...s, path: s.path.replace(/\.wav$/i, ".flac"), derived: null }
+  );
+}
+
+function resultFor(
+  trackId: string,
+  stems: InstrumentStem[],
+  elapsedSec: number,
+  passSeconds: Record<string, number>,
+  failedPasses: { pass: string; error: string }[]
+): InstrumentsResult {
+  const meta = splitMeta.get(trackId);
+  return {
+    stems,
+    elapsedSec,
+    passSeconds,
+    device: meta?.device ?? "cpu (mock)",
+    failedPasses,
+    quality: meta?.quality,
+    mixPath: meta?.mixPath,
+    mixGain: meta?.mixGain,
+    enhanced: meta ? meta.enhanced.map((e) => ({ ...e })) : [],
+  };
+}
+
+export async function separateInstruments(args: { trackId: string; passes?: string[]; lowPriority?: boolean; quality?: SplitQuality }): Promise<InstrumentsResult> {
   engineBusyTrackId = args.trackId;
+  const quality: SplitQuality = args.quality ?? "quick";
   const mockFail = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("mockfail") === "1";
-  const passes: { pass: string; message: string }[] = [
-    { pass: "instruments", message: "Separating instruments (Demucs)..." },
-    { pass: "vocals", message: "Refining vocals..." },
-    { pass: "lead", message: "Splitting lead and backing vocals..." },
-    { pass: "drums", message: "Splitting drum kit..." },
-  ];
+  const passes: { pass: string; message: string }[] =
+    quality === "quick"
+      ? [
+          { pass: "vocals", message: "Separating vocals..." },
+          { pass: "instruments", message: "Separating drums, bass, guitar, piano..." },
+        ]
+      : [
+          { pass: "vocals", message: "Separating vocals..." },
+          { pass: "instruments", message: "Separating instruments..." },
+          { pass: "lead", message: "Splitting lead and backing vocals..." },
+          { pass: "drums", message: "Splitting drum kit..." },
+        ];
+  const manifest = (await getManifest()) as ManifestWithInstruments;
+  const mixGain = 0.94;
+  splitMeta.set(args.trackId, { quality, mixPath: manifest.loop.wavPath, mixGain, enhanced: [], version: 0, device: "cpu (mock)" });
+  const all = decorateInstruments(manifest.instruments ?? synthesizeInstruments(args.trackId), manifest.loop.durationSec);
+  const stems = quality === "quick" ? toQuickStems(all, mixGain) : all;
+  cachedInstruments = stems;
+
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
   const passSeconds: Record<string, number> = {};
-  const failedPasses: string[] = [];
+  const failedPasses: { pass: string; error: string }[] = [];
   let lastPassMs = startedMs;
   for (let i = 0; i < passes.length; i++) {
     const { pass, message } = passes[i];
     await delay(260);
     const failThis = mockFail && pass === "drums";
-    if (failThis) failedPasses.push(pass);
+    if (failThis) failedPasses.push({ pass, error: "GPU out of memory" });
     const nowMs = Date.now();
     passSeconds[pass] = (nowMs - lastPassMs) / 1000;
     lastPassMs = nowMs;
     emitMockProgress({
       stage: "separate",
       pass,
-      percent: Math.round(((i + 1) / passes.length) * 100),
+      percent: failThis ? -1 : 100,
       message: failThis ? "GPU out of memory" : message,
       failed: failThis,
       trackId: args.trackId,
@@ -1002,21 +1068,173 @@ export async function separateInstruments(args: { trackId: string; passes?: stri
       elapsedSec: (nowMs - startedMs) / 1000,
       passSeconds: { ...passSeconds },
     });
+    // Hear vocals sooner: stems are announced as soon as their pass is done (vocals first).
+    const ready =
+      pass === "vocals"
+        ? stems.filter((s) => s.key === "vocals")
+        : pass === "instruments"
+          ? stems.filter((s) => s.parent === null && s.key !== "vocals")
+          : [];
+    for (const stem of ready) emitMockStemReady({ trackId: args.trackId, stem });
   }
 
-  const manifest = (await getManifest()) as ManifestWithInstruments;
-  const stems = decorateInstruments(manifest.instruments ?? synthesizeInstruments(args.trackId), manifest.loop.durationSec);
-  cachedInstruments = stems;
-
   const elapsedSec = (Date.now() - startedMs) / 1000;
+  await storeInstruments(args.trackId, stems);
+  engineBusyTrackId = null;
+  return resultFor(args.trackId, stems, elapsedSec, passSeconds, failedPasses);
+}
+
+async function currentInstruments(trackId: string): Promise<InstrumentStem[]> {
   const store = await getLibraryStore();
-  const rec = store.get(args.trackId);
+  const stems = store.get(trackId)?.instruments ?? cachedInstruments;
+  if (!stems) throw new Error("Split this song first");
+  return stems;
+}
+
+async function storeInstruments(trackId: string, stems: InstrumentStem[]): Promise<void> {
+  cachedInstruments = stems;
+  const store = await getLibraryStore();
+  const rec = store.get(trackId);
   if (rec) {
     rec.instruments = stems;
     rec.entry = { ...rec.entry, hasInstruments: true, instrumentCount: stems.length };
   }
+}
+
+/** Merges a new span into a sorted, non-overlapping list. */
+function mergeSpans(spans: EnhancedSpan[], next: EnhancedSpan): EnhancedSpan[] {
+  const all = [...spans, next].sort((a, b) => a.start - b.start);
+  const out: EnhancedSpan[] = [];
+  for (const s of all) {
+    const last = out[out.length - 1];
+    if (last && s.start <= last.end) last.end = Math.max(last.end, s.end);
+    else out.push({ ...s });
+  }
+  return out;
+}
+
+function dirOf(path: string): string {
+  return path.replace(/[\\/][^\\/]*$/, "");
+}
+
+export async function enhanceRegion(args: { trackId: string; startSec: number; endSec: number }): Promise<InstrumentsResult> {
+  const stems = await currentInstruments(args.trackId);
+  const manifest = await getManifest();
+  const meta: MockSplitMeta = splitMeta.get(args.trackId) ?? {
+    quality: "quick",
+    mixPath: manifest.loop.wavPath,
+    mixGain: 1,
+    enhanced: [],
+    version: 0,
+    device: "cpu (mock)",
+  };
+  const startedMs = Date.now();
+  engineBusyTrackId = args.trackId;
+  const steps: [number, string][] = [
+    [30, "Separating this part at best quality..."],
+    [80, "Blending it in..."],
+  ];
+  for (const [percent, message] of steps) {
+    await delay(180);
+    emitMockProgress({ stage: "separate", pass: "enhance", percent, message, trackId: args.trackId, elapsedSec: (Date.now() - startedMs) / 1000 });
+  }
+  meta.version += 1;
+  meta.enhanced = mergeSpans(meta.enhanced, { start: Math.max(0, args.startSec), end: args.endSec });
+  splitMeta.set(args.trackId, meta);
+  const next = stems.map((s) => (s.path && !s.derived ? { ...s, path: `${dirOf(s.path)}/${s.key}.${meta.version}.flac` } : s));
+  await storeInstruments(args.trackId, next);
   engineBusyTrackId = null;
-  return { stems, elapsedSec, passSeconds, device: "cpu (mock)", failedPasses };
+  const elapsedSec = (Date.now() - startedMs) / 1000;
+  return resultFor(args.trackId, next, elapsedSec, { enhance: elapsedSec }, []);
+}
+
+const SUBSTEM_DEFS: Record<string, { key: string; label: string; derived?: { plus: string[]; minus: string[] } }[]> = {
+  vocals: [
+    { key: "lead_vocals", label: "Lead vocals" },
+    { key: "backing_vocals", label: "Backing vocals", derived: { plus: ["vocals"], minus: ["lead_vocals"] } },
+  ],
+  drums: [
+    { key: "kick", label: "Kick" },
+    { key: "snare", label: "Snare" },
+    { key: "toms", label: "Toms" },
+    { key: "hihat", label: "Hi-hat" },
+    { key: "ride", label: "Ride" },
+    { key: "crash", label: "Crash" },
+  ],
+};
+
+export async function splitSubstems(args: { trackId: string; parent: string }): Promise<InstrumentsResult> {
+  const defs = SUBSTEM_DEFS[args.parent];
+  if (!defs) throw new Error(`Cannot split ${args.parent}`);
+  const stems = await currentInstruments(args.trackId);
+  const parent = stems.find((s) => s.key === args.parent);
+  if (!parent) throw new Error(`Unknown stem: ${args.parent}`);
+  const manifest = await getManifest();
+  const startedMs = Date.now();
+  engineBusyTrackId = args.trackId;
+  await delay(300);
+  const dir = dirOf(parent.path || `mock/${args.trackId}/instruments/${parent.key}.flac`);
+  const mixGain = splitMeta.get(args.trackId)?.mixGain ?? 1;
+  const children: InstrumentStem[] = decorateInstruments(
+    defs.map((d, i) => ({
+      key: d.key,
+      label: d.label,
+      group: parent.group,
+      parent: parent.key,
+      path: d.derived ? "" : `${dir}/${d.key}.flac`,
+      bytes: d.derived ? 0 : 600_000,
+      peakDb: -4 - i,
+      rmsDb: -20 - i,
+      model: args.parent === "vocals" ? "mel_band_roformer_karaoke" : "MDX23C-DrumSep",
+      order: parent.order + 1 + i,
+      derived: d.derived ? { ...d.derived, mixGain } : null,
+    })),
+    manifest.loop.durationSec
+  );
+  const next = [...stems.filter((s) => s.parent !== parent.key), ...children];
+  await storeInstruments(args.trackId, next);
+  engineBusyTrackId = null;
+  return resultFor(args.trackId, next, (Date.now() - startedMs) / 1000, {}, []);
+}
+
+export async function stemFile(args: { trackId: string; key: string }): Promise<string> {
+  // "karaoke:<key>" addresses the karaoke set (its stems are plain fixture files in the mock).
+  const key = args.key.replace(/^karaoke:/, "");
+  if (key !== args.key) return `${FIXTURES_BASE}/instruments/${key}.wav`;
+  const stems = await currentInstruments(args.trackId);
+  const stem = stems.find((s) => s.key === key);
+  if (!stem) throw new Error(`Unknown stem: ${args.key}`);
+  if (stem.path && !stem.derived) return stem.path;
+  await delay(40);
+  return `mock/${args.trackId}/instruments/_derived/${stem.key}.wav`;
+}
+
+let modelsState: ModelsStatus = { loaded: false, loading: false, kept: false, models: [], vramMb: null };
+
+export async function modelsStatus(): Promise<ModelsStatus> {
+  await delay(30);
+  return { ...modelsState };
+}
+
+export async function keepModelsLoaded(): Promise<ModelsStatus> {
+  modelsState = { ...modelsState, loading: true, kept: true };
+  emitMockModelsChanged({ ...modelsState });
+  await delay(400);
+  modelsState = { loaded: true, loading: false, kept: true, models: ["vocals (mel-roformer)", "instruments (htdemucs_ft)"], vramMb: 2900 };
+  emitMockModelsChanged({ ...modelsState });
+  return { ...modelsState };
+}
+
+export async function offloadModels(): Promise<ModelsStatus> {
+  await delay(150);
+  modelsState = { loaded: false, loading: false, kept: false, models: [], vramMb: null };
+  emitMockModelsChanged({ ...modelsState });
+  return { ...modelsState };
+}
+
+export async function systemLoad(): Promise<SystemLoad> {
+  await delay(20);
+  return { ramTotalGb: 32, ramFreeGb: 18.5, vramTotalGb: 12, vramFreeGb: 9.8, gpuUtil: 4, verdict: "ok", reasons: [] };
 }
 
 // v4 addendum: samples
@@ -1389,7 +1607,7 @@ export async function separateKaraoke(args: { trackId: string; splitLeadBacking?
     const { pass, message } = passes[i];
     await delay(220);
     emitMockProgress({
-      stage: "separate",
+      stage: "karaoke",
       pass,
       percent: Math.round(((i + 1) / passes.length) * 100),
       message,

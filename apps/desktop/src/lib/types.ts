@@ -73,7 +73,7 @@ export interface SliceInfo {
   path: string;
 }
 
-export type ProgressStage = "download" | "decode" | "trim" | "stems" | "analyze" | "slice" | "separate";
+export type ProgressStage = "download" | "decode" | "trim" | "stems" | "analyze" | "slice" | "separate" | "karaoke" | "import" | "enhance" | "substems";
 
 export interface ProgressPayload {
   stage: ProgressStage;
@@ -123,6 +123,31 @@ export interface InstrumentStem {
   displayLabel?: string;
   detections?: { label: string; score: number }[];
   confidence?: { score: number; reasons: string[] };
+  /**
+   * v11: a derived stem is a recipe, not a file (its `path` is ""): plus/minus stem keys
+   * ("mix" = the source mix scaled by mixGain). Get a real file with backend.stemFile().
+   */
+  derived?: DerivedRecipe | null;
+}
+
+/** v11: how a derived stem is computed from stored stems: sum(plus) - sum(minus), "mix" scaled by mixGain. */
+export interface DerivedRecipe {
+  plus: string[];
+  minus: string[];
+  mixGain?: number | null;
+}
+
+export type SplitQuality = "quick" | "full";
+
+/** v11: a time span (seconds) that was re-run with the best-quality chain via Enhance. */
+export interface EnhancedSpan {
+  start: number;
+  end: number;
+}
+
+export interface FailedPass {
+  pass: string;
+  error: string;
 }
 
 export interface InstrumentsResult {
@@ -130,7 +155,48 @@ export interface InstrumentsResult {
   elapsedSec: number;
   passSeconds: Record<string, number>;
   device: string;
-  failedPasses: string[];
+  failedPasses: FailedPass[];
+  /** v11 */
+  quality?: SplitQuality | null;
+  /** v11: the source mix the stems were split from (derived stems may reference it as "mix"). */
+  mixPath?: string | null;
+  /** v11: shared scale (<= 1) applied to every stored stem; stored stems sum to mixGain * mix. */
+  mixGain?: number | null;
+  /** v11: spans already re-run by Enhance. */
+  enhanced?: EnhancedSpan[];
+}
+
+// v11 addendum: resident models, PC load check, early stems
+
+export interface ModelsStatus {
+  loaded: boolean;
+  loading: boolean;
+  kept: boolean;
+  models: string[];
+  vramMb: number | null;
+}
+
+/** Payload of "engine://models": the status plus an optional reason (e.g. auto-offload for a game). */
+export interface ModelsChangedPayload extends ModelsStatus {
+  reason?: string | null;
+}
+
+export type SystemLoadVerdict = "ok" | "busy" | "insufficient";
+
+export interface SystemLoad {
+  ramTotalGb: number | null;
+  ramFreeGb: number | null;
+  vramTotalGb?: number | null;
+  vramFreeGb?: number | null;
+  gpuUtil?: number | null;
+  verdict: SystemLoadVerdict;
+  reasons: string[];
+}
+
+/** Payload of "pipeline://stem": one stem finished early while a split is still running. */
+export interface StemReadyPayload {
+  trackId: string;
+  stem: InstrumentStem;
 }
 
 export type EnginePassStage = "python" | "venv" | "torch" | "separator" | "verify";
@@ -301,6 +367,9 @@ export interface KaraokeResult {
   stems: InstrumentStem[];
   elapsedSec: number;
   device: string;
+  /** v11: the source mix the karaoke stems were split from ("mix" in derived recipes). */
+  mixPath?: string | null;
+  mixGain?: number | null;
 }
 
 export interface SpectrumPoint {

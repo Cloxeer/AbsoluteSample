@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, act, renderHook } from "@testing-library/react";
+import { render, screen, act, renderHook, waitFor } from "@testing-library/react";
 import { SlicerTab } from "./SlicerTab";
 import { useAudioEngine } from "@/hooks/useAudioEngine";
 import { useSyncPlayback } from "@/hooks/useSyncPlayback";
@@ -117,7 +117,8 @@ describe("SlicerTab", () => {
       karaokeButton.click();
     });
 
-    expect(separateKaraokeSpy).toHaveBeenCalledWith(trackId, false);
+    // The PC load check (mock: "ok") runs first, then the job starts.
+    await waitFor(() => expect(separateKaraokeSpy).toHaveBeenCalledWith(trackId, false));
   });
 
   it("renders karaoke results (Instrumental and Vocals) once karaoke stems exist", async () => {

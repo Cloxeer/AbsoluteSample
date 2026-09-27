@@ -2,7 +2,7 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useJobs } from "./useJobs";
 import { emitMockProgress } from "@/lib/events";
-import { markJobStarted } from "@/lib/localJobs";
+import { markJobEnded, markJobStarted } from "@/lib/localJobs";
 
 describe("useJobs timer math", () => {
   beforeEach(() => {
@@ -98,5 +98,29 @@ describe("useJobs timer math", () => {
 
     expect(result.current.jobs.t5.startedAt).toBe(localStartedAt);
     expect(Date.parse(result.current.jobs.t5.startedAt)).toBeLessThanOrEqual(Date.parse(backendStartedAt));
+  });
+
+  it("keeps a multi-pass job alive when one pass reaches 100% or fails, and ends it when the command settles", async () => {
+    const startedAt = new Date().toISOString();
+    const { result } = renderHook(() => useJobs());
+
+    await act(async () => {
+      emitMockProgress({ stage: "separate", pass: "vocals", percent: 100, message: "done in 12.0s", trackId: "t6", startedAt });
+      await Promise.resolve();
+    });
+    expect(result.current.jobs.t6).toBeTruthy();
+
+    await act(async () => {
+      emitMockProgress({ stage: "separate", pass: "drums", percent: -1, message: "GPU out of memory", trackId: "t6", startedAt, failed: true });
+      await Promise.resolve();
+    });
+    expect(result.current.jobs.t6).toBeTruthy();
+    // A negative "notice" percent never replaces the last real percent.
+    expect(result.current.jobs.t6.percent).toBe(100);
+
+    act(() => {
+      markJobEnded("t6");
+    });
+    expect(result.current.jobs.t6).toBeUndefined();
   });
 });

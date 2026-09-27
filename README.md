@@ -91,6 +91,16 @@ The old crossover splitter is still available as "Quick EQ bands".
 - Storage chip with Clear scans and Empty trash; GPU busy chip; Low priority toggle for splits.
 
 
+## Splitting: quick first, Enhance where it matters
+
+Split runs a quick separation (about 3 minutes for a 3.5 minute song; the vocals are playable after
+about 1.5). Select any part of a lane and press **Enhance** to re-run the best-quality chain on just that
+part. Lead & backing vocals and the drum kit are split only when you open them. Stems are stored as
+lossless FLAC, and "Other" / "Backing vocals" are calculated from the other stems instead of stored.
+**Keep models loaded** keeps the AI models in GPU memory between jobs; **Offload models** frees it.
+Before any AI job the app checks free RAM/VRAM and whether the GPU is busy (a game) and asks first; kept
+models are offloaded automatically if a game needs the memory. Details and numbers: docs/CONTRACT.md v11.
+
 ## Pitch editor engine
 
 The Autotune tab is a Melodyne-style note editor running on `crates/pitchcore`, a Rust engine compiled to WebAssembly, so it works on the web too. It analyses a vocal once (a few seconds), then every note edit re-renders in a few milliseconds. Rebuild it with `node scripts/build-wasm.mjs`. Build the standalone desktop exe (frontend embedded, no dev server needed) with `node scripts/build-desktop.mjs`. Details in docs/CONTRACT.md (v9).

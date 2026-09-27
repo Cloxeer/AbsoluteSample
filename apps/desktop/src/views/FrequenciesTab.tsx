@@ -4,6 +4,7 @@ import { Button } from "@/components/neumorphic/Button";
 import { InfoTip } from "@/components/neumorphic/InfoTip";
 import { backend } from "@/lib/backend";
 import { groupInstruments } from "@/lib/instruments";
+import { realPath, stemSourcePath } from "@/lib/stemFiles";
 import { camelotFor } from "@/lib/notesTheory";
 import { buildSpectrumPaths } from "@/lib/spectrumPath";
 import type { FrequencyResult, InstrumentStem, Sample, TrackInfo } from "@/lib/types";
@@ -37,13 +38,13 @@ const CHART_HEIGHT = 220;
 const GRID_HZ = [100, 1000, 10000];
 const GRID_DB = [0, -20, -40, -60, -80, -100, -120];
 
-function buildSourceOptions(instruments: InstrumentStem[] | null | undefined, samples: Sample[]): SourceOption[] {
+function buildSourceOptions(instruments: InstrumentStem[] | null | undefined, samples: Sample[], trackId?: string | null): SourceOption[] {
   const options: SourceOption[] = [];
   if (instruments && instruments.length > 0) {
     for (const node of groupInstruments(instruments)) {
-      options.push({ key: node.stem.key, label: node.stem.displayLabel ?? node.stem.label, path: node.stem.path, group: "Instrument stems" });
+      options.push({ key: node.stem.key, label: node.stem.displayLabel ?? node.stem.label, path: stemSourcePath(node.stem, trackId), group: "Instrument stems" });
       for (const child of node.children) {
-        options.push({ key: child.key, label: `${node.stem.displayLabel ?? node.stem.label}  /  ${child.label}`, path: child.path, group: "Instrument stems" });
+        options.push({ key: child.key, label: `${node.stem.displayLabel ?? node.stem.label}  /  ${child.label}`, path: stemSourcePath(child, trackId), group: "Instrument stems" });
       }
     }
   }
@@ -65,7 +66,7 @@ function tuningColor(absCents: number): string {
 }
 
 export function FrequenciesTab({ track, instruments, analysis, samples = [] }: FrequenciesTabProps) {
-  const sources = useMemo(() => buildSourceOptions(instruments, samples), [instruments, samples]);
+  const sources = useMemo(() => buildSourceOptions(instruments, samples, track?.id), [instruments, samples, track?.id]);
   const [selectedPath, setSelectedPath] = useState<string>("");
   const [result, setResult] = useState<FrequencyResult | null>(analysis ?? null);
   const [loading, setLoading] = useState(false);
@@ -100,7 +101,7 @@ export function FrequenciesTab({ track, instruments, analysis, samples = [] }: F
     setElapsedSec(0);
     setLoading(true);
     try {
-      const freq = await backend.analyzeFrequencies({ path: selectedSource.path });
+      const freq = await backend.analyzeFrequencies({ path: await realPath(selectedSource.path) });
       setResult(freq);
       setElapsedSec((Date.now() - start) / 1000);
     } finally {

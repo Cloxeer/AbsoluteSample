@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { onProgress } from "@/lib/events";
-import { clearJobStart, earlierIso, getJobStart, onJobStarted } from "@/lib/localJobs";
+import { clearJobStart, earlierIso, getJobStart, onJobEnded, onJobStarted } from "@/lib/localJobs";
 import type { Job, ProgressPayload } from "@/lib/types";
 
 const TICK_MS = 250;
@@ -11,7 +11,9 @@ const TICK_MS = 250;
  * startedAt reflects the moment the user clicked (see lib/localJobs), not whenever the first
  * backend progress event happens to arrive: it's the EARLIER of the local click time and whatever
  * startedAt the backend itself reports.
- * A job is cleared when its stage reports 100% (completion) or a failure.
+ * A job is cleared when a whole-job event reports 100% or a failure, or when the local command
+ * that started it settles (markJobEnded). Per-pass events (payload.pass set) never end a job:
+ * a multi-pass split reports 100% (or a failed pass) for every pass and keeps going.
  */
 export function useJobs() {
   const [jobs, setJobs] = useState<Record<string, Job>>({});
@@ -37,6 +39,17 @@ export function useJobs() {
   }, []);
 
   useEffect(() => {
+    return onJobEnded((trackId) => {
+      setJobs((prev) => {
+        if (!(trackId in prev)) return prev;
+        const next = { ...prev };
+        delete next[trackId];
+        return next;
+      });
+    });
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
 
@@ -45,7 +58,8 @@ export function useJobs() {
       const trackId = payload.trackId;
       if (!trackId) return;
 
-      const isDone = payload.percent >= 100 || payload.failed;
+      const isPassEvent = !!payload.pass;
+      const isDone = !isPassEvent && (payload.percent >= 100 || !!payload.failed);
       setJobs((prev) => {
         if (isDone) {
           clearJobStart(trackId);
@@ -61,7 +75,8 @@ export function useJobs() {
           trackId,
           stage: payload.stage,
           pass: payload.pass,
-          percent: payload.percent,
+          // Negative percents are notices ("-1"), not progress: keep the last real percent.
+          percent: payload.percent >= 0 ? payload.percent : prev[trackId]?.percent ?? 0,
           message: payload.message,
           startedAt,
           elapsedSec: payload.elapsedSec ?? (Date.now() - Date.parse(startedAt)) / 1000,

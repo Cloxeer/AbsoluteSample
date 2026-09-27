@@ -3,7 +3,7 @@
 //! `~/.absolutesample/samples/<sanitized song title>/<sanitized name>.wav`,
 //! indexed in `~/.absolutesample/samples/samples.json`.
 
-use super::{analysis, cuts, dsp_filters, library, workspace};
+use super::{analysis, cuts, dsp_filters, library, stems, workspace};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -121,10 +121,12 @@ fn format_mmss(sec: f64) -> String {
     format!("{}:{:02}", total / 60, total % 60)
 }
 
-/// Resolves the source wav path for `(track_id, stem_key)`: band stem keys
+/// Resolves the source audio file for `(track_id, stem_key)`: band stem keys
 /// live at `stems/0N_<key>.wav`, `"loop"` is `loop.wav`, `"source"` is
-/// `source.wav`, and anything else is assumed to be an instrument key at
-/// `instruments/<key>.wav`.
+/// `source.wav`, and anything else is an instrument (or karaoke, also as
+/// `karaoke:<key>`) stem resolved through its manifest: stored stems may be
+/// FLAC (v11) and derived stems are materialized via `stems::StemSet`.
+/// Pre-manifest work dirs fall back to `instruments/<key>.wav`.
 pub fn resolve_stem_path(track_id: &str, stem_key: &str) -> Result<(PathBuf, String, String), String> {
     let dir = workspace::work_dir(track_id)?;
 
@@ -144,15 +146,13 @@ pub fn resolve_stem_path(track_id: &str, stem_key: &str) -> Result<(PathBuf, Str
         return Ok((path, dsp_filters::STEM_LABELS[pos].to_string(), "band".to_string()));
     }
 
+    if let Some((kind, manifest, stem)) = stems::locate(&dir, stem_key) {
+        let path = stems::StemSet::new(&dir, kind, &manifest).file_for(&stem.key)?;
+        return Ok((path, stem.label, stem.group));
+    }
+
     let path = dir.join("instruments").join(format!("{stem_key}.wav"));
-    let instruments = dir.join("instruments.json");
-    let (label, group) = std::fs::read_to_string(&instruments)
-        .ok()
-        .and_then(|text| serde_json::from_str::<super::engine::InstrumentsManifest>(&text).ok())
-        .and_then(|m| m.stems.into_iter().find(|s| s.key == stem_key))
-        .map(|s| (s.label, s.group))
-        .unwrap_or_else(|| (stem_key.to_string(), "instrument".to_string()));
-    Ok((path, label, group))
+    Ok((path, stem_key.to_string(), "instrument".to_string()))
 }
 
 /// Short random hex id, derived from the path + current time (std only, no
@@ -225,7 +225,21 @@ pub(crate) fn copy_into_samples_dir(track_title: &str, sample_name: &str, src: &
     let filename = unique_filename(&song_dir, &file_base, "wav");
     let dest_path = song_dir.join(&filename);
 
-    std::fs::copy(src, &dest_path).map_err(|e| format!("failed to copy sample wav: {e}"))?;
+    if src.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav")) {
+        std::fs::copy(src, &dest_path).map_err(|e| format!("failed to copy sample wav: {e}"))?;
+    } else {
+        // v11 stems are FLAC: samples stay 24-bit wav.
+        let out = super::silent_command("ffmpeg")
+            .args(["-v", "error", "-y", "-i"])
+            .arg(src)
+            .args(["-c:a", "pcm_s24le"])
+            .arg(&dest_path)
+            .output()
+            .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("failed to convert sample to wav: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+    }
     let bytes = std::fs::metadata(&dest_path).map(|m| m.len()).unwrap_or(0);
     let sample_peaks = super::peaks::compute_peaks_for_path(&dest_path).unwrap_or_default();
     Ok((dest_path, bytes, sample_peaks))

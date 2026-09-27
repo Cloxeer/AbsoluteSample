@@ -95,23 +95,29 @@ def prepare(n_tracks: int) -> list[Path]:
     return out
 
 
-def estimates(out_dir: Path) -> dict[str, np.ndarray]:
-    def rd(name: str):
-        p = out_dir / f"{name}.wav"
-        return sf.read(p, dtype="float32", always_2d=True)[0] if p.exists() else None
-
-    est = {k: rd(k) for k in ("vocals", "drums", "bass", "guitar", "piano", "other")}
-    other = None
-    for k in ("guitar", "piano", "other"):
-        if est[k] is not None:
-            other = est[k] if other is None else other[: len(est[k])] + est[k][: len(other)]
-    return {"vocals": est["vocals"], "drums": est["drums"], "bass": est["bass"], "other": other}
+def estimates(done: dict, mix: np.ndarray) -> dict[str, np.ndarray]:
+    """Top-level estimates from the engine's done event (stored FLAC files + derived recipes).
+    'other' for scoring = guitar + piano + other (MUSDB has four stems)."""
+    files = {st["key"]: sf.read(st["path"], dtype="float32", always_2d=True)[0] for st in done["stems"] if st["path"]}
+    arr = dict(files)
+    for st in done["stems"]:
+        d = st.get("derived")
+        if d:
+            acc = np.zeros_like(mix)
+            for k in d["plus"]:
+                acc = acc + (mix * d["mixGain"] if k == "mix" else files[k])
+            for k in d["minus"]:
+                acc = acc - files[k]
+            arr[st["key"]] = acc
+    g = done.get("mixGain", 1.0) or 1.0
+    other = sum(arr[k] for k in ("guitar", "piano", "other") if k in arr)
+    return {"vocals": arr["vocals"] / g, "drums": arr["drums"] / g, "bass": arr["bass"] / g, "other": other / g}
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tracks", type=int, default=10)
-    ap.add_argument("--passes", default="instruments,vocals")
+    ap.add_argument("--passes", default="")
     ap.add_argument("--label", default="current")
     ap.add_argument("--extra", default="", help="extra args passed to separate.py")
     args = ap.parse_args()
@@ -126,12 +132,13 @@ def main() -> int:
         cmd = [sys.executable, str(ENGINE), "--input", str(d / "mixture.wav"), "--out", str(out),
                "--models-dir", str(MODELS), "--passes", args.passes] + (args.extra.split() if args.extra else [])
         r = subprocess.run(cmd, capture_output=True, text=True)
-        if '"event": "done"' not in r.stdout:
+        done = next((json.loads(l) for l in r.stdout.splitlines() if '"event": "done"' in l), None)
+        if done is None:
             print("FAILED", d.name, r.stdout[-600:], r.stderr[-600:])
             continue
         secs = time.time() - t0
         mix = sf.read(d / "mixture.wav", dtype="float32", always_2d=True)[0]
-        est = estimates(out)
+        est = estimates(done, mix)
         row = {"track": d.name, "seconds": round(secs, 1)}
         for k in ("vocals", "drums", "bass", "other"):
             ref = sf.read(d / f"{k}.wav", dtype="float32", always_2d=True)[0]

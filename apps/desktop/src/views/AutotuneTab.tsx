@@ -174,7 +174,7 @@ function SliderField({
  * Melodyne-style note editor. The vocal is analysed and re-rendered entirely in the browser by the
  * pitchcore WebAssembly engine (in a Web Worker), so it behaves the same in the desktop app and on the web.
  */
-export function AutotuneTab({ instruments, samples = [], deps: depsProp }: AutotuneTabProps) {
+export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }: AutotuneTabProps) {
   const deps = useMemo(() => ({ ...DEFAULT_DEPS, ...depsProp }), [depsProp]);
   const depsRef = useRef(deps);
   depsRef.current = deps;
@@ -628,7 +628,7 @@ export function AutotuneTab({ instruments, samples = [], deps: depsProp }: Autot
 
   return (
     <div className="flex flex-col gap-4 px-6 py-4 max-w-6xl mx-auto w-full">
-      <AutotuneSource instruments={instruments} samples={samples} value={source} onChange={setSource} />
+      <AutotuneSource instruments={instruments} samples={samples} value={source} onChange={setSource} trackId={track?.id ?? null} />
 
       {loading && (
         <Surface variant="raised" className="p-5 flex flex-col gap-3" data-testid="autotune-loading">

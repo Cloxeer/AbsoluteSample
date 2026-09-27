@@ -29,6 +29,8 @@ export interface SaveSampleButtonProps {
   className?: string;
   /** When set, this button saves an arbitrary region (from a lane selection) instead of the fixed startSec/endSec range. */
   region?: RegionParams;
+  /** v11: runs before any backend cut/save, e.g. to materialize a derived stem as a real file first. */
+  prepare?: () => Promise<unknown>;
 }
 
 /** Small icon button that opens an inline popover to save the current track/stem as a named sample. */
@@ -43,6 +45,7 @@ export function SaveSampleButton({
   onSaved,
   className,
   region,
+  prepare,
 }: SaveSampleButtonProps) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
@@ -66,8 +69,8 @@ export function SaveSampleButton({
     if (!open || !region) return;
     let cancelled = false;
     setPreviewLoading(true);
-    backend
-      .cutRegion({
+    const cut = () =>
+      backend.cutRegion({
         trackId,
         stemKey,
         startSec: region.startSec,
@@ -75,7 +78,8 @@ export function SaveSampleButton({
         snap,
         fadeMs: 5,
         trimLeadingSilence: true,
-      })
+      });
+    (prepare ? prepare().then(cut) : cut())
       .then((result) => {
         if (cancelled) return;
         setPreview(result);
@@ -111,6 +115,7 @@ export function SaveSampleButton({
   const handleSave = async () => {
     setSaving(true);
     try {
+      await prepare?.();
       const sample = await backend.saveSample({
         trackId,
         stemKey,

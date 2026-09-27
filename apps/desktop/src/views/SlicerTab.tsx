@@ -8,6 +8,8 @@ import { RegionSelector } from "@/components/waveform/RegionSelector";
 import { StemGroup } from "@/components/stems/StemGroup";
 import { InstrumentTrackList } from "@/components/stems/InstrumentTrackList";
 import { EngineStatusCard } from "@/components/stems/EngineStatusCard";
+import { useBusyGate } from "@/components/stems/BusyGate";
+import { ModelsButton } from "@/components/stems/ModelsButton";
 import { SaveSampleButton } from "@/components/stems/SaveSampleButton";
 import { SourcePicker } from "@/components/layout/SourcePicker";
 import { useAudioEngine } from "@/hooks/useAudioEngine";
@@ -23,11 +25,10 @@ import { useRef } from "react";
 
 const SEED_URL = "https://youtu.be/nRKgT3d6xoE";
 
+/** v11 quick split: vocals first (playable as soon as they're done), then the instruments. */
 const PASS_DEFS: { pass: string; label: string }[] = [
-  { pass: "instruments", label: "Instruments (Demucs)" },
-  { pass: "vocals", label: "Vocals refine" },
-  { pass: "lead", label: "Lead/backing" },
-  { pass: "drums", label: "Drum kit" },
+  { pass: "vocals", label: "Vocals" },
+  { pass: "instruments", label: "Drums, bass, guitar, piano" },
 ];
 
 const KARAOKE_PASS_DEFS: { pass: string; label: string }[] = [
@@ -51,7 +52,7 @@ function PassChecklist({
       {defs.map(({ pass, label }) => {
         const state = passStates[pass] ?? "pending";
         return (
-          <li key={pass} className="flex items-center gap-2 text-xs">
+          <li key={pass} data-pass={pass} data-state={state} className="flex items-center gap-2 text-xs">
             {state === "pending" && <CircleDashed size={14} className="text-muted shrink-0" />}
             {state === "running" && <Loader2 size={14} className="text-accent animate-spin shrink-0" />}
             {state === "done" && <CheckCircle2 size={14} className="text-ok shrink-0" />}
@@ -202,7 +203,9 @@ export interface SlicerTabProps {
 
 export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], onSampleSaved }: SlicerTabProps = {}) {
   const ownEngine = useAudioEngine();
-  const { engine, fetchAudio, importLocal, trimLoop, separateStems, separateInstruments, separateKaraoke, newLink } = engineApi ?? ownEngine;
+  const api = engineApi ?? ownEngine;
+  const { engine, fetchAudio, importLocal, trimLoop, separateStems, separateInstruments, separateKaraoke, newLink } = api;
+  const { gate, element: busyGateElement } = useBusyGate();
   const ownSync = useSyncPlayback();
   const sync = syncApi ?? ownSync;
   const [url, setUrl] = useState(SEED_URL);
@@ -221,6 +224,8 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
   const [splitLeadBacking, setSplitLeadBacking] = useState(false);
   const [karaokePassStates, setKaraokePassStates] = useState<Record<string, PassState>>({});
   const [karaokePassReasons, setKaraokePassReasons] = useState<Record<string, string>>({});
+  const karaokeRunningRef = useRef(false);
+  karaokeRunningRef.current = karaokeRunning;
 
   useEffect(() => {
     backend.engineStatus().then(setEngineStatus);
@@ -252,9 +257,11 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
+    let cancelled = false;
     onProgress((payload: ProgressPayload) => {
-      if (payload.stage !== "separate" || !payload.pass) return;
-      if (karaokeRunning) {
+      if ((payload.stage !== "separate" && payload.stage !== "karaoke") || !payload.pass) return;
+      // Karaoke progress arrives as stage "karaoke" (older builds: "separate" while karaoke runs).
+      if (payload.stage === "karaoke" || karaokeRunningRef.current) {
         setKaraokePassStates((prev) => {
           const next = { ...prev };
           for (const def of KARAOKE_PASS_DEFS) {
@@ -286,10 +293,14 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
         setPassReasons((prev) => ({ ...prev, [payload.pass as string]: payload.message }));
       }
     }).then((u) => {
-      unlisten = u;
+      if (cancelled) u();
+      else unlisten = u;
     });
-    return () => unlisten?.();
-  }, [karaokeRunning]);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   const handleFetch = async () => {
     const track = await fetchAudio(url);
@@ -346,30 +357,56 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
     }
   };
 
-  const handleSplit = async () => {
+  const handleSplit = () => {
     if (!engine.track) return;
-    setPassStates(Object.fromEntries(PASS_DEFS.map((p) => [p.pass, "pending" as PassState])));
-    setPassReasons({});
-    await separateInstruments(engine.track.id);
-    setSplitSuccess(true);
-    onLibraryChanged?.();
-    setTimeout(() => setSplitSuccess(false), 1500);
+    const trackId = engine.track.id;
+    void gate("Split", async ({ lowPriority }) => {
+      setPassStates(Object.fromEntries(PASS_DEFS.map((p) => [p.pass, "pending" as PassState])));
+      setPassReasons({});
+      await separateInstruments(trackId, lowPriority ? { lowPriority: true, quality: "quick" } : { quality: "quick" });
+      setSplitSuccess(true);
+      onLibraryChanged?.();
+      setTimeout(() => setSplitSuccess(false), 1500);
+    });
   };
 
-  const handleKaraoke = async () => {
+  const handleKaraoke = () => {
     if (!engine.track) return;
-    setKaraokeRunning(true);
-    setKaraokePassStates(Object.fromEntries(KARAOKE_PASS_DEFS.filter((p) => splitLeadBacking || p.pass !== "lead").map((p) => [p.pass, "pending" as PassState])));
-    setKaraokePassReasons({});
-    try {
-      await separateKaraoke(engine.track.id, splitLeadBacking);
-      setKaraokeSuccess(true);
-      onLibraryChanged?.();
-      setTimeout(() => setKaraokeSuccess(false), 1500);
-    } finally {
-      setKaraokeRunning(false);
-    }
+    const trackId = engine.track.id;
+    const lead = splitLeadBacking;
+    void gate("Karaoke", async ({ lowPriority }) => {
+      setKaraokeRunning(true);
+      karaokeRunningRef.current = true;
+      setKaraokePassStates(Object.fromEntries(KARAOKE_PASS_DEFS.filter((p) => lead || p.pass !== "lead").map((p) => [p.pass, "pending" as PassState])));
+      setKaraokePassReasons({});
+      try {
+        if (lowPriority) await separateKaraoke(trackId, lead, { lowPriority: true });
+        else await separateKaraoke(trackId, lead);
+        setKaraokeSuccess(true);
+        onLibraryChanged?.();
+        setTimeout(() => setKaraokeSuccess(false), 1500);
+      } finally {
+        karaokeRunningRef.current = false;
+        setKaraokeRunning(false);
+      }
+    });
   };
+
+  const handleEnhance = api.enhanceRegion
+    ? async (range: { start: number; end: number }) => {
+        if (!engine.track) return;
+        await api.enhanceRegion(engine.track.id, range.start, range.end);
+        onLibraryChanged?.();
+      }
+    : undefined;
+
+  const handleSplitSubstems = api.splitSubstems
+    ? async (parent: string) => {
+        if (!engine.track) return;
+        await api.splitSubstems(engine.track.id, parent);
+        onLibraryChanged?.();
+      }
+    : undefined;
 
   const handleQuickEq = async () => {
     if (!engine.track) return;
@@ -385,6 +422,10 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
   const isSeparating = engine.state === "separating";
   const isBusy = isFetching || isTrimming || isSeparating;
   const splitEnabled = !!engineStatus?.installed && !isBusy;
+  const isSplitting = isSeparating && !useQuickEq && !karaokeRunning;
+  // Hear vocals sooner: while a split runs, stems that are already done are shown as normal lanes.
+  const instrumentStems = engine.instruments ?? (isSplitting && engine.partialInstruments?.length ? engine.partialInstruments : null);
+  const showSplitActions = !engine.stems && !engine.instruments;
 
   if (!engine.track) {
     return (
@@ -497,7 +538,7 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
             <EngineStatusCard status={engineStatus} installing={installing} onInstall={handleInstallEngine} />
           )}
 
-          {isSeparating && !useQuickEq && !karaokeRunning && (
+          {isSplitting && (
             <Surface variant="raised" className="p-4">
               <PassChecklist passStates={passStates} reasons={passReasons} />
             </Surface>
@@ -513,21 +554,27 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
             </Surface>
           )}
 
-          {!engine.stems && !engine.instruments && (
+          {(showSplitActions || !engine.karaoke || engineStatus?.installed) && (
             <div className="flex flex-col items-end gap-2">
               <div className="flex items-center gap-2">
-                <Button variant="primary" busy={isSeparating && !useQuickEq && !karaokeRunning} busyLabel="Splitting" success={splitSuccess} onClick={handleSplit} disabled={!splitEnabled}>
-                  Split
-                </Button>
+                {engineStatus?.installed && <ModelsButton gate={gate} />}
+                {showSplitActions && (
+                  <Button variant="primary" busy={isSplitting} busyLabel="Splitting" success={splitSuccess} onClick={handleSplit} disabled={!splitEnabled}>
+                    Split
+                  </Button>
+                )}
                 {!engine.karaoke && (
                   <Button busy={karaokeRunning} busyLabel="Splitting" success={karaokeSuccess} onClick={handleKaraoke} disabled={!splitEnabled}>
                     Karaoke
                   </Button>
                 )}
               </div>
-              <button type="button" onClick={handleQuickEq} className="text-xs text-muted underline hover:text-text">
-                Quick EQ bands instead
-              </button>
+              {showSplitActions && <span className="text-[11px] text-muted">Quick split: Enhance any part later</span>}
+              {showSplitActions && (
+                <button type="button" onClick={handleQuickEq} className="text-xs text-muted underline hover:text-text">
+                  Quick EQ bands instead
+                </button>
+              )}
               {!engine.karaoke && (
                 <label className="flex items-center gap-1.5 text-xs text-muted">
                   <input
@@ -540,31 +587,23 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
               )}
             </div>
           )}
-          {(engine.stems || engine.instruments) && !engine.karaoke && (
-            <div className="flex flex-col items-end gap-2">
-              <Button busy={karaokeRunning} busyLabel="Splitting" success={karaokeSuccess} onClick={handleKaraoke} disabled={!splitEnabled}>
-                Karaoke
-              </Button>
-              <label className="flex items-center gap-1.5 text-xs text-muted">
-                <input
-                  type="checkbox"
-                  checked={splitLeadBacking}
-                  onChange={(e) => setSplitLeadBacking(e.target.checked)}
-                />
-                Split lead &amp; backing
-              </label>
-            </div>
-          )}
         </div>
       )}
 
-      {engine.instruments && engine.track && (
+      {instrumentStems && engine.track && (
         <div className="flex flex-col gap-3" id="step-stems">
           <h2 className="text-sm font-semibold text-muted uppercase tracking-wide">3. Instruments</h2>
           <InstrumentTrackList
             key={engine.track.id}
             trackId={engine.track.id}
-            stems={engine.instruments}
+            stems={instrumentStems}
+            onSetSources={sync.setSources}
+            mixPath={engine.instrumentsMeta?.mixPath ?? null}
+            enhanced={engine.instrumentsMeta?.enhanced}
+            onEnhance={engine.instruments && !isBusy ? handleEnhance : undefined}
+            onSplitSubstems={engine.instruments && !isBusy ? handleSplitSubstems : undefined}
+            gate={gate}
+            pendingLabel={engine.instruments ? null : "Separating instruments…"}
             tracks={sync.tracks}
             currentTime={sync.currentTime}
             mode={sync.mode}
@@ -622,6 +661,9 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
             key={`${engine.track.id}:karaoke`}
             trackId={engine.track.id}
             stems={engine.karaoke}
+            onSetSources={sync.setSources}
+            mixPath={engine.karaokeMixPath ?? null}
+            fileKeyPrefix="karaoke:"
             tracks={sync.tracks}
             currentTime={sync.currentTime}
             mode={sync.mode}
@@ -642,6 +684,7 @@ export function SlicerTab({ engineApi, syncApi, onLibraryChanged, samples = [], 
           />
         </div>
       )}
+      {busyGateElement}
     </div>
   );
 }

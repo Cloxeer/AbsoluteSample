@@ -232,31 +232,35 @@ fn has_band_stem_files(dir: &Path) -> bool {
 
 /// Reads `instruments.json`, lazily backfilling `peaks`/`durationSec` for
 /// any stem saved before those fields existed (and re-saving the manifest
-/// if anything changed).
+/// if anything changed). Stem files resolve through the manifest (FLAC,
+/// versioned names, derived recipes materialized on demand).
 fn instruments_manifest_at(dir: &Path) -> Option<super::engine::InstrumentsManifest> {
-    let path = dir.join("instruments.json");
-    let text = std::fs::read_to_string(&path).ok()?;
-    let mut manifest: super::engine::InstrumentsManifest = serde_json::from_str(&text).ok()?;
+    use super::stems::{StemSet, StemSetKind};
+    let kind = StemSetKind::Instruments;
+    let mut manifest = super::stems::load_manifest(dir, kind)?;
 
+    let snapshot = manifest.clone();
+    let set = StemSet::new(dir, kind, &snapshot);
     let mut dirty = false;
     for stem in manifest.stems.iter_mut() {
-        if stem.peaks.is_empty() {
-            let stem_path = PathBuf::from(&stem.path);
-            if stem_path.exists() {
-                if let Ok(p) = super::peaks::compute_peaks_for_path(&stem_path) {
-                    stem.peaks = p;
-                    dirty = true;
-                }
-                if stem.duration_sec <= 0.0 {
-                    stem.duration_sec = super::downloader::probe(&stem_path).map(|p| p.duration_sec).unwrap_or(0.0);
-                    dirty = true;
-                }
+        if !stem.peaks.is_empty() {
+            continue;
+        }
+        let Ok(stem_path) = set.file_for(&stem.key) else { continue };
+        if stem_path.exists() {
+            if let Ok(p) = super::peaks::compute_peaks_for_path(&stem_path) {
+                stem.peaks = p;
+                dirty = true;
+            }
+            if stem.duration_sec <= 0.0 {
+                stem.duration_sec = super::downloader::probe(&stem_path).map(|p| p.duration_sec).unwrap_or(0.0);
+                dirty = true;
             }
         }
     }
     if dirty {
         if let Ok(json) = serde_json::to_string_pretty(&manifest) {
-            let _ = std::fs::write(&path, json);
+            let _ = std::fs::write(kind.manifest_path(dir), json);
         }
     }
 

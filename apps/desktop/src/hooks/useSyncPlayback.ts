@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { mixEngine } from "@/lib/mixEngine";
+import { mixEngine, type MixTrackDef } from "@/lib/mixEngine";
 import { samplePlayer } from "@/lib/samplePlayer";
 import { nowPlaying } from "@/lib/nowPlaying";
 
@@ -94,6 +94,12 @@ export function useSyncPlayback() {
   /** url per registered track id, used to drive mixEngine.load(). */
   const urlsRef = useRef<Map<string, string>>(new Map());
   const loadPromiseRef = useRef<Promise<void> | null>(null);
+  /**
+   * v11: every stem's audio source by id (file urls, derived recipes, the hidden source "mix"), per
+   * owner (e.g. the instruments list and the karaoke list), whether or not its lane is rendered, so
+   * derived lanes can be played from their inputs' decoded audio.
+   */
+  const sourcesRef = useRef<Map<string, MixTrackDef[]>>(new Map());
   const [tracks, setTracks] = useState<TrackGainState[]>([]);
   const [transport, setTransport] = useState<TransportState>({
     mode: "mix",
@@ -107,16 +113,48 @@ export function useSyncPlayback() {
   const loopEnabledRef = useRef(false);
   loopEnabledRef.current = loopEnabled;
 
-  /** All top-level (non-expanded-child) registered tracks, as mixEngine track defs. */
+  /** The playable source for an id: its registered lane url, else the catalog (derived recipe / url). */
+  const defFor = useCallback((id: string): MixTrackDef | null => {
+    let fromCatalog: MixTrackDef | null = null;
+    for (const defs of sourcesRef.current.values()) {
+      const d = defs.find((x) => x.id === id);
+      if (d) fromCatalog = d;
+    }
+    const url = urlsRef.current.get(id);
+    if (url && !fromCatalog?.derive) return { id, url };
+    return fromCatalog ? { ...fromCatalog, hidden: false } : null;
+  }, []);
+
+  /** Adds every input a derived def needs (recursively) as hidden defs, so mixEngine can compute it. */
+  const withInputs = useCallback(
+    (defs: MixTrackDef[]): MixTrackDef[] => {
+      const out = [...defs];
+      const seen = new Set(out.map((d) => d.id));
+      for (let i = 0; i < out.length; i++) {
+        const derive = out[i].derive;
+        if (!derive) continue;
+        for (const inputId of [...derive.plus, ...derive.minus]) {
+          if (seen.has(inputId)) continue;
+          const d = defFor(inputId);
+          seen.add(inputId);
+          if (d) out.push({ ...d, hidden: true });
+        }
+      }
+      return out;
+    },
+    [defFor]
+  );
+
+  /** All top-level (non-expanded-child) registered tracks, as mixEngine track defs (plus derived inputs). */
   const mixTrackDefs = useCallback(() => {
-    const defs: { id: string; url: string }[] = [];
+    const defs: MixTrackDef[] = [];
     for (const [id, inMix] of inMixRef.current.entries()) {
       if (inMix === false) continue;
-      const url = urlsRef.current.get(id);
-      if (url) defs.push({ id, url });
+      const d = defFor(id);
+      if (d) defs.push(d);
     }
-    return defs;
-  }, []);
+    return withInputs(defs);
+  }, [defFor, withInputs]);
 
   /** Kicks off (or refreshes) a mixEngine.load() for every currently-registered mix track. Safe to call repeatedly. */
   const preloadMix = useCallback(() => {
@@ -134,7 +172,28 @@ export function useSyncPlayback() {
       // Never let a display-only instance emit audio of its own.
       ws.setVolume(0);
       ws.pause();
-      if (url) preloadMix();
+      preloadMix();
+    },
+    [preloadMix]
+  );
+
+  /**
+   * v11: publishes the audio sources for a set of stems (owner = which list they belong to). URLs
+   * that disappear (e.g. replaced by a new version after Enhance) are dropped from mixEngine's cache.
+   */
+  const setSources = useCallback(
+    (owner: string, defs: MixTrackDef[]) => {
+      const urlsOf = (m: Map<string, MixTrackDef[]>) => new Set(Array.from(m.values()).flat().map((d) => d.url).filter((u): u is string => !!u));
+      const before = urlsOf(sourcesRef.current);
+      const next = new Map(sourcesRef.current);
+      if (defs.length === 0) next.delete(owner);
+      else next.set(owner, defs);
+      sourcesRef.current = next;
+      const after = urlsOf(next);
+      const registered = new Set(urlsRef.current.values());
+      for (const url of before) if (!after.has(url) && !registered.has(url)) mixEngine.forget(url);
+      if (instancesRef.current.size > 0) preloadMix();
+      else loadPromiseRef.current = null;
     },
     [preloadMix]
   );
@@ -334,13 +393,13 @@ export function useSyncPlayback() {
       };
       nowPlaying.start("audition", `Solo: ${id}`, 0, auditionController);
 
-      const url = urlsRef.current.get(id);
-      if (url) {
+      const def = defFor(id);
+      if (def) {
         // mixEngine.load() never resets `this.position`, so the position captured here (before
         // the load, which may take a while) is still the last known transport position once the
         // load resolves — audition should resume from there, not always from 0.
         const startPos = mixEngine.currentTime();
-        const loadPromise = mixEngine.load([{ id, url }]);
+        const loadPromise = mixEngine.load(withInputs([def]));
         loadPromiseRef.current = loadPromise;
         void loadPromise.then(() => {
           const t = transportRef.current;
@@ -352,7 +411,7 @@ export function useSyncPlayback() {
 
       setTransport((prev) => nextTransportState(prev, { type: "AUDITION", id }));
     },
-    []
+    [defFor, withInputs]
   );
 
   const toggleLoop = useCallback(() => setLoopEnabled((v) => !v), []);
@@ -363,6 +422,7 @@ export function useSyncPlayback() {
     removeTrack,
     registerInstance,
     unregisterInstance,
+    setSources,
     applyGains,
     syncTime,
     handleTimeUpdate,

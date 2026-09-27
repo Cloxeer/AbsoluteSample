@@ -3,9 +3,10 @@
 //! progress is emitted on the `"pipeline://progress"` event.
 
 use crate::audio::cuts;
-use crate::audio::engine::{self, EngineStatus, InstrumentStem};
+use crate::audio::engine::{self, EngineStatus, InstrumentStem, InstrumentsManifest};
+use crate::audio::engine_server::{self, ModelsStatus};
 use crate::audio::progress::{Progress, ProgressPayload, Timer};
-use crate::audio::{analysis, downloader, library, samples, slicer, trash, workspace};
+use crate::audio::{analysis, downloader, library, samples, slicer, stems, sysload, trash, workspace};
 use crate::pipeline;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -541,23 +542,31 @@ pub async fn engine_install(app: AppHandle) -> Result<EngineStatus, String> {
     .map_err(|e| format!("task join error: {e}"))?
 }
 
-/// Result of `separate_instruments` (contract v5 addendum "Honest timing"):
-/// wraps the stems with honest total timing + per-pass timing, alongside the
-/// device used and any passes that failed (chain continues past failures).
-/// This is also what gets written to `instruments.json`.
-#[derive(Serialize)]
+/// `pipeline://stem` payload (contract v11): a stem is ready before the
+/// whole job finishes.
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct SeparateInstrumentsOut {
-    pub stems: Vec<InstrumentStem>,
-    pub elapsed_sec: f64,
-    pub pass_seconds: HashMap<String, f64>,
-    pub device: String,
-    pub failed_passes: Vec<engine::FailedPass>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seconds: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peak_rss_mb: Option<f64>,
+pub struct StemReadyPayload {
+    pub track_id: String,
+    pub stem: InstrumentStem,
 }
+
+fn emit_stem(app: &AppHandle, track_id: &str, stem: &InstrumentStem) {
+    let _ = app.emit("pipeline://stem", StemReadyPayload { track_id: track_id.to_string(), stem: stem.clone() });
+}
+
+impl TauriProgress {
+    fn engine(&self, p: engine::EngineProgress) {
+        self.report_pass(&p.stage, p.pass.as_deref().unwrap_or(""), p.percent, &p.message, p.failed, &HashMap::new());
+    }
+}
+
+/// `separate_instruments`, `enhance_region`, `split_substems` and
+/// `separate_karaoke` all return the stem manifest (contract v5 "Honest
+/// timing" + v11): `{stems, device, failedPasses, elapsedSec, passSeconds,
+/// quality, mixPath, mixGain, enhanced}` -- exactly what is written to
+/// `instruments.json` / `karaoke/karaoke.json`.
+pub type InstrumentsOut = InstrumentsManifest;
 
 #[tauri::command]
 pub async fn separate_instruments(
@@ -565,51 +574,52 @@ pub async fn separate_instruments(
     track_id: String,
     passes: Option<Vec<String>>,
     low_priority: Option<bool>,
-) -> Result<SeparateInstrumentsOut, String> {
+    quality: Option<String>,
+) -> Result<InstrumentsOut, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let progress = TauriProgress::new(app, track_id.clone());
-        let passes = passes.unwrap_or_else(|| {
-            engine::DEFAULT_PASSES.iter().map(|s| s.to_string()).collect()
-        });
-        let result = pipeline::run_instruments(&track_id, &passes, low_priority.unwrap_or(false), |p| {
-            progress.report_pass(
-                &p.stage,
-                p.pass.as_deref().unwrap_or(""),
-                p.percent,
-                &p.message,
-                p.failed,
-                &HashMap::new(),
-            );
-        })?;
-        Ok(SeparateInstrumentsOut {
-            stems: result.stems,
-            elapsed_sec: result.elapsed_sec,
-            pass_seconds: result.pass_seconds,
-            device: result.device,
-            failed_passes: result
-                .failed_passes
-                .into_iter()
-                .map(|(pass, error)| engine::FailedPass { pass, error })
-                .collect(),
-            seconds: result.seconds,
-            peak_rss_mb: result.peak_rss_mb,
-        })
+        let progress = TauriProgress::new(app.clone(), track_id.clone());
+        pipeline::run_instruments(
+            &track_id,
+            passes.as_deref(),
+            low_priority.unwrap_or(false),
+            quality.as_deref().unwrap_or("quick"),
+            |p| progress.engine(p),
+            |stem| emit_stem(&app, &track_id, stem),
+        )
     })
     .await
     .map_err(|e| format!("task join error: {e}"))?
 }
 
-/// Result of `separate_karaoke` (contract v7 addendum "Karaoke").
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SeparateKaraokeOut {
-    pub stems: Vec<InstrumentStem>,
-    pub elapsed_sec: f64,
-    pub device: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seconds: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peak_rss_mb: Option<f64>,
+#[tauri::command]
+pub async fn enhance_region(app: AppHandle, track_id: String, start_sec: f64, end_sec: f64) -> Result<InstrumentsOut, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let progress = TauriProgress::new(app, track_id.clone());
+        pipeline::run_enhance(&track_id, start_sec, end_sec, |p| progress.engine(p))
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn split_substems(app: AppHandle, track_id: String, parent: String) -> Result<InstrumentsOut, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let progress = TauriProgress::new(app.clone(), track_id.clone());
+        pipeline::run_substems(&track_id, &parent, |p| progress.engine(p), |stem| emit_stem(&app, &track_id, stem))
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+/// Real file path of a stem; derived stems are materialized (cached) into
+/// `instruments/_derived/<key>.wav` (or `karaoke/_derived/`).
+#[tauri::command]
+pub async fn stem_file(track_id: String, key: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        stems::stem_file(&track_id, &key).map(|p| p.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
 }
 
 #[tauri::command]
@@ -618,19 +628,55 @@ pub async fn separate_karaoke(
     track_id: String,
     split_lead_backing: Option<bool>,
     low_priority: Option<bool>,
-) -> Result<SeparateKaraokeOut, String> {
+) -> Result<InstrumentsOut, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let progress = TauriProgress::new(app, track_id.clone());
-        let result = pipeline::run_karaoke(&track_id, split_lead_backing.unwrap_or(false), low_priority.unwrap_or(false), |p| {
-            progress.report_pass(&p.stage, p.pass.as_deref().unwrap_or(""), p.percent, &p.message, p.failed, &HashMap::new());
-        })?;
-        Ok(SeparateKaraokeOut {
-            stems: result.stems,
-            elapsed_sec: result.elapsed_sec,
-            device: result.device,
-            seconds: result.seconds,
-            peak_rss_mb: result.peak_rss_mb,
+        pipeline::run_karaoke(&track_id, split_lead_backing.unwrap_or(false), low_priority.unwrap_or(false), |p| {
+            progress.engine(p)
         })
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+// ---------------------------------------------------------------------
+// v11: resident models + system load
+// ---------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn engine_models_status() -> Result<ModelsStatus, String> {
+    Ok(engine_server::global().status())
+}
+
+/// Starts the engine server and loads the quick-split models; they stay
+/// resident (kept) until `engine_offload` or the load watcher offloads them.
+#[tauri::command]
+pub async fn engine_keep_loaded() -> Result<ModelsStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let _gate = engine::acquire_engine("Loading models")?;
+        engine_server::global().keep_loaded("quick")
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+/// Shuts the engine server down (no python process left) and clears `kept`.
+#[tauri::command]
+pub async fn engine_offload() -> Result<ModelsStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let _gate = engine::acquire_engine("Offloading models")?;
+        Ok(engine_server::global().offload(None))
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn system_load() -> Result<sysload::SystemLoad, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let resident = engine_server::global().status();
+        let resident_mb = if resident.loaded { resident.vram_mb.unwrap_or(0) as f64 } else { 0.0 };
+        Ok(sysload::measure(engine::engine_busy(), resident_mb))
     })
     .await
     .map_err(|e| format!("task join error: {e}"))?

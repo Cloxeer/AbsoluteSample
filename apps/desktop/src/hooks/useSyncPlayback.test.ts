@@ -12,6 +12,7 @@ import {
 vi.mock("@/lib/mixEngine", () => ({
   mixEngine: {
     load: vi.fn(() => Promise.resolve()),
+    forget: vi.fn(),
     play: vi.fn(),
     pause: vi.fn(),
     stop: vi.fn(),
@@ -237,5 +238,55 @@ describe("useSyncPlayback mix playback (routed through mixEngine)", () => {
     });
 
     expect(mixEngine.play).toHaveBeenCalledWith(12.5);
+  });
+
+  it("plays and auditions a derived (file-less) lane by loading its recipe plus its hidden inputs", async () => {
+    const { mixEngine } = await import("@/lib/mixEngine");
+    const { result } = renderHook(() => useSyncPlayback());
+    const recipe = { plus: ["mix"], minus: ["vocals"], mixGain: 0.9 };
+    vi.mocked(mixEngine.load).mockClear();
+    act(() => {
+      result.current.setSources("list", [
+        { id: "vocals", url: "v.wav" },
+        { id: "other", derive: recipe },
+        { id: "mix", url: "m.wav", hidden: true },
+      ]);
+      result.current.registerInstance("vocals", fakeWs(), true, true, "v.wav");
+      result.current.registerInstance("other", fakeWs(), false, true);
+    });
+
+    await act(async () => {
+      await result.current.playMix();
+    });
+    // Registering the lanes preloads the mix; that load must include the recipe and its hidden input.
+    const lastLoad = vi.mocked(mixEngine.load).mock.calls.at(-1)?.[0] ?? [];
+    expect(lastLoad).toEqual(
+      expect.arrayContaining([
+        { id: "vocals", url: "v.wav" },
+        { id: "other", derive: recipe, hidden: false },
+        { id: "mix", url: "m.wav", hidden: true },
+      ])
+    );
+
+    vi.mocked(mixEngine.load).mockClear();
+    await act(async () => {
+      result.current.auditionTrack("other");
+      await Promise.resolve();
+    });
+    expect(mixEngine.load).toHaveBeenCalledWith([
+      { id: "other", derive: recipe, hidden: false },
+      { id: "mix", url: "m.wav", hidden: true },
+      { id: "vocals", url: "v.wav", hidden: true },
+    ]);
+
+    // A replaced url (e.g. after Enhance) is dropped from the decode cache.
+    act(() => {
+      result.current.setSources("list", [
+        { id: "vocals", url: "v.1.wav" },
+        { id: "other", derive: recipe },
+        { id: "mix", url: "m.wav", hidden: true },
+      ]);
+    });
+    expect(mixEngine.forget).not.toHaveBeenCalledWith("v.wav"); // still registered by the lane
   });
 });

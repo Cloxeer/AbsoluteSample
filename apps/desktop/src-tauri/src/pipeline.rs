@@ -317,6 +317,16 @@ pub fn run_import_local(path: &Path, progress: &dyn Progress) -> Result<TrackMan
     Ok(track)
 }
 
+/// Where the copy-trimmed loop goes before it is decoded to `loop.wav`. A WAV source must not be
+/// copied to `loop.wav` itself, or the decode would read and write the same file (ffmpeg refuses).
+fn loop_copy_path(dir: &Path, ext: &str) -> std::path::PathBuf {
+    if ext.eq_ignore_ascii_case("wav") {
+        dir.join("loop_src.wav")
+    } else {
+        dir.join(format!("loop.{ext}"))
+    }
+}
+
 /// trim: copy-trim source.<ext> -> loop.<ext>, then decode loop.wav.
 pub fn run_trim(
     track_id: &str,
@@ -331,7 +341,7 @@ pub fn run_trim(
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("webm");
-    let loop_path = dir.join(format!("loop.{ext}"));
+    let loop_path = loop_copy_path(&dir, ext);
     slicer::trim_copy(source_path, &loop_path, start_sec, end_sec)?;
 
     progress.report("trim", 60.0, "decoding loop.wav");
@@ -429,28 +439,35 @@ pub(crate) fn ensure_source_wav(dir: &Path) -> Result<PathBuf, String> {
     Ok(source_wav)
 }
 
-/// instruments: whole-song AI split (contract v6 addendum "Split the whole
-/// song once"). Runs the engine over `source.wav` (decoded lazily from
-/// `source.<ext>` if needed) instead of `loop.wav`, records
-/// `state.json.instrumentsScope = "song"`, and ensures the cached whole-song
-/// analysis (`analysis/source.json`) exists before returning. Takes the same
-/// per-pass progress closure shape as `engine::separate` so callers keep
-/// full pass-level progress fidelity.
-pub fn run_instruments(
-    track_id: &str,
-    passes: &[String],
-    low_priority: bool,
-    progress: impl FnMut(engine::EngineProgress),
-) -> Result<engine::SeparateResult, String> {
-    let dir = workspace::work_dir(track_id)?;
-    let source_wav = ensure_source_wav(&dir)?;
-
-    let label = library::read_track(track_id)
+fn track_label(track_id: &str) -> String {
+    library::read_track(track_id)
         .ok()
         .flatten()
         .map(|t| t.title)
-        .unwrap_or_else(|| track_id.to_string());
-    let result = engine::separate(&source_wav, &dir, passes, &label, low_priority, progress)?;
+        .unwrap_or_else(|| track_id.to_string())
+}
+
+/// instruments: whole-song AI split (contract v6 addendum "Split the whole
+/// song once", v11 quick/full through the engine server). Runs over
+/// `source.wav` (decoded lazily from `source.<ext>` if needed), records
+/// `state.json.instrumentsScope = "song"`, and ensures the cached whole-song
+/// analysis (`analysis/source.json`) exists before returning. `on_stem`
+/// receives each stem as soon as the engine reports it.
+pub fn run_instruments(
+    track_id: &str,
+    passes: Option<&[String]>,
+    low_priority: bool,
+    quality: &str,
+    progress: impl FnMut(engine::EngineProgress),
+    on_stem: impl FnMut(&engine::InstrumentStem),
+) -> Result<engine::InstrumentsManifest, String> {
+    if !matches!(quality, "quick" | "full") {
+        return Err(format!("unknown split quality '{quality}' (quick or full)"));
+    }
+    let dir = workspace::work_dir(track_id)?;
+    let source_wav = ensure_source_wav(&dir)?;
+    let label = track_label(track_id);
+    let result = engine::split_song(&source_wav, &dir, quality, passes, &label, low_priority, progress, on_stem)?;
 
     let mut state = library::load_state(track_id);
     state.instruments_scope = Some("song".to_string());
@@ -463,6 +480,28 @@ pub fn run_instruments(
     Ok(result)
 }
 
+/// v11 `enhance_region`: full-quality re-run of `[start, end]`.
+pub fn run_enhance(
+    track_id: &str,
+    start_sec: f64,
+    end_sec: f64,
+    progress: impl FnMut(engine::EngineProgress),
+) -> Result<engine::InstrumentsManifest, String> {
+    let dir = workspace::work_dir(track_id)?;
+    engine::enhance(&dir, start_sec, end_sec, &track_label(track_id), progress)
+}
+
+/// v11 `split_substems`: lazy sub-parts of `vocals` or `drums`.
+pub fn run_substems(
+    track_id: &str,
+    parent: &str,
+    progress: impl FnMut(engine::EngineProgress),
+    on_stem: impl FnMut(&engine::InstrumentStem),
+) -> Result<engine::InstrumentsManifest, String> {
+    let dir = workspace::work_dir(track_id)?;
+    engine::substems(&dir, parent, &track_label(track_id), progress, on_stem)
+}
+
 /// karaoke: fast 2-stem split (contract v7 addendum "Karaoke"). Runs over
 /// `source.wav` (same as `run_instruments`, so the stems are full-length),
 /// records `state.json.karaokeScope = true`.
@@ -471,15 +510,10 @@ pub fn run_karaoke(
     split_lead_backing: bool,
     low_priority: bool,
     progress: impl FnMut(engine::EngineProgress),
-) -> Result<engine::SeparateResult, String> {
+) -> Result<engine::InstrumentsManifest, String> {
     let dir = workspace::work_dir(track_id)?;
     let source_wav = ensure_source_wav(&dir)?;
-
-    let label = library::read_track(track_id)
-        .ok()
-        .flatten()
-        .map(|t| t.title)
-        .unwrap_or_else(|| track_id.to_string());
+    let label = track_label(track_id);
     let result = engine::separate_karaoke(&source_wav, &dir, split_lead_backing, low_priority, &label, progress)?;
 
     let mut state = library::load_state(track_id);
@@ -567,7 +601,9 @@ pub fn run_full(
         std::fs::create_dir_all(&instruments_dest_dir)
             .map_err(|e| format!("failed to create out instruments dir: {e}"))?;
         for stem in instruments {
-            let src = Path::new(&stem.path);
+            // Derived stems have no file of their own: materialize them.
+            let src = crate::audio::stems::stem_file(&manifest.track.id, &stem.key)?;
+            let src = src.as_path();
             let filename = src
                 .file_name()
                 .ok_or_else(|| "instrument stem path has no filename".to_string())?;
@@ -591,6 +627,15 @@ pub fn run_full(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wav_loop_copy_never_overwrites_the_decoded_loop() {
+        let dir = Path::new("w");
+        assert_eq!(loop_copy_path(dir, "wav"), dir.join("loop_src.wav"));
+        assert_eq!(loop_copy_path(dir, "WAV"), dir.join("loop_src.wav"));
+        assert_eq!(loop_copy_path(dir, "webm"), dir.join("loop.webm"));
+        assert_ne!(loop_copy_path(dir, "wav"), dir.join("loop.wav"));
+    }
 
     #[test]
     fn engine_enum_serializes_lowercase() {

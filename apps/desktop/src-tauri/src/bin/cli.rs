@@ -99,6 +99,9 @@ enum Commands {
         /// to use fewer CPU threads.
         #[arg(long)]
         low_priority: bool,
+        /// "quick" (fast first listen) or "full" (whole chain + sub-parts).
+        #[arg(long, default_value = "quick")]
+        quality: String,
     },
     /// Song library management.
     Library {
@@ -424,12 +427,12 @@ fn main() -> ExitCode {
                 Err(e) => print_err("engine install", &e),
             },
         },
-        Commands::Instruments { track, passes, low_priority } => {
+        Commands::Instruments { track, passes, low_priority, quality } => {
             let passes: Vec<String> = match passes {
                 Some(p) => p.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
                 None => engine::DEFAULT_PASSES.iter().map(|s| s.to_string()).collect(),
             };
-            match pipeline::run_instruments(&track, &passes, low_priority, |p| eprint_engine_progress(&p)) {
+            match pipeline::run_instruments(&track, Some(&passes), low_priority, &quality, |p| eprint_engine_progress(&p), |_| {}) {
                 Ok(result) => {
                     print_json(&result.stems);
                     ExitCode::SUCCESS
