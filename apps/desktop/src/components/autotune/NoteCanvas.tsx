@@ -20,8 +20,30 @@ import {
   type SnapMode,
   type Viewport,
 } from "@/lib/melodyneEditor";
-import { drawOverlay, drawScene } from "@/lib/melodyneDraw";
-import type { TunePlayer } from "@/lib/tunePlayer";
+import { drawOverlay, drawScene, type GhostTrack } from "@/lib/melodyneDraw";
+
+/** What the canvas needs from the player: the shared playhead. */
+export interface PlayheadSource {
+  currentTime(): number;
+  subscribe(cb: () => void): () => void;
+}
+
+const profileCache = new WeakMap<Analysis, Float32Array[]>();
+/** Blob outlines of every note (cached per analysis object, so ghosts are not recomputed on redraws). */
+export function profilesFor(analysis: Analysis): Float32Array[] {
+  let p = profileCache.get(analysis);
+  if (!p) {
+    const ref = referenceDb(analysis.db);
+    p = analysis.notes.map((n) => blobProfile(n, analysis.db, ref));
+    profileCache.set(analysis, p);
+  }
+  return p;
+}
+
+/** Shifts a viewport so a track's local times land on the shared timeline. */
+function localVp(vp: Viewport, offsetSec: number): Viewport {
+  return offsetSec === 0 ? vp : { ...vp, scrollSec: vp.scrollSec - offsetSec };
+}
 
 /** Width used when the container can't be measured (tests / first paint). */
 export const FALLBACK_WIDTH = 900;
@@ -47,8 +69,18 @@ export interface NoteCanvasProps {
   peakBlock: number;
   peakMax: number;
   sampleRate: number;
-  player: TunePlayer;
+  player: PlayheadSource;
   playing: boolean;
+  /** Where this (the edited) track starts on the shared timeline. Notes are drawn/hit-tested shifted by it. */
+  timeOffsetSec?: number;
+  /** Length of the shared timeline (defaults to this track's end). */
+  timelineDurationSec?: number;
+  /** Other tracks drawn as faint outlines. */
+  ghosts?: readonly GhostTrack[];
+  /** Blob color of the edited track. */
+  color?: string;
+  /** Id of the edited track (exposed as a data attribute). */
+  trackId?: string;
   onSelect(next: Set<number>): void;
   onSeek(sec: number): void;
   onDragStart(indices: number[]): void;
@@ -93,13 +125,17 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
     sampleRate,
     player,
     playing,
+    timeOffsetSec = 0,
+    ghosts,
+    color,
+    trackId,
   } = props;
   const wrapRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const [width, setWidth] = useState(FALLBACK_WIDTH);
   const layout = useMemo(() => computeLayout(width), [width]);
-  const [vp, setVp] = useState<Viewport>(() => fitViewport(analysis.notes, analysis.durationSec, computeLayout(FALLBACK_WIDTH), OPEN_WINDOW_SEC));
+  const [vp, setVp] = useState<Viewport>(() => fitFor(props, computeLayout(FALLBACK_WIDTH), OPEN_WINDOW_SEC));
   const gestureRef = useRef<Gesture | null>(null);
   const [marquee, setMarquee] = useState<Rect | null>(null);
   const propsRef = useRef(props);
@@ -107,10 +143,10 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
   const vpRef = useRef(vp);
   vpRef.current = vp;
 
-  const { profiles } = useMemo(() => {
-    const ref = referenceDb(analysis.db);
-    return { profiles: analysis.notes.map((n) => blobProfile(n, analysis.db, ref)) };
-  }, [analysis]);
+  const profiles = useMemo(() => profilesFor(analysis), [analysis]);
+  const offRef = useRef(timeOffsetSec);
+  offRef.current = timeOffsetSec;
+  const durOf = () => timelineDuration(propsRef.current);
 
   // Measure container width.
   useLayoutEffect(() => {
@@ -128,14 +164,20 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
   }, []);
 
   const fit = useCallback(() => {
-    const a = propsRef.current.analysis;
-    setVp(fitViewport(a.notes, a.durationSec, layout));
+    setVp(fitFor(propsRef.current, layout));
   }, [layout]);
 
-  // Open on a readable window when a new file is loaded or the width changes.
+  // Open on a readable window when a new file is loaded or the width changes. Switching to another
+  // track (new sessionKey) keeps the time axis where it is and only re-centres the pitch rows.
+  const lastSessionRef = useRef<string | null>(null);
+  const lastLayoutRef = useRef(layout);
   useEffect(() => {
-    const a = propsRef.current.analysis;
-    setVp(fitViewport(a.notes, a.durationSec, layout, OPEN_WINDOW_SEC));
+    const switched = lastSessionRef.current !== null && lastSessionRef.current !== sessionKey && lastLayoutRef.current === layout;
+    lastSessionRef.current = sessionKey;
+    lastLayoutRef.current = layout;
+    const next = fitFor(propsRef.current, layout, OPEN_WINDOW_SEC);
+    if (switched) setVp((v) => clampScroll({ ...v, topMidi: next.topMidi, rowPx: next.rowPx }, durOf(), layout));
+    else setVp(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey, layout]);
 
@@ -144,7 +186,7 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
     () => ({
       fit,
       zoom(factor: number) {
-        setVp((v) => zoomHorizontal(v, factor, layout.gridLeft + layout.gridWidth / 2, propsRef.current.analysis.durationSec, layout));
+        setVp((v) => zoomHorizontal(v, factor, layout.gridLeft + layout.gridWidth / 2, durOf(), layout));
       },
     }),
     [fit, layout]
@@ -187,9 +229,12 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
       peakBlock,
       peakMax,
       sampleRate,
+      timeOffsetSec,
+      color,
+      ghosts,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layout, vp, analysis, profiles, scalePcs, tonicPc, selected, overrides, peaks, peaksVersion, peakBlock, peakMax, sampleRate]);
+  }, [layout, vp, analysis, profiles, scalePcs, tonicPc, selected, overrides, peaks, peaksVersion, peakBlock, peakMax, sampleRate, timeOffsetSec, color, ghosts]);
 
   const drawOverlayNow = useCallback(() => {
     const ctx = setupCanvas(overlayRef.current);
@@ -210,7 +255,7 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
     const tick = () => {
       const g = gestureRef.current;
       if (!g || g.kind !== "note") {
-        const next = followPlayhead(vpRef.current, player.currentTime(), propsRef.current.analysis.durationSec, layout);
+        const next = followPlayhead(vpRef.current, player.currentTime(), durOf(), layout);
         if (next !== vpRef.current) setVp(next);
       }
       drawOverlayNow();
@@ -228,7 +273,7 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       const x = e.clientX - rect.left;
-      const dur = propsRef.current.analysis.durationSec;
+      const dur = durOf();
       if (e.ctrlKey || e.metaKey) {
         const factor = Math.exp(-e.deltaY * 0.0022);
         setVp((v) => zoomHorizontal(v, factor, Math.max(layout.gridLeft, x), dur, layout));
@@ -251,11 +296,11 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
 
   const hitAt = (x: number, y: number) => {
     const p = propsRef.current;
-    return hitTestNotes(x, y, p.analysis.notes, profiles, p.analysis.hopSec, vpRef.current, layout, (i) => p.overrides?.get(i) ?? p.analysis.notes[i].target);
+    return hitTestNotes(x, y, p.analysis.notes, profiles, p.analysis.hopSec, localVp(vpRef.current, offRef.current), layout, (i) => p.overrides?.get(i) ?? p.analysis.notes[i].target);
   };
 
   const seekTo = (x: number) => {
-    const sec = Math.max(0, Math.min(propsRef.current.analysis.durationSec, xToTime(x, vpRef.current, layout)));
+    const sec = Math.max(0, Math.min(durOf(), xToTime(x, vpRef.current, layout)));
     propsRef.current.onSeek(sec);
   };
 
@@ -272,7 +317,7 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
       }
       const px = edgeScrollPx(lastPointerX.current, layout);
       if (px !== 0) {
-        const dur = propsRef.current.analysis.durationSec;
+        const dur = durOf();
         const next = clampScroll({ ...vpRef.current, scrollSec: vpRef.current.scrollSec + px / vpRef.current.pxPerSec }, dur, layout);
         vpRef.current = next;
         setVp(next);
@@ -359,7 +404,7 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
     if (g.kind === "marquee") {
       g.rect = { ...g.rect, x1: x, y1: y };
       setMarquee({ ...g.rect });
-      const inside = notesInRect(g.rect, p.analysis.notes, vpRef.current, layout);
+      const inside = notesInRect(g.rect, p.analysis.notes, localVp(vpRef.current, offRef.current), layout);
       const next = new Set(g.base);
       inside.forEach((i) => next.add(i));
       p.onSelect(next);
@@ -398,7 +443,7 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
     const { x, y } = localPoint(e);
     const hit = hitAt(x, y);
     if (!hit) return;
-    if (hit.zone === "top") propsRef.current.onSplit(hit.index, xToTime(x, vpRef.current, layout));
+    if (hit.zone === "top") propsRef.current.onSplit(hit.index, xToTime(x, localVp(vpRef.current, offRef.current), layout));
     else propsRef.current.onSnapNote(hit.index);
   };
 
@@ -414,6 +459,9 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
         ref={overlayRef}
         data-testid="autotune-editor"
         data-scroll-sec={vp.scrollSec}
+        data-track={trackId}
+        data-time-offset={timeOffsetSec}
+        data-ghosts={(ghosts ?? []).map((g) => g.id).join(",")}
         className="absolute inset-0 rounded-xl touch-none"
         style={{ width: layout.width, height: layout.height }}
         onPointerDown={handlePointerDown}
@@ -425,3 +473,18 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
     </div>
   );
 });
+
+function timelineDuration(p: Pick<NoteCanvasProps, "analysis" | "timeOffsetSec" | "timelineDurationSec">): number {
+  return Math.max(p.timelineDurationSec ?? 0, p.analysis.durationSec + (p.timeOffsetSec ?? 0));
+}
+
+/** Fit on the edited track's notes, placed on the shared timeline. */
+function fitFor(
+  p: Pick<NoteCanvasProps, "analysis" | "timeOffsetSec" | "timelineDurationSec">,
+  layout: ReturnType<typeof computeLayout>,
+  windowSec?: number
+): Viewport {
+  const off = p.timeOffsetSec ?? 0;
+  const notes = off === 0 ? p.analysis.notes : p.analysis.notes.map((n) => ({ ...n, startSec: n.startSec + off, endSec: n.endSec + off }));
+  return fitViewport(notes, timelineDuration(p), layout, windowSec);
+}

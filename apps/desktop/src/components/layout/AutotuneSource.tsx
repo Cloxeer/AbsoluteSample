@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import clsx from "clsx";
 import { UploadCloud } from "lucide-react";
 import { Surface } from "@/components/neumorphic/Surface";
@@ -36,8 +36,10 @@ export interface AutotuneSourceValue {
 export interface AutotuneSourceProps {
   instruments: InstrumentStem[] | null | undefined;
   samples: Sample[];
-  value: AutotuneSourceValue | null;
-  onChange: (value: AutotuneSourceValue) => void;
+  /** Called with every file dropped/chosen at once (lead first), or a single song stem/sample. */
+  onAdd: (values: AutotuneSourceValue[]) => void;
+  /** At least one track is open: the drop zone invites more takes. */
+  hasTracks?: boolean;
   /** v11: current song id, so derived stems can be materialized as a real file when picked. */
   trackId?: string | null;
 }
@@ -71,11 +73,18 @@ export function buildSongSourceOptions(instruments: InstrumentStem[] | null | un
   return options;
 }
 
-async function pickTauriFile(): Promise<string | null> {
+async function pickTauriFiles(): Promise<string[]> {
   const { open } = await import("@tauri-apps/plugin-dialog");
-  const picked = await open({ filters: [{ name: "Audio", extensions: AUDIO_EXTENSIONS }] });
-  if (!picked || Array.isArray(picked)) return null;
-  return picked;
+  const picked = await open({ multiple: true, filters: [{ name: "Audio", extensions: AUDIO_EXTENSIONS }] });
+  if (!picked) return [];
+  return Array.isArray(picked) ? picked : [picked];
+}
+
+const fromPath = (path: string): AutotuneSourceValue => ({ path, label: path.split(/[\\/]/).pop() ?? path, kind: "own" });
+
+export interface AutotuneSourceHandle {
+  /** Opens the file chooser (multi-select). */
+  choose(): void;
 }
 
 /**
@@ -84,13 +93,16 @@ async function pickTauriFile(): Promise<string | null> {
  * pattern in components/layout/SourcePicker.tsx but resolves straight to an absolute path (Tauri)
  * or a file name + object URL (browser/mock) instead of importing a whole new track.
  */
-export function AutotuneSource({ instruments, samples, value, onChange, trackId }: AutotuneSourceProps) {
+export const AutotuneSource = forwardRef<AutotuneSourceHandle, AutotuneSourceProps>(function AutotuneSource(
+  { instruments, samples, onAdd, hasTracks = false, trackId },
+  ref
+) {
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const tauri = isTauri();
   const songOptions = buildSongSourceOptions(instruments, samples, trackId);
-  const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
+  const onAddRef = useRef(onAdd);
+  onAddRef.current = onAdd;
 
   useEffect(() => {
     if (!tauri) return;
@@ -101,11 +113,8 @@ export function AutotuneSource({ instruments, samples, value, onChange, trackId 
       const un = await getCurrentWebview().onDragDropEvent((event) => {
         if (event.payload.type === "drop") {
           setDragOver(false);
-          const path = event.payload.paths[0];
-          if (path) {
-            const label = path.split(/[\\/]/).pop() ?? path;
-            onChangeRef.current({ path, label, kind: "own" });
-          }
+          const paths = event.payload.paths;
+          if (paths.length > 0) onAddRef.current(paths.map(fromPath));
         } else if (event.payload.type === "over") {
           setDragOver(true);
         } else {
@@ -121,24 +130,26 @@ export function AutotuneSource({ instruments, samples, value, onChange, trackId 
     };
   }, [tauri]);
 
-  const chooseOwnFile = async (file: File) => {
-    const fileUrl = URL.createObjectURL(file);
-    onChange({ path: file.name, label: file.name, kind: "own", fileUrl, file });
+  const chooseOwnFiles = (files: File[]) => {
+    if (files.length === 0) return;
+    onAdd(files.map((file) => ({ path: file.name, label: file.name, kind: "own" as const, fileUrl: URL.createObjectURL(file), file })));
   };
 
   const handleChooseFile = async () => {
     if (tauri) {
-      const path = await pickTauriFile();
-      if (path) onChange({ path, label: path.split(/[\\/]/).pop() ?? path, kind: "own" });
+      const paths = await pickTauriFiles();
+      if (paths.length > 0) onAddRef.current(paths.map(fromPath));
     } else {
       fileInputRef.current?.click();
     }
   };
 
+  useImperativeHandle(ref, () => ({ choose: () => void handleChooseFile() }));
+
   const handleBrowserFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const files = Array.from(e.target.files ?? []);
     e.target.value = "";
-    if (file) void chooseOwnFile(file);
+    chooseOwnFiles(files);
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -152,8 +163,7 @@ export function AutotuneSource({ instruments, samples, value, onChange, trackId 
     e.preventDefault();
     setDragOver(false);
     if (tauri) return; // Tauri drops are handled via onDragDropEvent above.
-    const file = e.dataTransfer.files?.[0];
-    if (file) void chooseOwnFile(file);
+    chooseOwnFiles(Array.from(e.dataTransfer.files ?? []));
   };
 
   const handleSongPick = (path: string) => {
@@ -162,10 +172,10 @@ export function AutotuneSource({ instruments, samples, value, onChange, trackId 
     if (!opt) return;
     if (isVirtualPath(opt.path)) {
       // A derived stem has no file yet: materialize it, then hand over the real path.
-      void realPath(opt.path).then((real) => onChange({ path: real, label: opt.label, kind: "song", peaks: opt.peaks, durationSec: opt.durationSec }));
+      void realPath(opt.path).then((real) => onAddRef.current([{ path: real, label: opt.label, kind: "song", peaks: opt.peaks, durationSec: opt.durationSec }]));
       return;
     }
-    onChange({ path: opt.path, label: opt.label, kind: "song", peaks: opt.peaks, durationSec: opt.durationSec });
+    onAdd([{ path: opt.path, label: opt.label, kind: "song", peaks: opt.peaks, durationSec: opt.durationSec }]);
   };
 
   const grouped = songOptions.reduce<Record<string, SongSourceOption[]>>((acc, s) => {
@@ -175,7 +185,7 @@ export function AutotuneSource({ instruments, samples, value, onChange, trackId 
 
   return (
     <Surface variant="raised" className="p-4 flex flex-wrap items-center gap-3">
-      <input ref={fileInputRef} type="file" accept="audio/*" className="hidden" onChange={handleBrowserFileChange} />
+      <input ref={fileInputRef} type="file" accept="audio/*" multiple className="hidden" onChange={handleBrowserFileChange} />
 
       <div
         data-testid="autotune-dropzone"
@@ -189,7 +199,7 @@ export function AutotuneSource({ instruments, samples, value, onChange, trackId 
         )}
       >
         <UploadCloud size={16} className="text-muted shrink-0" />
-        <span className="text-xs text-muted">Drop your vocal here</span>
+        <span className="text-xs text-muted">{hasTracks ? "Drop more takes here" : "Drop your lead vocal and harmonies here"}</span>
         <Button
           type="button"
           onClick={(e) => {
@@ -197,7 +207,7 @@ export function AutotuneSource({ instruments, samples, value, onChange, trackId 
             void handleChooseFile();
           }}
         >
-          Choose file
+          {hasTracks ? "Add files" : "Choose files"}
         </Button>
       </div>
 
@@ -206,7 +216,7 @@ export function AutotuneSource({ instruments, samples, value, onChange, trackId 
       <label className="flex items-center gap-2 text-xs text-muted">
         Use a vocal from this song
         <select
-          value={value?.kind === "song" ? value.path : ""}
+          value=""
           onChange={(e) => handleSongPick(e.target.value)}
           className="bg-surface neu-surface-inset rounded-lg px-2 py-1.5 text-sm text-text min-w-[200px]"
           aria-label="Vocal from this song"
@@ -227,24 +237,10 @@ export function AutotuneSource({ instruments, samples, value, onChange, trackId 
       </label>
 
       {!tauri && (
-        <Button type="button" onClick={() => onChange({ path: DEMO_VOCAL_URL, label: "Demo vocal", kind: "demo" })}>
+        <Button type="button" onClick={() => onAdd([{ path: DEMO_VOCAL_URL, label: "Demo vocal", kind: "demo" }])}>
           Try a demo vocal
         </Button>
       )}
-
-      {value && (
-        <span className="flex items-center gap-2 ml-auto text-xs">
-          <span className="text-text truncate max-w-[220px]">{value.label}</span>
-          <span
-            className={clsx(
-              "px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wide",
-              value.kind === "song" ? "bg-cyan-500/20 text-cyan-300" : "bg-accent/20 text-accent"
-            )}
-          >
-            {value.kind === "own" ? "Your file" : value.kind === "demo" ? "Demo" : "From song"}
-          </span>
-        </span>
-      )}
     </Surface>
   );
-}
+});

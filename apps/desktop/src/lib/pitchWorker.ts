@@ -34,11 +34,17 @@ function noteMid(i: number): number | null {
 }
 
 function renderSpans(s: PitchSession, spans: [number, number][]): AudioPatch[] {
-  return mergeSpans(spans).map(([a, b]) => ({ startSec: a, samples: s.render(a, b) }));
+  const nch = s.channelCount();
+  return mergeSpans(spans).map(([a, b]) => ({
+    startSec: a,
+    samples: s.render(a, b),
+    // The original channels (e.g. stereo), rendered with the same shift map as the mono analysis.
+    ...(nch > 0 ? { channels: Array.from({ length: nch }, (_, c) => s.renderChannel(c, a, b)) } : {}),
+  }));
 }
 
 function transfers(patches: AudioPatch[]): Transferable[] {
-  return patches.map((p) => p.samples.buffer as ArrayBuffer);
+  return patches.flatMap((p) => [p.samples.buffer as ArrayBuffer, ...(p.channels ?? []).map((c) => c.buffer as ArrayBuffer)]);
 }
 
 async function handle(req: PitchWorkerRequest): Promise<{ result: unknown; transfer: Transferable[] }> {
@@ -48,6 +54,9 @@ async function handle(req: PitchWorkerRequest): Promise<{ result: unknown; trans
     session?.free();
     session = null;
     session = new PitchSession(req.samples, req.sampleRate);
+    if (req.channels && req.channels.length > 0 && !session.setChannels(req.channels[0], req.channels[1] ?? null)) {
+      throw new Error("Channel lengths do not match the audio");
+    }
     return { result: readAnalysis(session), transfer: [] };
   }
   const s = session;
@@ -83,6 +92,13 @@ async function handle(req: PitchWorkerRequest): Promise<{ result: unknown; trans
     case "renderAll": {
       const samples = s.renderAll();
       return { result: samples, transfer: [samples.buffer as ArrayBuffer] };
+    }
+    case "renderAllChannels": {
+      // End past the last sample: the engine clamps to the exact input length.
+      const end = (analysis?.durationSec ?? 0) + 1;
+      const nch = s.channelCount();
+      const chans = nch > 0 ? Array.from({ length: nch }, (_, c) => s.renderChannel(c, 0, end)) : [s.renderAll()];
+      return { result: chans, transfer: chans.map((c) => c.buffer as ArrayBuffer) };
     }
     default:
       throw new Error("Unknown request");

@@ -41,6 +41,10 @@ function passArrayF32ToWasm0(arg, malloc) {
     return ptr;
 }
 
+function isLikeNone(x) {
+    return x === undefined || x === null;
+}
+
 const PitchSessionFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_pitchsession_free(ptr >>> 0, 1));
@@ -77,6 +81,20 @@ export class PitchSession {
         return ret !== 0;
     }
     /**
+     * Attach original channels (e.g. stereo); returns false if a length differs.
+     * @param {Float32Array} left
+     * @param {Float32Array | null} [right]
+     * @returns {boolean}
+     */
+    setChannels(left, right) {
+        const ptr0 = passArrayF32ToWasm0(left, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(right) ? 0 : passArrayF32ToWasm0(right, wasm.__wbindgen_malloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.pitchsession_setChannels(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        return ret !== 0;
+    }
+    /**
      * @returns {string}
      */
     analysisJson() {
@@ -92,12 +110,31 @@ export class PitchSession {
         }
     }
     /**
+     * @returns {number}
+     */
+    channelCount() {
+        const ret = wasm.pitchsession_channelCount(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * [start, end] seconds of the phrase containing `sec`.
      * @param {number} sec
      * @returns {Float32Array}
      */
     phraseBounds(sec) {
         const ret = wasm.pitchsession_phraseBounds(this.__wbg_ptr, sec);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @param {number} ch
+     * @param {number} start_sec
+     * @param {number} end_sec
+     * @returns {Float32Array}
+     */
+    renderChannel(ch, start_sec, end_sec) {
+        const ret = wasm.pitchsession_renderChannel(this.__wbg_ptr, ch, start_sec, end_sec);
         var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
         return v1;

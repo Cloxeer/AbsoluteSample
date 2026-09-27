@@ -176,3 +176,26 @@ fn retuning_adds_no_clicks_or_pops() {
         assert_eq!(bad, 0, "offset {off}: {bad} click samples");
     }
 }
+
+/// Stereo: each channel is rendered with the same epochs/shift map, so rendering L and R and
+/// averaging them equals rendering the mono mix (PSOLA is linear in the signal), and an untouched
+/// channel stays bit-identical.
+#[test]
+fn stereo_channels_render_consistently_with_the_mono_analysis() {
+    let mono = test_signal(false);
+    let left: Vec<f32> = mono.iter().map(|v| v * 1.2).collect();
+    let right: Vec<f32> = mono.iter().map(|v| v * 0.8).collect();
+    let mut s = Session::new(mono.clone(), SR);
+    assert!(s.set_channels(vec![left.clone(), right.clone()]));
+    assert!(!s.set_channels(vec![left[..10].to_vec()]), "length mismatch must be refused");
+    assert_eq!(s.channel_count(), 2);
+    assert_eq!(s.render_channel(0, 0.0, 3.0), left, "untouched channel must be bit-identical");
+    let idx = s.notes().iter().position(|n| n.center < 58.0).unwrap();
+    s.set_note(idx, 60.0, 1.0, 1.0);
+    let l = s.render_channel(0, 0.0, 3.0);
+    let r = s.render_channel(1, 0.0, 3.0);
+    let m = s.render(0.0, 3.0);
+    assert_eq!(l.len(), mono.len());
+    let err = l.iter().zip(&r).zip(&m).map(|((a, b), c)| ((a + b) / 2.0 - c).abs()).fold(0.0f32, f32::max);
+    assert!(err < 1e-4, "stereo average differs from mono render by {err}");
+}

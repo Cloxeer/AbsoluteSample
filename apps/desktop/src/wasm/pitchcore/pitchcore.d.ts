@@ -4,11 +4,17 @@ export class PitchSession {
   free(): void;
   renderAll(): Float32Array;
   splitNote(idx: number, sec: number): boolean;
+  /**
+   * Attach original channels (e.g. stereo); returns false if a length differs.
+   */
+  setChannels(left: Float32Array, right?: Float32Array | null): boolean;
   analysisJson(): string;
+  channelCount(): number;
   /**
    * [start, end] seconds of the phrase containing `sec`.
    */
   phraseBounds(sec: number): Float32Array;
+  renderChannel(ch: number, start_sec: number, end_sec: number): Float32Array;
   mergeWithNext(idx: number): boolean;
   /**
    * Analyse mono samples. Takes a few hundred ms per minute of audio.
@@ -24,11 +30,14 @@ export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_pitchsession_free: (a: number, b: number) => void;
   readonly pitchsession_analysisJson: (a: number) => [number, number];
+  readonly pitchsession_channelCount: (a: number) => number;
   readonly pitchsession_mergeWithNext: (a: number, b: number) => number;
   readonly pitchsession_new: (a: number, b: number, c: number) => number;
   readonly pitchsession_phraseBounds: (a: number, b: number) => [number, number];
   readonly pitchsession_render: (a: number, b: number, c: number) => [number, number];
   readonly pitchsession_renderAll: (a: number) => [number, number];
+  readonly pitchsession_renderChannel: (a: number, b: number, c: number, d: number) => [number, number];
+  readonly pitchsession_setChannels: (a: number, b: number, c: number, d: number, e: number) => number;
   readonly pitchsession_setNote: (a: number, b: number, c: number, d: number, e: number) => number;
   readonly pitchsession_splitNote: (a: number, b: number, c: number) => number;
   readonly __wbindgen_export_0: WebAssembly.Table;

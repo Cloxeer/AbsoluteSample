@@ -15,6 +15,9 @@ use serde::Serialize;
 
 pub struct Session {
     x: Vec<f32>,
+    /// Optional original channels (e.g. stereo L/R). Analysis always uses the mono mix `x`;
+    /// every channel is re-rendered with the same epochs and shift map, so stereo stays intact.
+    channels: Vec<Vec<f32>>,
     sr: f32,
     midi: Vec<f32>,
     db: Vec<f32>,
@@ -49,7 +52,7 @@ impl Session {
         let n = notes::segment(&tr.midi, &tr.db);
         let key = notes::detect_key(&n);
         let runs = psola::find_epochs(&samples, sr, &tr.midi);
-        Session { x: samples, sr, midi: tr.midi, db: tr.db, notes: n, runs, key }
+        Session { x: samples, channels: Vec::new(), sr, midi: tr.midi, db: tr.db, notes: n, runs, key }
     }
 
     pub fn analysis_json(&self) -> String {
@@ -98,18 +101,43 @@ impl Session {
     /// Render [start_sec, end_sec) with the current edits. Untouched audio is copied
     /// bit-for-bit; only voiced phrases containing an edited note are resynthesised.
     pub fn render(&self, start_sec: f32, end_sec: f32) -> Vec<f32> {
+        self.render_signal(&self.x, start_sec, end_sec)
+    }
+
+    /// Attach the original channels (each the same length as the mono analysis signal).
+    pub fn set_channels(&mut self, channels: Vec<Vec<f32>>) -> bool {
+        if channels.iter().any(|c| c.len() != self.x.len()) {
+            return false;
+        }
+        self.channels = channels;
+        true
+    }
+
+    pub fn channel_count(&self) -> usize {
+        self.channels.len()
+    }
+
+    /// Like `render`, for channel `ch` of the attached channels (the mono mix if none).
+    pub fn render_channel(&self, ch: usize, start_sec: f32, end_sec: f32) -> Vec<f32> {
+        match self.channels.get(ch) {
+            Some(x) => self.render_signal(x, start_sec, end_sec),
+            None => self.render(start_sec, end_sec),
+        }
+    }
+
+    fn render_signal(&self, x: &[f32], start_sec: f32, end_sec: f32) -> Vec<f32> {
         let a = ((start_sec.max(0.0)) * self.sr) as usize;
-        let b = ((end_sec * self.sr) as usize).min(self.x.len());
+        let b = ((end_sec * self.sr) as usize).min(x.len());
         if b <= a {
             return Vec::new();
         }
-        let mut out = self.x[a..b].to_vec();
+        let mut out = x[a..b].to_vec();
         let shift = notes::shift_curve(&self.midi, &self.notes);
         for run in &self.runs {
             if run.end + (self.sr / 50.0) as usize <= a || run.start >= b + (self.sr / 50.0) as usize {
                 continue;
             }
-            psola::render_run(&self.x, self.sr, run, &shift, &mut out, a);
+            psola::render_run(x, self.sr, run, &shift, &mut out, a);
         }
         out
     }
@@ -186,6 +214,23 @@ mod wasm {
         }
         pub fn render(&self, start_sec: f32, end_sec: f32) -> Vec<f32> {
             self.0.render(start_sec, end_sec)
+        }
+        /// Attach original channels (e.g. stereo); returns false if a length differs.
+        #[wasm_bindgen(js_name = setChannels)]
+        pub fn set_channels(&mut self, left: Vec<f32>, right: Option<Vec<f32>>) -> bool {
+            let mut chs = vec![left];
+            if let Some(r) = right {
+                chs.push(r);
+            }
+            self.0.set_channels(chs)
+        }
+        #[wasm_bindgen(js_name = channelCount)]
+        pub fn channel_count(&self) -> usize {
+            self.0.channel_count()
+        }
+        #[wasm_bindgen(js_name = renderChannel)]
+        pub fn render_channel(&self, ch: usize, start_sec: f32, end_sec: f32) -> Vec<f32> {
+            self.0.render_channel(ch, start_sec, end_sec)
         }
         #[wasm_bindgen(js_name = renderAll)]
         pub fn render_all(&self) -> Vec<f32> {

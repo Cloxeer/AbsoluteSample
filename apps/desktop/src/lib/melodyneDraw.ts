@@ -20,6 +20,7 @@ import {
   xToTime,
   yToMidi,
   type Analysis,
+  type EngineNote,
   type EditorLayout,
   type Rect,
   type Viewport,
@@ -71,6 +72,46 @@ export interface SceneState {
   peakBlock: number;
   peakMax: number;
   sampleRate: number;
+  /** Where the edited track starts on the shared timeline (its notes and waveform shift right by this). */
+  timeOffsetSec?: number;
+  /** Base blob color of the edited track (defaults to the classic orange). */
+  color?: string;
+  /** Other tracks, drawn as faint outlines behind the edited notes. */
+  ghosts?: readonly GhostTrack[];
+}
+
+/** A non-edited track shown for reference (e.g. the lead behind a harmony). Geometry is precomputed. */
+export interface GhostTrack {
+  id: string;
+  color: string;
+  notes: readonly EngineNote[];
+  profiles: readonly Float32Array[];
+  hopSec: number;
+  offsetSec: number;
+  /** Muted / not soloed: drawn even lighter. */
+  dim: boolean;
+}
+
+/** Mixes a #rrggbb color toward white (amount > 0) or black (amount < 0). */
+export function shade(hex: string, amount: number): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return hex;
+  const v = parseInt(m[1], 16);
+  const target = amount >= 0 ? 255 : 0;
+  const a = Math.abs(amount);
+  const ch = (shift: number) => Math.round(((v >> shift) & 0xff) * (1 - a) + target * a);
+  return `#${[16, 8, 0].map((sh) => ch(sh).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function blobColors(color: string | undefined): { fill: string; top: string; edge: string } {
+  if (!color || color.toLowerCase() === COLORS.blob.toLowerCase()) return { fill: COLORS.blob, top: COLORS.blobTop, edge: COLORS.blobEdge };
+  return { fill: color, top: shade(color, 0.25), edge: shade(color, -0.35) };
+}
+
+/** Shifts the viewport so a track's local times map onto the shared timeline. */
+function localState(s: SceneState): SceneState {
+  const off = s.timeOffsetSec ?? 0;
+  return off === 0 ? s : { ...s, vp: { ...s.vp, scrollSec: s.vp.scrollSec - off } };
 }
 
 function displayTarget(s: SceneState, i: number): number {
@@ -90,10 +131,12 @@ export function drawScene(ctx: CanvasRenderingContext2D, s: SceneState): void {
   ctx.clip();
   drawRows(ctx, s);
   drawTimeLines(ctx, s, layout.gridTop, layout.height);
-  drawNotes(ctx, s);
+  const local = localState(s);
+  if (s.ghosts && s.ghosts.length > 0) drawGhosts(ctx, s, s.ghosts);
+  drawNotes(ctx, local);
   ctx.restore();
 
-  drawWaveLane(ctx, s);
+  drawWaveLane(ctx, s, local);
   drawTimeRuler(ctx, s);
   drawPitchRuler(ctx, s);
 
@@ -162,6 +205,7 @@ function drawNotes(ctx: CanvasRenderingContext2D, s: SceneState): void {
   }
 
   // Blobs
+  const bc = blobColors(s.color);
   for (const i of visible) {
     const n = notes[i];
     const prof = s.profiles[i];
@@ -184,13 +228,13 @@ function drawNotes(ctx: CanvasRenderingContext2D, s: SceneState): void {
     for (let j = frames.length - 1; j >= 0; j--) ctx.lineTo(xAt(frames[j]), cy + prof[frames[j]] * vp.rowPx);
     ctx.closePath();
     const grad = ctx.createLinearGradient(0, cy - maxHalf, 0, cy + maxHalf);
-    grad.addColorStop(0, sel ? COLORS.blobSelTop : COLORS.blobTop);
-    grad.addColorStop(0.55, sel ? COLORS.blobSel : COLORS.blob);
-    grad.addColorStop(1, sel ? COLORS.blobSel : COLORS.blob);
+    grad.addColorStop(0, sel ? COLORS.blobSelTop : bc.top);
+    grad.addColorStop(0.55, sel ? COLORS.blobSel : bc.fill);
+    grad.addColorStop(1, sel ? COLORS.blobSel : bc.fill);
     ctx.fillStyle = grad;
     ctx.fill();
     ctx.lineWidth = 1;
-    ctx.strokeStyle = sel ? COLORS.blobSelEdge : COLORS.blobEdge;
+    ctx.strokeStyle = sel ? COLORS.blobSelEdge : bc.edge;
     ctx.stroke();
   }
 
@@ -269,13 +313,54 @@ function drawNotes(ctx: CanvasRenderingContext2D, s: SceneState): void {
     ctx.fillStyle = "rgba(15,16,19,0.88)";
     roundRect(ctx, x, y, w, 17, 8);
     ctx.fill();
-    ctx.strokeStyle = s.selected.has(i) ? COLORS.blobSel : COLORS.blob;
+    ctx.strokeStyle = s.selected.has(i) ? COLORS.blobSel : bc.fill;
     ctx.lineWidth = 1;
     ctx.stroke();
     ctx.fillStyle = "#ffffff";
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
     ctx.fillText(text, x + 6, y + 9);
+  }
+}
+
+/** Other tracks' notes as faint outlines in their track color (the edited track draws on top). */
+function drawGhosts(ctx: CanvasRenderingContext2D, s: SceneState, ghosts: readonly GhostTrack[]): void {
+  const { layout } = s;
+  for (const g of ghosts) {
+    const vp = { ...s.vp, scrollSec: s.vp.scrollSec - g.offsetSec };
+    const tMin = xToTime(layout.gridLeft - 4, vp, layout);
+    const tMax = xToTime(layout.width + 4, vp, layout);
+    const stride = Math.max(1, Math.floor(2 / Math.max(1e-6, g.hopSec * vp.pxPerSec)));
+    ctx.save();
+    ctx.strokeStyle = g.color;
+    ctx.fillStyle = g.color;
+    ctx.lineWidth = 1.25;
+    if (g.dim) ctx.setLineDash([3, 3]);
+    for (let i = 0; i < g.notes.length; i++) {
+      const n = g.notes[i];
+      if (n.endSec < tMin || n.startSec > tMax) continue;
+      const prof = g.profiles[i];
+      if (!prof || prof.length === 0) continue;
+      const cy = midiToY(n.target, vp, layout);
+      const start = Math.floor(n.startFrame);
+      const xAt = (k: number) => timeToX((start + k) * g.hopSec, vp, layout);
+      ctx.beginPath();
+      let k = 0;
+      for (; k < prof.length; k += stride) {
+        if (k === 0) ctx.moveTo(xAt(k), cy - prof[k] * vp.rowPx);
+        else ctx.lineTo(xAt(k), cy - prof[k] * vp.rowPx);
+      }
+      const last = prof.length - 1;
+      ctx.lineTo(xAt(last), cy - prof[last] * vp.rowPx);
+      for (let j = last; j >= 0; j -= stride) ctx.lineTo(xAt(j), cy + prof[j] * vp.rowPx);
+      ctx.lineTo(xAt(0), cy + prof[0] * vp.rowPx);
+      ctx.closePath();
+      ctx.globalAlpha = g.dim ? 0.04 : 0.1;
+      ctx.fill();
+      ctx.globalAlpha = g.dim ? 0.3 : 0.7;
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 }
 
@@ -309,8 +394,9 @@ function strokeCurve(
   ctx.stroke();
 }
 
-function drawWaveLane(ctx: CanvasRenderingContext2D, s: SceneState): void {
-  const { layout, vp } = s;
+function drawWaveLane(ctx: CanvasRenderingContext2D, s: SceneState, local: SceneState = s): void {
+  const { layout } = s;
+  const vp = local.vp;
   const top = layout.waveTop;
   const h = layout.waveHeight;
   ctx.fillStyle = COLORS.waveBg;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import { Check, Download, Maximize2, Merge, Redo2, RotateCcw, Undo2, Wand2, ZoomIn, ZoomOut } from "lucide-react";
 import { Surface } from "@/components/neumorphic/Surface";
@@ -6,25 +6,28 @@ import { Button } from "@/components/neumorphic/Button";
 import { InfoTip } from "@/components/neumorphic/InfoTip";
 import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { Slider } from "@/components/neumorphic/Slider";
-import { AutotuneSource, type AutotuneSourceValue } from "@/components/layout/AutotuneSource";
-import { NoteCanvas, type NoteCanvasHandle } from "@/components/autotune/NoteCanvas";
+import { AutotuneSource, type AutotuneSourceHandle, type AutotuneSourceValue } from "@/components/layout/AutotuneSource";
+import { NoteCanvas, profilesFor, type NoteCanvasHandle } from "@/components/autotune/NoteCanvas";
+import { TrackList, type AlignNote } from "@/components/autotune/TrackList";
+import { useAutotuneTracks, type AutotuneDeps, type SavedExport, type TuneTrack } from "@/hooks/useAutotuneTracks";
 import { backend } from "@/lib/backend";
 import { isTauri } from "@/lib/mediaUrl";
 import { samplePlayer } from "@/lib/samplePlayer";
 import { mixEngine } from "@/lib/mixEngine";
+import { autotunedName, decodeTrack, type DecodedTrack } from "@/lib/audioFormat";
+import { estimateOffset } from "@/lib/alignment";
+import { detectKeyAcross, intervalTo, leadNoteAt } from "@/lib/harmony";
+import type { GhostTrack } from "@/lib/melodyneDraw";
 import {
   noteAtTime,
   allowedPitchClasses,
   applyNoteParams,
-  computePeaks,
   correctPitch,
-  encodeWav16,
   formatCents,
   keyLabel,
   nearestAllowed,
   parseMode,
   parseTonic,
-  patchSamples,
   PEAK_BLOCK,
   PITCH_NAMES,
   pitchReadout,
@@ -32,25 +35,17 @@ import {
   scalePitchClasses,
   snapshotNotes,
   stepAllowed,
-  UndoStack,
-  updatePeaks,
   type Analysis,
-  type EngineNote,
   type NoteEdit,
   type NoteSnapshot,
   type ScaleMode,
   type SnapMode,
 } from "@/lib/melodyneEditor";
 import { createWorkerPitchEngine, restoreSnapshot, type EditResult, type PitchEngine } from "@/lib/pitchEngine";
-import { createTunePlayer, decodeToMono, type PlaySource, type TunePlayer } from "@/lib/tunePlayer";
+import { createMultiTrackPlayer, type PlaySource } from "@/lib/multiTrackPlayer";
 import type { InstrumentStem, Sample, TrackInfo } from "@/lib/types";
 
-/** Injectable dependencies (tests pass in-process fakes; jsdom has no Worker, wasm or Web Audio). */
-export interface AutotuneDeps {
-  createEngine: () => PitchEngine;
-  createPlayer: () => TunePlayer;
-  decode: (source: AutotuneSourceValue) => Promise<{ samples: Float32Array; sampleRate: number }>;
-}
+export type { AutotuneDeps } from "@/hooks/useAutotuneTracks";
 
 export interface AutotuneTabProps {
   track: TrackInfo | null;
@@ -61,8 +56,9 @@ export interface AutotuneTabProps {
 
 const URLISH = /^(\/|\.\/|https?:|blob:|data:|asset:)/i;
 
-/** Reads the chosen source's bytes without any Python backend: the dropped File, a URL, or a desktop path. */
-async function defaultDecode(src: AutotuneSourceValue): Promise<{ samples: Float32Array; sampleRate: number }> {
+/** Reads the chosen source's bytes without any Python backend (the dropped File, a URL, or a desktop
+ * path) and decodes it at its native rate, keeping its channels so exports match the original. */
+async function defaultDecode(src: AutotuneSourceValue): Promise<DecodedTrack> {
   let bytes: ArrayBuffer;
   if (src.file) {
     bytes = await src.file.arrayBuffer();
@@ -75,16 +71,15 @@ async function defaultDecode(src: AutotuneSourceValue): Promise<{ samples: Float
     if (!res.ok) throw new Error(`Could not load the audio (HTTP ${res.status}).`);
     bytes = await res.arrayBuffer();
   }
-  return decodeToMono(bytes);
+  return decodeTrack(bytes, src.file?.name ?? src.path);
 }
 
 const DEFAULT_DEPS: AutotuneDeps = {
   createEngine: createWorkerPitchEngine,
-  createPlayer: createTunePlayer,
+  createPlayer: () => createMultiTrackPlayer(),
   decode: defaultDecode,
+  estimateOffset: (lead, other, sampleRate) => estimateOffset(lead, other, sampleRate),
 };
-
-type Status = "idle" | "decoding" | "analyzing" | "ready" | "error";
 
 const MODE_LABELS: Record<ScaleMode, string> = {
   major: "Major",
@@ -171,31 +166,22 @@ function SliderField({
 }
 
 /**
- * Melodyne-style note editor. The vocal is analysed and re-rendered entirely in the browser by the
- * pitchcore WebAssembly engine (in a Web Worker), so it behaves the same in the desktop app and on the web.
+ * Melodyne-style multitrack note editor: a lead vocal plus harmony takes, played together in time.
+ * Each take is analysed and re-rendered in the browser by its own pitchcore WebAssembly engine (in a
+ * Web Worker), so it behaves the same in the desktop app and on the web. The active track's notes are
+ * editable; the other tracks are drawn behind it as ghosts in their colors.
  */
 export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }: AutotuneTabProps) {
-  const deps = useMemo(() => ({ ...DEFAULT_DEPS, ...depsProp }), [depsProp]);
-  const depsRef = useRef(deps);
-  depsRef.current = deps;
+  const deps = useMemo<AutotuneDeps>(() => ({ ...DEFAULT_DEPS, ...depsProp }), [depsProp]);
+  const T = useAutotuneTracks(deps);
+  const { player, tracks } = T;
+  const TRef = useRef(T);
+  TRef.current = T;
 
-  const [player] = useState<TunePlayer>(() => deps.createPlayer());
-  const engineRef = useRef<PitchEngine | null>(null);
-  const getEngine = () => (engineRef.current ??= depsRef.current.createEngine());
-
-  const [source, setSource] = useState<AutotuneSourceValue | null>(null);
-  const [status, setStatus] = useState<Status>("idle");
-  const [error, setError] = useState<string | null>(null);
-  const [startedAt, setStartedAt] = useState(0);
-  const [elapsed, setElapsed] = useState(0);
-  const [audioSec, setAudioSec] = useState(0);
-  const [analyzeSec, setAnalyzeSec] = useState<number | null>(null);
-
-  const [analysis, setAnalysisState] = useState<Analysis | null>(null);
-  const analysisRef = useRef<Analysis | null>(null);
-  const [sampleRate, setSampleRate] = useState(44100);
-  const [sessionKey, setSessionKey] = useState("0");
-  const sessionRef = useRef(0);
+  const active = tracks.find((t) => t.id === T.activeId) ?? null;
+  const analysis = active?.status === "ready" ? active.analysis : null;
+  const lead = tracks.find((t) => t.isLead) ?? null;
+  const multi = tracks.length > 1;
 
   const [selected, setSelectedState] = useState<Set<number>>(() => new Set());
   const selectedRef = useRef(selected);
@@ -204,6 +190,8 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
   const [snap, setSnap] = useState<SnapMode>("scale");
   const [tonicPc, setTonicPc] = useState(0);
   const [mode, setMode] = useState<ScaleMode>("major");
+  const [keyManual, setKeyManual] = useState(false);
+  const [detected, setDetected] = useState<string | null>(null);
   const [centerPct, setCenterPct] = useState(90);
   const [driftPct, setDriftPct] = useState(70);
 
@@ -212,36 +200,31 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
   /** Index of the note the info panel shows (selection, else the note at the playhead). */
   const focusRef = useRef<number | null>(null);
   const [abSource, setAbSource] = useState<PlaySource>("tuned");
-  const [busy, setBusy] = useState(0);
-  const [exporting, setExporting] = useState(false);
-  /** Last export: where it went (desktop path; null on web) and which tuning it captured. */
-  const [saved, setSaved] = useState<{ name: string; path: string | null; forAnalysis: Analysis | null } | null>(null);
+  const [exporting, setExporting] = useState<"track" | "all" | null>(null);
+  /** Files written by the last export (shown as a confirmation). */
+  const [lastSaved, setLastSaved] = useState<SavedExport[] | null>(null);
+  const [alignNotes, setAlignNotes] = useState<Record<string, AlignNote>>({});
+  const [now, setNow] = useState(() => performance.now());
 
-  const outputRef = useRef<Float32Array>(new Float32Array(0));
-  const peaksRef = useRef<Float32Array | null>(null);
-  const [peakMax, setPeakMax] = useState(1);
-  const [peaksVersion, setPeaksVersion] = useState(0);
-
-  const undoRef = useRef(new UndoStack<NoteSnapshot[]>());
-  const [, setUndoVersion] = useState(0);
-  const bumpUndo = () => setUndoVersion((v) => v + 1);
-
-  const chainRef = useRef<Promise<unknown>>(Promise.resolve());
-  const liveRef = useRef<{ running: boolean; pending: NoteEdit[] | null; onDone?: (r: EditResult) => void; epoch: number }>({
+  const liveRef = useRef<{ running: boolean; pending: NoteEdit[] | null; onDone?: (r: EditResult) => void; epoch: number; trackId: string | null }>({
     running: false,
     pending: null,
     epoch: 0,
+    trackId: null,
   });
   const dragBeforeRef = useRef<NoteSnapshot[] | null>(null);
   const canvasRef = useRef<NoteCanvasHandle>(null);
+  const sourceRef = useRef<AutotuneSourceHandle>(null);
 
-  const setAnalysis = (a: Analysis | null) => {
-    analysisRef.current = a;
-    setAnalysisState(a);
-  };
   const setSelected = (s: Set<number>) => {
     selectedRef.current = s;
     setSelectedState(s);
+  };
+  /** The edited track's id and current analysis (read at call time, never stale). */
+  const aid = () => TRef.current.activeRef.current;
+  const curAnalysis = (id = aid()): Analysis | null => {
+    const t = TRef.current.getTrack(id);
+    return t?.status === "ready" ? t.analysis : null;
   };
 
   // ---- Lifecycle ----
@@ -262,115 +245,55 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
     return () => window.clearInterval(id);
   }, [playing, player]);
 
-  useEffect(
-    () => () => {
-      player.dispose();
-      engineRef.current?.dispose();
-      engineRef.current = null;
-    },
-    [player]
-  );
-
-  const loading = status === "decoding" || status === "analyzing";
+  // Progress bars of tracks still loading.
+  const anyLoading = tracks.some((t) => t.status === "queued" || t.status === "decoding" || t.status === "analyzing");
   useEffect(() => {
-    if (!loading) return;
-    const id = window.setInterval(() => setElapsed((performance.now() - startedAt) / 1000), 100);
+    if (!anyLoading) return;
+    const id = window.setInterval(() => setNow(performance.now()), 100);
     return () => window.clearInterval(id);
-  }, [loading, startedAt]);
+  }, [anyLoading]);
 
-  // Load + analyse whenever a source is picked.
+  // A different track is being edited: its own selection starts empty.
   useEffect(() => {
-    if (!source) return;
-    const token = ++sessionRef.current;
-    const t0 = performance.now();
-    player.pause();
-    setAnalysis(null);
     setSelected(new Set());
     setOverrides(null);
-    undoRef.current.clear();
-    bumpUndo();
-    setError(null);
-    setAnalyzeSec(null);
-    setStartedAt(t0);
-    setElapsed(0);
-    setStatus("decoding");
-    void (async () => {
-      try {
-        const { samples: mono, sampleRate: sr } = await depsRef.current.decode(source);
-        if (token !== sessionRef.current) return;
-        if (mono.length === 0) throw new Error("That file has no audio in it.");
-        setAudioSec(mono.length / sr);
-        setStatus("analyzing");
-        const a = await getEngine().load(mono, sr);
-        if (token !== sessionRef.current) return;
-        outputRef.current = new Float32Array(mono);
-        const peaks = computePeaks(outputRef.current, PEAK_BLOCK);
-        peaksRef.current = peaks;
-        let pm = 0;
-        for (const p of peaks) if (p > pm) pm = p;
-        setPeakMax(pm || 1);
-        setPeaksVersion((v) => v + 1);
-        player.load(mono, sr);
-        setSampleRate(sr);
-        if (a.key) {
-          setTonicPc(parseTonic(a.key.tonic));
-          setMode(parseMode(a.key.mode));
-        }
-        setAnalysis(a);
-        setSessionKey(String(token));
-        setAnalyzeSec((performance.now() - t0) / 1000);
-        setStatus("ready");
-      } catch (err) {
-        if (token !== sessionRef.current) return;
-        setError(err instanceof Error ? err.message : String(err));
-        setStatus("error");
-      }
-    })();
+    const L = liveRef.current;
+    L.epoch++;
+    L.pending = null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source]);
+  }, [T.activeId]);
 
-  // ---- Engine operations (strictly serialised) ----
-  const applyResult = (r: EditResult, withAnalysis: boolean) => {
-    const out = outputRef.current;
-    const peaks = peaksRef.current;
-    for (const p of r.patches) {
-      const start = Math.round(p.startSec * sampleRateRef.current);
-      const [a, b] = patchSamples(out, start, p.samples);
-      if (peaks) updatePeaks(peaks, out, PEAK_BLOCK, a, b);
-      player.patch(start, p.samples);
+  // Default key: over every ready track (lead counts double), until the user picks one.
+  const readySig = tracks
+    .filter((t) => t.status === "ready")
+    .map((t) => `${t.id}${t.isLead ? "*" : ""}`)
+    .join(",");
+  useEffect(() => {
+    const ready = TRef.current.tracksRef.current.filter((t) => t.status === "ready" && t.analysis);
+    if (ready.length === 0) {
+      setDetected(null);
+      return;
     }
-    if (r.patches.length > 0) setPeaksVersion((v) => v + 1);
-    if (withAnalysis) setAnalysis(r.analysis);
-  };
-  const sampleRateRef = useRef(sampleRate);
-  sampleRateRef.current = sampleRate;
+    let est: { tonicPc: number; mode: ScaleMode } | null = null;
+    const only = ready.length === 1 ? ready[0].analysis : null;
+    if (only?.key) {
+      // One take: the engine's key uses the whole pitch contour, which is more reliable.
+      est = { tonicPc: parseTonic(only.key.tonic), mode: parseMode(only.key.mode) };
+    } else {
+      const k = detectKeyAcross(ready.map((t) => ({ notes: (t.analysis as Analysis).notes, weight: t.isLead ? 2 : 1 })));
+      if (k) est = { tonicPc: k.tonicPc, mode: k.mode };
+    }
+    setDetected(est ? keyLabel({ tonic: est.tonicPc, mode: est.mode, confidence: 1 }) : null);
+    if (est && !keyManual) {
+      setTonicPc(est.tonicPc);
+      setMode(est.mode);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readySig]);
 
-  function enqueue<T>(fn: (engine: PitchEngine) => Promise<T>): Promise<T> {
-    const p = chainRef.current.then(() => fn(getEngine()));
-    chainRef.current = p.catch(() => undefined);
-    return p;
-  }
-
-  const runOp = (
-    task: (engine: PitchEngine, current: Analysis) => Promise<EditResult>,
-    opts: { applyAnalysis?: () => boolean; after?: (r: EditResult) => void } = {}
-  ): Promise<void> => {
-    const session = sessionRef.current;
-    setBusy((b) => b + 1);
-    return enqueue(async (engine) => {
-      const cur = analysisRef.current;
-      if (!cur || session !== sessionRef.current) return;
-      const r = await task(engine, cur);
-      if (session !== sessionRef.current) return;
-      applyResult(r, opts.applyAnalysis ? opts.applyAnalysis() : true);
-      opts.after?.(r);
-    })
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-      .finally(() => setBusy((b) => b - 1));
-  };
-
+  // ---- Engine operations ----
   /** Latest-wins live update (drag steps, slider moves): intermediate states are skipped when busy. */
-  const pushLive = (edits: NoteEdit[], onDone?: (r: EditResult) => void) => {
+  const pushLive = (id: string, edits: NoteEdit[], onDone?: (r: EditResult) => void) => {
     const L = liveRef.current;
     if (L.running) {
       L.pending = edits;
@@ -378,46 +301,47 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
       return;
     }
     L.running = true;
+    L.trackId = id;
     const epoch = L.epoch;
-    void runOp((e) => e.setNotes(edits), {
-      applyAnalysis: () => L.pending === null && epoch === L.epoch,
-      after: (r) => {
-        if (epoch === L.epoch) onDone?.(r);
-      },
-    }).finally(() => {
-      L.running = false;
-      const next = L.pending;
-      const nextDone = L.onDone;
-      L.pending = null;
-      if (next) pushLive(next, nextDone);
-    });
+    void TRef.current
+      .runOp(id, (e) => e.setNotes(edits), {
+        applyAnalysis: () => L.pending === null && epoch === L.epoch,
+        after: (r) => {
+          if (epoch === L.epoch) onDone?.(r);
+        },
+      })
+      .finally(() => {
+        L.running = false;
+        const next = L.pending;
+        const nextDone = L.onDone;
+        L.pending = null;
+        if (next && epoch === L.epoch) pushLive(id, next, nextDone);
+      });
   };
 
-  const setLocalNotes = (notes: EngineNote[]) => {
-    const cur = analysisRef.current;
-    if (cur) setAnalysis({ ...cur, notes });
-  };
-
-  const audition = (index: number, a: Analysis | null = analysisRef.current) => {
+  const audition = (id: string, index: number, a: Analysis | null = curAnalysis(id)) => {
     const n = a?.notes[index];
-    if (!n || player.isPlaying()) return;
-    player.audition(n.startSec, Math.min(n.endSec, n.startSec + 1.6));
+    const t = TRef.current.getTrack(id);
+    if (!n || !t || player.isPlaying()) return;
+    player.audition(id, n.startSec + t.offsetSec, Math.min(n.endSec, n.startSec + 1.6) + t.offsetSec);
   };
 
-  /** Pushes an undo step, updates the notes optimistically and sends the edits to the engine. */
-  const commitEdits = (edits: NoteEdit[], opts: { undoKey?: string; audition?: number; live?: boolean } = {}) => {
-    const cur = analysisRef.current;
-    if (!cur || edits.length === 0) return;
-    undoRef.current.push(snapshotNotes(cur.notes), opts.undoKey);
-    bumpUndo();
-    setLocalNotes(applyNoteParams(cur.notes, edits));
-    const done = opts.audition !== undefined ? (r: EditResult) => audition(opts.audition as number, r.analysis) : undefined;
-    if (opts.live) pushLive(edits, done);
-    else void runOp((e) => e.setNotes(edits), { after: done });
+  /** Pushes an undo step, updates the notes optimistically and sends the edits to the track's engine. */
+  const commitEdits = (edits: NoteEdit[], opts: { undoKey?: string; audition?: number; live?: boolean; trackId?: string } = {}) => {
+    const id = opts.trackId ?? aid();
+    const cur = curAnalysis(id);
+    if (!id || !cur || edits.length === 0) return;
+    const T0 = TRef.current;
+    T0.undoOf(id)?.push(snapshotNotes(cur.notes), opts.undoKey);
+    T0.bumpUndo(id);
+    T0.setLocalNotes(id, applyNoteParams(cur.notes, edits));
+    const done = opts.audition !== undefined ? (r: EditResult) => audition(id, opts.audition as number, r.analysis) : undefined;
+    if (opts.live) pushLive(id, edits, done);
+    else void T0.runOp(id, (e) => e.setNotes(edits), { after: done });
   };
 
   const noteEdit = (i: number, patch: Partial<NoteEdit>): NoteEdit | null => {
-    const n = analysisRef.current?.notes[i];
+    const n = curAnalysis()?.notes[i];
     if (!n) return null;
     return { index: i, target: n.target, drift: n.drift, modulation: n.modulation, ...patch };
   };
@@ -430,7 +354,7 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
 
   // ---- Transport ----
   const togglePlay = () => {
-    if (!analysisRef.current) return;
+    if (!TRef.current.tracksRef.current.some((t) => t.status === "ready")) return;
     if (player.isPlaying()) {
       player.pause();
       return;
@@ -440,23 +364,26 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
     player.play();
   };
 
-  // ---- Note actions ----
+  // ---- Note actions (active track) ----
   const handleSelect = (s: Set<number>) => setSelected(s);
 
   const handleDragStart = () => {
-    const cur = analysisRef.current;
+    const cur = curAnalysis();
     dragBeforeRef.current = cur ? snapshotNotes(cur.notes) : null;
   };
 
   const handleDragUpdate = (targets: Map<number, number>, primary: number) => {
+    const id = aid();
+    if (!id) return;
     setOverrides(new Map(targets));
     const edits = [...targets].map(([i, t]) => noteEdit(i, { target: t })).filter((e): e is NoteEdit => e !== null);
-    pushLive(edits, (r) => audition(primary, r.analysis));
+    pushLive(id, edits, (r) => audition(id, primary, r.analysis));
   };
 
   const handleDragEnd = (targets: Map<number, number> | null) => {
-    const cur = analysisRef.current;
-    if (!targets || !cur) {
+    const id = aid();
+    const cur = curAnalysis();
+    if (!targets || !cur || !id) {
       setOverrides(null);
       return;
     }
@@ -464,50 +391,52 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
     L.epoch++;
     L.pending = null;
     const edits = [...targets].map(([i, t]) => noteEdit(i, { target: t })).filter((e): e is NoteEdit => e !== null);
-    undoRef.current.push(dragBeforeRef.current ?? snapshotNotes(cur.notes));
-    bumpUndo();
+    const T0 = TRef.current;
+    T0.undoOf(id)?.push(dragBeforeRef.current ?? snapshotNotes(cur.notes));
+    T0.bumpUndo(id);
     dragBeforeRef.current = null;
-    setLocalNotes(applyNoteParams(cur.notes, edits));
+    T0.setLocalNotes(id, applyNoteParams(cur.notes, edits));
     setOverrides(null);
-    void runOp((e) => e.setNotes(edits));
+    void T0.runOp(id, (e) => e.setNotes(edits));
   };
 
   const handleSnapNote = (i: number) => {
-    const n = analysisRef.current?.notes[i];
+    const n = curAnalysis()?.notes[i];
     if (!n) return;
     setSelected(new Set([i]));
     const e = noteEdit(i, { target: nearestAllowed(n.target, allowedRef.current) });
     if (e) commitEdits([e], { audition: i });
   };
 
-  const handleSplit = (i: number, sec: number) => {
-    const cur = analysisRef.current;
-    if (!cur) return;
-    undoRef.current.push(snapshotNotes(cur.notes));
-    bumpUndo();
-    setSelected(new Set([i]));
-    void runOp((e) => e.split(i, sec));
+  const structural = (task: (e: PitchEngine) => Promise<EditResult>, select: number) => {
+    const id = aid();
+    const cur = curAnalysis();
+    if (!id || !cur) return;
+    const T0 = TRef.current;
+    T0.undoOf(id)?.push(snapshotNotes(cur.notes));
+    T0.bumpUndo(id);
+    setSelected(new Set([select]));
+    void T0.runOp(id, task);
   };
 
+  const handleSplit = (i: number, sec: number) => structural((e) => e.split(i, sec), i);
+
   const handleMerge = () => {
-    const cur = analysisRef.current;
+    const cur = curAnalysis();
     if (!cur || selectedRef.current.size === 0) return;
     const i = Math.min(...selectedRef.current);
     if (i + 1 >= cur.notes.length) return;
-    undoRef.current.push(snapshotNotes(cur.notes));
-    bumpUndo();
-    setSelected(new Set([i]));
-    void runOp((e) => e.merge(i));
+    structural((e) => e.merge(i), i);
   };
 
   const targetIndices = () => {
-    const cur = analysisRef.current;
+    const cur = curAnalysis();
     if (!cur) return [];
     return selectedRef.current.size > 0 ? [...selectedRef.current].sort((a, b) => a - b) : cur.notes.map((_, i) => i);
   };
 
   const handleReset = () => {
-    const cur = analysisRef.current;
+    const cur = curAnalysis();
     if (!cur) return;
     const edits = targetIndices()
       .map((i) => noteEdit(i, { target: cur.notes[i].center, drift: 1, modulation: 1 }))
@@ -515,30 +444,31 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
     commitEdits(edits);
   };
 
-  const applyCorrection = (cPct: number, dPct: number, pcs: readonly number[], indices = targetIndices()) => {
-    const cur = analysisRef.current;
+  const applyCorrection = (cPct: number, dPct: number, pcs: readonly number[]) => {
+    const cur = curAnalysis();
     if (!cur) return;
-    const edits = indices.map((i) => ({ index: i, ...correctPitch(cur.notes[i], cPct / 100, dPct / 100, pcs) }));
+    const edits = targetIndices().map((i) => ({ index: i, ...correctPitch(cur.notes[i], cPct / 100, dPct / 100, pcs) }));
     commitEdits(edits);
   };
 
+  /** Correct Pitch at 100% / 50% on every note of every ready track that is included. */
   const handleTuneAll = () => {
-    const cur = analysisRef.current;
-    if (!cur) return;
-    applyCorrection(100, 50, scalePcs, cur.notes.map((_, i) => i));
+    for (const t of TRef.current.tracksRef.current) {
+      if (t.status !== "ready" || !t.analysis || !t.includeInTuneAll) continue;
+      const edits = t.analysis.notes.map((n, i) => ({ index: i, ...correctPitch(n, 1, 0.5, scalePcs) }));
+      commitEdits(edits, { trackId: t.id });
+    }
   };
 
   const handleParamSlider = (param: "modulation" | "drift") => (pct: number) => {
     // Acts on the selection, or on the note at the playhead when nothing is selected.
     const idx = selectedRef.current.size > 0 ? [...selectedRef.current] : focusRef.current !== null ? [focusRef.current] : [];
-    const edits = idx
-      .map((i) => noteEdit(i, { [param]: pct / 100 }))
-      .filter((e): e is NoteEdit => e !== null);
+    const edits = idx.map((i) => noteEdit(i, { [param]: pct / 100 })).filter((e): e is NoteEdit => e !== null);
     commitEdits(edits, { undoKey: param, live: true });
   };
 
   const stepSelected = (dir: 1 | -1) => {
-    const cur = analysisRef.current;
+    const cur = curAnalysis();
     if (!cur || selectedRef.current.size === 0) return;
     const idx = [...selectedRef.current].sort((a, b) => a - b);
     const edits = idx
@@ -548,22 +478,45 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
   };
 
   const handleUndo = (redo = false) => {
-    const cur = analysisRef.current;
-    if (!cur) return;
+    const id = aid();
+    const cur = curAnalysis();
+    const stack = id ? TRef.current.undoOf(id) : null;
+    if (!id || !cur || !stack) return;
     const snapNow = snapshotNotes(cur.notes);
-    const target = redo ? undoRef.current.redo(snapNow) : undoRef.current.undo(snapNow);
-    bumpUndo();
+    const target = redo ? stack.redo(snapNow) : stack.undo(snapNow);
+    TRef.current.bumpUndo(id);
     if (!target) return;
     setSelected(new Set());
-    void runOp((e, current) => restoreSnapshot(e, current, target));
+    void TRef.current.runOp(id, (e, current) => restoreSnapshot(e, current, target));
+  };
+
+  // ---- Tracks ----
+  const handleAlign = (id: string) => {
+    const r = TRef.current.alignToLead(id);
+    setAlignNotes((m) => ({ ...m, [id]: r }));
+  };
+  const handleNudge = (id: string, delta: number) => {
+    const t = TRef.current.getTrack(id);
+    if (!t) return;
+    TRef.current.setOffset(id, t.offsetSec + delta);
+    setAlignNotes((m) => {
+      if (!(id in m)) return m;
+      const next = { ...m };
+      delete next[id];
+      return next;
+    });
+  };
+  const toggleMix = (which: "muted" | "solo") => {
+    const t = TRef.current.getTrack(aid());
+    if (t) TRef.current.setMix(t.id, { [which]: !t[which] });
   };
 
   // ---- Keyboard ----
-  const keyHandlersRef = useRef({ togglePlay, handleUndo, stepSelected });
-  keyHandlersRef.current = { togglePlay, handleUndo, stepSelected };
+  const keyHandlersRef = useRef({ togglePlay, handleUndo, stepSelected, toggleMix });
+  keyHandlersRef.current = { togglePlay, handleUndo, stepSelected, toggleMix };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!analysisRef.current) return;
+      if (!TRef.current.tracksRef.current.some((t) => t.status === "ready")) return;
       const t = e.target instanceof HTMLElement ? e.target : null;
       const tag = t?.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || t?.isContentEditable) return;
@@ -585,6 +538,8 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
       } else if (e.key === "Delete" || e.key === "Backspace") {
         // Deliberately non-destructive: notes are never deleted from a vocal.
         e.preventDefault();
+      } else if (!mod && !e.altKey && (key === "m" || key === "s")) {
+        h.toggleMix(key === "m" ? "muted" : "solo");
       }
     };
     window.addEventListener("keydown", onKey);
@@ -592,48 +547,164 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
   }, []);
 
   // ---- Export ----
-  const baseName = (source?.label ?? "vocal").replace(/\.[^.]+$/, "");
-  const exportName = `${baseName}-autotuned.wav`;
-  // The exact tuning that was last saved; the button stays "Saved" until the tuning changes, so
-  // repeated clicks can't pile up duplicate files.
-  const alreadySaved = saved !== null && saved.forAnalysis === analysis;
-  const handleDownload = async () => {
-    if (exporting || alreadySaved) return;
-    setExporting(true);
+  const isSaved = (t: TuneTrack) => t.saved !== null && t.saved.forAnalysis === t.analysis;
+  const readyTracks = tracks.filter((t) => t.status === "ready");
+  const unsaved = readyTracks.filter((t) => !isSaved(t));
+  const activeSaved = active !== null && isSaved(active);
+  const exportName = active ? autotunedName(active.name) : "vocal-autotuned.wav";
+
+  const saveTracks = async (ids: string[], kind: "track" | "all") => {
+    if (exporting || ids.length === 0) return;
+    setExporting(kind);
+    const done: SavedExport[] = [];
     try {
-      const forAnalysis = analysisRef.current;
-      const rendered = await enqueue((e) => e.renderAll());
-      const wav = encodeWav16(rendered, sampleRateRef.current);
-      const path = await backend.saveExport(exportName, new Uint8Array(wav));
-      setSaved({ name: path ? path.split(/[\\/]/).pop() ?? exportName : exportName, path, forAnalysis });
+      for (const id of ids) done.push(await TRef.current.exportTrack(id));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      TRef.current.setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setExporting(false);
+      if (done.length > 0) setLastSaved(done);
+      setExporting(null);
     }
   };
+  const handleDownload = () => {
+    if (active && !activeSaved) void saveTracks([active.id], "track");
+  };
+  const handleDownloadAll = () => void saveTracks(unsaved.map((t) => t.id), "all");
+
+  // ---- Timeline + ghosts ----
+  const timelineSec = useMemo(
+    () => Math.max(0, ...tracks.map((t) => t.offsetSec + (t.analysis?.durationSec ?? (t.frames > 0 ? t.frames / t.sampleRate : 0)))),
+    [tracks]
+  );
+  const ghostSig = tracks
+    .filter((t) => t.id !== active?.id && t.status === "ready")
+    .map((t) => t.id)
+    .join(",");
+  const ghostTracksRef = useRef<GhostTrack[]>([]);
+  const ghosts = useMemo(() => {
+    const anySolo = tracks.some((t) => t.solo);
+    const next: GhostTrack[] = tracks
+      .filter((t) => t.id !== active?.id && t.status === "ready" && t.analysis)
+      .map((t) => {
+        const a = t.analysis as Analysis;
+        return { id: t.id, color: t.color, notes: a.notes, profiles: profilesFor(a), hopSec: a.hopSec, offsetSec: t.offsetSec, dim: t.muted || (anySolo && !t.solo) };
+      });
+    // Keep the same array when nothing a ghost draws has changed (avoids needless scene redraws).
+    const prev = ghostTracksRef.current;
+    const same =
+      prev.length === next.length &&
+      prev.every((g, i) => {
+        const n = next[i];
+        return g.id === n.id && g.notes === n.notes && g.color === n.color && g.offsetSec === n.offsetSec && g.dim === n.dim;
+      });
+    if (!same) ghostTracksRef.current = next;
+    return ghostTracksRef.current;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tracks, active?.id, ghostSig]);
 
   // ---- Inspector values ----
   // The panel shows the selected note, or (with nothing selected) the note at the playhead.
-  const atPlayhead = selected.size === 0 && analysis ? noteAtTime(analysis.notes, playheadSec) : null;
+  const localPlayhead = playheadSec - (active?.offsetSec ?? 0);
+  const atPlayhead = selected.size === 0 && analysis ? noteAtTime(analysis.notes, localPlayhead) : null;
   const primary = selected.size > 0 ? Math.min(...selected) : atPlayhead?.index ?? null;
   focusRef.current = primary;
   const primaryNote = primary !== null ? analysis?.notes[primary] ?? null : null;
-  const primaryPitch = primaryNote && primary !== null ? overrides?.get(primary) ?? primaryNote.target : null;
+  const dragged = overrides !== null && overrides.size > 0;
+  const shownIndex = dragged && primary !== null && !overrides.has(primary) ? [...overrides.keys()][0] : primary;
+  const shownNote = shownIndex !== null ? analysis?.notes[shownIndex] ?? null : null;
+  const primaryPitch = shownNote && shownIndex !== null ? overrides?.get(shownIndex) ?? shownNote.target : null;
   const readout = primaryPitch !== null ? pitchReadout(primaryPitch) : null;
-  const detected = keyLabel(analysis?.key);
   const hasSelection = selected.size > 0;
+
+  // Harmony help: interval of the edited harmony note to the lead note sounding at the same time.
+  let interval: { label: string; clash: boolean } | null = null;
+  if (active && lead && lead.id !== active.id && lead.status === "ready" && lead.analysis && shownNote && primaryPitch !== null && (hasSelection || dragged)) {
+    const mid = (shownNote.startSec + shownNote.endSec) / 2 + active.offsetSec;
+    const ln = leadNoteAt(lead.analysis.notes, lead.offsetSec, mid);
+    interval = ln ? intervalTo(ln.target, primaryPitch) : { label: "Lead is silent here", clash: false };
+  }
+
+  const loadingTrack = active && active.status !== "ready" && active.status !== "error" ? active : null;
+  const elapsed = loadingTrack ? Math.max(0, (now - loadingTrack.startedAt) / 1000) : 0;
+  const audioSec = loadingTrack && loadingTrack.frames > 0 ? loadingTrack.frames / loadingTrack.sampleRate : 30;
   const est = Math.max(1.5, audioSec * 0.1 + 0.5);
-  const progress = status === "decoding" ? Math.min(0.15, elapsed / 4) : Math.min(0.96, 0.15 + (0.85 * elapsed) / est);
+  const progress = !loadingTrack
+    ? 0
+    : loadingTrack.status === "analyzing"
+      ? Math.min(0.96, 0.15 + (0.85 * elapsed) / est)
+      : Math.min(0.15, elapsed / 4);
+  const shownError = T.error ?? (active?.status === "error" ? active.error : null);
+  const undoStack = active ? T.undoOf(active.id) : null;
+
+  const savedLine = lastSaved && lastSaved.length > 0 && (
+    <span data-testid="autotune-saved" role="status" className="text-[11px] text-muted max-w-[460px] truncate" title={lastSaved.map((s) => s.name).join(", ")}>
+      {lastSaved[0].path ? (
+        <>
+          {lastSaved.length === 1 ? (
+            <>
+              Saved to Downloads as <span className="text-text font-medium">{lastSaved[0].name}</span>
+            </>
+          ) : (
+            <>
+              Saved {lastSaved.length} files to Downloads: <span className="text-text font-medium">{lastSaved.map((s) => s.name).join(", ")}</span>
+            </>
+          )}
+          {" · "}
+          <button type="button" className="underline hover:text-text" onClick={() => void backend.revealDownload(lastSaved[0].path as string)}>
+            Show in folder
+          </button>
+        </>
+      ) : lastSaved.length === 1 ? (
+        <>
+          Downloaded <span className="text-text font-medium">{lastSaved[0].name}</span> (check your browser&apos;s downloads)
+        </>
+      ) : (
+        <>
+          Downloaded {lastSaved.length} files: <span className="text-text font-medium">{lastSaved.map((s) => s.name).join(", ")}</span> (check your
+          browser&apos;s downloads)
+        </>
+      )}
+    </span>
+  );
 
   return (
     <div className="flex flex-col gap-4 px-6 py-4 max-w-6xl mx-auto w-full">
-      <AutotuneSource instruments={instruments} samples={samples} value={source} onChange={setSource} trackId={track?.id ?? null} />
+      <AutotuneSource
+        ref={sourceRef}
+        instruments={instruments}
+        samples={samples}
+        onAdd={(values) => void T.addSources(values)}
+        hasTracks={tracks.length > 0}
+        trackId={track?.id ?? null}
+      />
 
-      {loading && (
+      {tracks.length > 0 && (
+        <Surface variant="raised" className="p-2.5">
+          <TrackList
+            tracks={tracks}
+            activeId={T.activeId}
+            alignNotes={alignNotes}
+            onSelect={T.setActiveId}
+            onMakeLead={T.setLead}
+            onMix={T.setMix}
+            onNudge={handleNudge}
+            onAlign={handleAlign}
+            onInclude={T.setIncluded}
+            onRemove={(id) => {
+              T.removeTrack(id);
+              setLastSaved(null);
+            }}
+            onAdd={() => sourceRef.current?.choose()}
+          />
+        </Surface>
+      )}
+
+      {loadingTrack && (
         <Surface variant="raised" className="p-5 flex flex-col gap-3" data-testid="autotune-loading">
           <div className="flex items-center justify-between text-sm">
-            <span className="text-text font-medium">{status === "decoding" ? "Opening audio…" : "Analyzing vocal…"}</span>
+            <span className="text-text font-medium">
+              {loadingTrack.status === "analyzing" ? "Analyzing vocal…" : loadingTrack.status === "queued" ? "Waiting for the other takes…" : "Opening audio…"}
+            </span>
             <span className="text-xs text-muted tabular-nums font-mono">{elapsed.toFixed(1)} s</span>
           </div>
           <div className="h-2 rounded-full neu-surface-inset overflow-hidden">
@@ -643,24 +714,24 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
             />
           </div>
           <span className="text-[11px] text-muted">
-            Finding every note in {source?.label ?? "your vocal"}. This runs on your computer and takes a few seconds.
+            Finding every note in {loadingTrack.name}. This runs on your computer and takes a few seconds.
           </span>
         </Surface>
       )}
 
-      {error && (
+      {shownError && (
         <Surface variant="raised" className="p-4 text-sm text-danger" role="alert">
-          {error}
+          {shownError}
         </Surface>
       )}
 
-      {!analysis && !loading && (
+      {tracks.length === 0 && (
         <Surface variant="raised" className="p-8 text-center text-sm text-muted">
-          Drop your vocal or pick one from the song. It opens right here, ready to tune.
+          Drop your vocal or pick one from the song. Add harmony takes too: they play together and you can tune every one.
         </Surface>
       )}
 
-      {analysis && (
+      {analysis && active && (
         <>
           <Surface variant="raised" className="p-3 flex flex-col gap-3">
             {/* Transport, edit and key toolbar */}
@@ -676,10 +747,10 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
                 ]}
               />
               <div className="w-px h-7 bg-white/5" />
-              <Button type="button" aria-label="Undo" title="Undo (Ctrl+Z)" onClick={() => handleUndo(false)} disabled={!undoRef.current.canUndo} className="!px-2.5">
+              <Button type="button" aria-label="Undo" title="Undo (Ctrl+Z)" onClick={() => handleUndo(false)} disabled={!undoStack?.canUndo} className="!px-2.5">
                 <Undo2 size={15} />
               </Button>
-              <Button type="button" aria-label="Redo" title="Redo (Ctrl+Shift+Z)" onClick={() => handleUndo(true)} disabled={!undoRef.current.canRedo} className="!px-2.5">
+              <Button type="button" aria-label="Redo" title="Redo (Ctrl+Shift+Z)" onClick={() => handleUndo(true)} disabled={!undoStack?.canRedo} className="!px-2.5">
                 <Redo2 size={15} />
               </Button>
               <Button type="button" onClick={handleMerge} disabled={!hasSelection} title="Join the selected note with the next one" className="!px-3 inline-flex items-center gap-1.5">
@@ -702,10 +773,13 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
                 />
               </div>
               <div className="flex items-center gap-2">
-                <Label tip={{ term: "Key", text: "The song's key. Light rows are notes in the key; notes snap to them." }}>Key</Label>
+                <Label tip={{ term: "Key", text: "The song's key, found from every take. Light rows are notes in the key; notes snap to them." }}>Key</Label>
                 <select
                   value={tonicPc}
-                  onChange={(e) => setTonicPc(Number(e.target.value))}
+                  onChange={(e) => {
+                    setKeyManual(true);
+                    setTonicPc(Number(e.target.value));
+                  }}
                   aria-label="Tonic"
                   className="bg-surface neu-surface-inset rounded-lg px-2 py-1.5 text-sm font-semibold text-text"
                 >
@@ -717,7 +791,10 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
                 </select>
                 <select
                   value={mode}
-                  onChange={(e) => setMode(e.target.value as ScaleMode)}
+                  onChange={(e) => {
+                    setKeyManual(true);
+                    setMode(e.target.value as ScaleMode);
+                  }}
                   aria-label="Scale mode"
                   className="bg-surface neu-surface-inset rounded-lg px-2 py-1.5 text-sm font-semibold text-text"
                 >
@@ -745,7 +822,10 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
             {/* Inspector + Correct Pitch macro */}
             <div className="flex flex-wrap items-end gap-5 px-1">
               <div className="flex flex-col gap-1.5 min-w-[150px]">
-                <Label>{hasSelection ? "Selected note" : atPlayhead && !atPlayhead.sounding ? "Next note" : "Note at playhead"}</Label>
+                <Label>
+                  {multi && <span className="w-2 h-2 rounded-full inline-block" style={{ background: active.color }} aria-hidden />}
+                  {hasSelection || dragged ? "Selected note" : atPlayhead && !atPlayhead.sounding ? "Next note" : "Note at playhead"}
+                </Label>
                 <div data-testid="autotune-readout" className="flex items-baseline gap-2 h-8">
                   {readout ? (
                     <>
@@ -759,6 +839,17 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
                     <span className="text-xs text-muted">No singing here</span>
                   )}
                 </div>
+                {interval && (
+                  <span
+                    data-testid="autotune-interval"
+                    data-clash={interval.clash || undefined}
+                    className={clsx("text-[11px] font-medium", interval.clash ? "text-[#F0C04B]" : "text-muted")}
+                    title={interval.clash ? "This interval rubs against the lead when held" : undefined}
+                  >
+                    {interval.clash ? "⚠ " : ""}
+                    {interval.label}
+                  </span>
+                )}
               </div>
               <SliderField
                 label="Vibrato"
@@ -801,10 +892,16 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
                   width="w-24"
                   tip={{ term: "Drift", text: "How much Correct Pitch steadies the wobble inside each note." }}
                 />
-                <Button type="button" onClick={() => applyCorrection(centerPct, driftPct, allowedPcs)} title={hasSelection ? "Correct the selected notes" : "Correct every note"}>
+                <Button type="button" onClick={() => applyCorrection(centerPct, driftPct, allowedPcs)} title={hasSelection ? "Correct the selected notes" : "Correct every note of this track"}>
                   Correct Pitch
                 </Button>
-                <Button type="button" variant="primary" onClick={handleTuneAll} className="inline-flex items-center gap-1.5 !text-[#1a1300] !bg-[#F0A04B] !shadow-[0_0_16px_rgba(240,160,75,0.35)]">
+                <Button
+                  type="button"
+                  variant="primary"
+                  onClick={handleTuneAll}
+                  title={multi ? "Correct every note of every ticked track" : "Correct every note"}
+                  className="inline-flex items-center gap-1.5 !text-[#1a1300] !bg-[#F0A04B] !shadow-[0_0_16px_rgba(240,160,75,0.35)]"
+                >
                   <Wand2 size={14} /> Tune all to key
                 </Button>
               </div>
@@ -814,19 +911,24 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
               <NoteCanvas
                 ref={canvasRef}
                 analysis={analysis}
-                sessionKey={sessionKey}
+                sessionKey={active.id}
                 overrides={overrides}
                 selected={selected}
                 scalePcs={scalePcs}
                 tonicPc={tonicPc}
                 snap={snap}
-                peaks={peaksRef.current}
-                peaksVersion={peaksVersion}
+                peaks={active.peaks}
+                peaksVersion={active.peaksVersion}
                 peakBlock={PEAK_BLOCK}
-                peakMax={peakMax}
-                sampleRate={sampleRate}
+                peakMax={active.peakMax}
+                sampleRate={active.sampleRate}
                 player={player}
                 playing={playing}
+                timeOffsetSec={active.offsetSec}
+                timelineDurationSec={timelineSec}
+                ghosts={ghosts}
+                color={active.color}
+                trackId={active.id}
                 onSelect={handleSelect}
                 onSeek={(sec) => player.seek(sec)}
                 onDragStart={handleDragStart}
@@ -839,51 +941,60 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
 
             <div className="flex flex-wrap items-center gap-3 px-1">
               <span className="text-[11px] text-muted tabular-nums">
+                {multi && <span className="text-text">{active.name}: </span>}
                 {analysis.notes.length} notes
-                {analyzeSec !== null && ` · analyzed in ${analyzeSec.toFixed(1)} s`}
+                {active.analyzeSec !== null && ` · analyzed in ${active.analyzeSec.toFixed(1)} s`}
               </span>
-              {busy > 0 && <span className="text-[10px] text-muted uppercase tracking-wide animate-pulse">Rendering…</span>}
+              {T.busy > 0 && <span className="text-[10px] text-muted uppercase tracking-wide animate-pulse">Rendering…</span>}
               <div className="flex items-center gap-2 ml-auto">
                 {isTauri() && (
                   <Button type="button" disabled title="Saving into your sample library needs a desktop write command that isn't available yet. Use Download WAV.">
                     Save as sample
                   </Button>
                 )}
-                {saved && (
-                  <span data-testid="autotune-saved" role="status" className="text-[11px] text-muted max-w-[420px] truncate">
-                    {saved.path ? (
-                      <>
-                        Saved to Downloads as <span className="text-text font-medium">{saved.name}</span>
-                        {" · "}
-                        <button type="button" className="underline hover:text-text" onClick={() => void backend.revealDownload(saved.path as string)}>
-                          Show in folder
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        Downloaded <span className="text-text font-medium">{saved.name}</span> (check your browser&apos;s downloads)
-                      </>
-                    )}
-                  </span>
-                )}
+                {savedLine}
                 <Button
                   type="button"
                   onClick={handleDownload}
-                  busy={exporting}
-                  disabled={alreadySaved}
-                  title={alreadySaved ? "This version is already saved. Change the tuning to save again." : `Save as ${exportName}`}
+                  busy={exporting === "track"}
+                  disabled={activeSaved || exporting !== null}
+                  title={activeSaved ? "This version is already saved. Change the tuning to save again." : `Save as ${exportName}`}
                   className="inline-flex items-center gap-1.5"
                 >
-                  {alreadySaved ? (
+                  {activeSaved ? (
                     <>
                       <Check size={14} /> Saved
                     </>
                   ) : (
                     <>
-                      <Download size={14} /> Download WAV
+                      <Download size={14} /> {multi ? "Download track" : "Download WAV"}
                     </>
                   )}
                 </Button>
+                {multi && (
+                  <Button
+                    type="button"
+                    onClick={handleDownloadAll}
+                    busy={exporting === "all"}
+                    disabled={unsaved.length === 0 || exporting !== null}
+                    title={
+                      unsaved.length === 0
+                        ? "Every track is already saved. Change the tuning to save again."
+                        : `Save ${unsaved.length} track${unsaved.length === 1 ? "" : "s"} as -autotuned.wav files (same length and start as the originals)`
+                    }
+                    className="inline-flex items-center gap-1.5"
+                  >
+                    {unsaved.length === 0 && readyTracks.length > 0 ? (
+                      <>
+                        <Check size={14} /> All saved
+                      </>
+                    ) : (
+                      <>
+                        <Download size={14} /> Download all
+                      </>
+                    )}
+                  </Button>
+                )}
               </div>
             </div>
           </Surface>
@@ -892,6 +1003,7 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
             <div className="text-[10px] text-muted uppercase tracking-wider mb-1.5">In plain words</div>
             Drag a note up or down; it snaps to the song&apos;s key. Double-click a note to snap it; double-click its top to
             split it. Space plays. Click the time ruler to move the playhead, and flip Original / Tuned to compare.
+            {multi && " Click a track to edit it; the others show as outlines so you can see the harmony against the lead."}
           </Surface>
         </>
       )}

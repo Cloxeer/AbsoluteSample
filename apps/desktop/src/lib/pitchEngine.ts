@@ -19,21 +19,25 @@ export interface EditResult {
 }
 
 export interface PitchEngine {
-  /** Analyses mono samples (seconds of work, off the UI thread). Replaces any previous session. */
-  load(samples: Float32Array, sampleRate: number): Promise<Analysis>;
+  /** Analyses mono samples (seconds of work, off the UI thread). Replaces any previous session.
+   * `channels` (optional, e.g. stereo L/R, same length) are re-rendered alongside so exports keep them. */
+  load(samples: Float32Array, sampleRate: number, channels?: Float32Array[]): Promise<Analysis>;
   setNotes(edits: NoteEdit[]): Promise<EditResult>;
   split(index: number, sec: number): Promise<EditResult>;
   merge(index: number): Promise<EditResult>;
   renderAll(): Promise<Float32Array>;
+  /** Every original channel with the current edits (the mono mix if none were attached). */
+  renderAllChannels(): Promise<Float32Array[]>;
   dispose(): void;
 }
 
 export type PitchWorkerRequest =
-  | { id: number; type: "load"; samples: Float32Array; sampleRate: number }
+  | { id: number; type: "load"; samples: Float32Array; sampleRate: number; channels?: Float32Array[] }
   | { id: number; type: "setNotes"; edits: NoteEdit[] }
   | { id: number; type: "split"; index: number; sec: number }
   | { id: number; type: "merge"; index: number }
-  | { id: number; type: "renderAll" };
+  | { id: number; type: "renderAll" }
+  | { id: number; type: "renderAllChannels" };
 
 export type PitchWorkerResponse = { id: number; ok: true; result: unknown } | { id: number; ok: false; error: string };
 
@@ -68,15 +72,17 @@ export function createWorkerPitchEngine(): PitchEngine {
   }
 
   return {
-    load(samples, sampleRate) {
-      // Copy so the caller keeps its buffer; the copy is transferred (zero-copy) to the worker.
+    load(samples, sampleRate, channels) {
+      // Copy so the caller keeps its buffers; the copies are transferred (zero-copy) to the worker.
       const copy = new Float32Array(samples);
-      return call<Analysis>({ type: "load", samples: copy, sampleRate }, [copy.buffer]);
+      const chs = channels?.map((c) => new Float32Array(c));
+      return call<Analysis>({ type: "load", samples: copy, sampleRate, channels: chs }, [copy.buffer, ...(chs ?? []).map((c) => c.buffer)]);
     },
     setNotes: (edits) => call<EditResult>({ type: "setNotes", edits }),
     split: (index, sec) => call<EditResult>({ type: "split", index, sec }),
     merge: (index) => call<EditResult>({ type: "merge", index }),
     renderAll: () => call<Float32Array>({ type: "renderAll" }),
+    renderAllChannels: () => call<Float32Array[]>({ type: "renderAllChannels" }),
     dispose() {
       worker.terminate();
       for (const p of pending.values()) p.reject(new Error("Pitch engine disposed"));

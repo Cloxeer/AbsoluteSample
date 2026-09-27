@@ -44,7 +44,10 @@ export interface Analysis {
 /** One chunk of re-rendered output audio, to be written at `startSec` into the output buffer. */
 export interface AudioPatch {
   startSec: number;
+  /** Mono render (drives the waveform). */
   samples: Float32Array;
+  /** The original channels rendered with the same edits, when the track has them (e.g. stereo). */
+  channels?: Float32Array[];
 }
 
 export interface NoteParams {
