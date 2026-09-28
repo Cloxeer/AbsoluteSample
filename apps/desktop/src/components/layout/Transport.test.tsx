@@ -53,6 +53,15 @@ describe("Transport", () => {
     expect(screen.getByText("Mix")).toBeInTheDocument();
   });
 
+  it("on the Autotune tab the big Play button says what it plays (the vocals), with no stems hint", () => {
+    const onPlayPause = vi.fn();
+    render(<Transport {...baseProps} sourceLabel="Vocals" onPlayPause={onPlayPause} />);
+    expect(screen.getByText("Vocals")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Play vocals"));
+    expect(onPlayPause).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/press play mix/i)).toBeNull();
+  });
+
   it("calls onPlayPause when the play button is clicked", () => {
     const onPlayPause = vi.fn();
     render(<Transport {...baseProps} onPlayPause={onPlayPause} />);
