@@ -182,6 +182,17 @@ export class PitchSession {
         const ret = wasm.pitchsession_setNote(this.__wbg_ptr, idx, target, drift, modulation);
         return ret !== 0;
     }
+    /**
+     * Timing edits, flattened: [n, out0, in0, out1, in1, ..., n2, ...] (seconds).
+     * @param {Float32Array} flat
+     * @returns {boolean}
+     */
+    setWarps(flat) {
+        const ptr0 = passArrayF32ToWasm0(flat, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.pitchsession_setWarps(this.__wbg_ptr, ptr0, len0);
+        return ret !== 0;
+    }
 }
 
 async function __wbg_load(module, imports) {

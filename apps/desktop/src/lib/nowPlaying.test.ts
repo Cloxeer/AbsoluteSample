@@ -68,3 +68,60 @@ describe("nowPlaying", () => {
     unsubscribe();
   });
 });
+
+describe("nowPlaying.toggle (the transport Play button)", () => {
+  beforeEach(() => {
+    nowPlaying.stop();
+    nowPlaying.setTabSource("autotune", null);
+  });
+
+  it("starts the tab's own source, then pauses and resumes it", () => {
+    const player = makeController();
+    const start = vi.fn(() => nowPlaying.start("vocal", "Vocals", 30, player));
+    nowPlaying.setTabSource("autotune", { kind: "vocal", label: "Vocals", start });
+    const mix = vi.fn();
+    nowPlaying.toggle("autotune", mix);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(mix).not.toHaveBeenCalled();
+    expect(nowPlaying.getState()).toMatchObject({ kind: "vocal", isPlaying: true });
+    nowPlaying.toggle("autotune", mix);
+    expect(player.pause).toHaveBeenCalledTimes(1);
+    nowPlaying.toggle("autotune", mix);
+    expect(player.resume).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it("on the Autotune tab a paused mix does not resume: the vocals start instead", () => {
+    const mixCtl = makeController();
+    nowPlaying.start("mix", "Mix", 120, mixCtl);
+    nowPlaying.pause();
+    const start = vi.fn();
+    nowPlaying.setTabSource("autotune", { kind: "vocal", label: "Vocals", start });
+    nowPlaying.toggle("autotune", vi.fn());
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(mixCtl.resume).not.toHaveBeenCalled();
+  });
+
+  it("on another tab, paused vocals do not resume: the mix plays", () => {
+    const vocal = makeController();
+    nowPlaying.setTabSource("autotune", { kind: "vocal", label: "Vocals", start: vi.fn() });
+    nowPlaying.start("vocal", "Vocals", 30, vocal);
+    nowPlaying.pause();
+    const mix = vi.fn();
+    nowPlaying.toggle("slicer", mix);
+    expect(mix).toHaveBeenCalledTimes(1);
+    expect(vocal.resume).not.toHaveBeenCalled();
+  });
+
+  it("without a tab source it resumes what was paused, else falls back to the mix", () => {
+    const mix = vi.fn();
+    nowPlaying.toggle("slicer", mix);
+    expect(mix).toHaveBeenCalledTimes(1);
+    const c = makeController();
+    nowPlaying.start("sample", "Kick", 1, c);
+    nowPlaying.pause();
+    nowPlaying.toggle("slicer", mix);
+    expect(c.resume).toHaveBeenCalledTimes(1);
+    expect(mix).toHaveBeenCalledTimes(1);
+  });
+});

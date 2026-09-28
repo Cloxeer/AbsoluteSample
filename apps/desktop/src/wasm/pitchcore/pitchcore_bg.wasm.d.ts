@@ -12,6 +12,7 @@ export const pitchsession_renderAll: (a: number) => [number, number];
 export const pitchsession_renderChannel: (a: number, b: number, c: number, d: number) => [number, number];
 export const pitchsession_setChannels: (a: number, b: number, c: number, d: number, e: number) => number;
 export const pitchsession_setNote: (a: number, b: number, c: number, d: number, e: number) => number;
+export const pitchsession_setWarps: (a: number, b: number, c: number) => number;
 export const pitchsession_splitNote: (a: number, b: number, c: number) => number;
 export const __wbindgen_export_0: WebAssembly.Table;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;

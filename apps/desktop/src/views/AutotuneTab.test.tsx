@@ -18,6 +18,8 @@ import type { EditResult, PitchEngine } from "@/lib/pitchEngine";
 import type { MultiTrackPlayer, PlaySource, TrackInfo as PlayerTrack } from "@/lib/multiTrackPlayer";
 import type { DecodedTrack, SourceFormat } from "@/lib/audioFormat";
 import type { InstrumentStem } from "@/lib/types";
+import type { WarpSegment } from "@/lib/timeWarp";
+import { nowPlaying } from "@/lib/nowPlaying";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn(), open: vi.fn() }));
 
@@ -77,6 +79,7 @@ function makeFakeEngine(initial: () => EngineNote[] = baseNotes, rendered: Float
       notes = [...notes.slice(0, i), { ...a, endFrame: b.endFrame, endSec: b.endSec }, ...notes.slice(i + 2)];
       return result();
     }),
+    setWarps: vi.fn(async (_segments: WarpSegment[]) => result()),
     renderAll: vi.fn(async () => new Float32Array(DURATION * 44100)),
     renderAllChannels: vi.fn(async () => rendered),
     dispose: vi.fn(),
@@ -132,6 +135,10 @@ function makeFakePlayer() {
     getSource: () => src,
     audition: vi.fn(),
     duration: () => DURATION,
+    setGuide: vi.fn(),
+    hasGuide: () => false,
+    setPolish: vi.fn(),
+    getPolish: () => false,
     subscribe: (cb: () => void) => {
       listeners.add(cb);
       return () => {
@@ -235,7 +242,7 @@ describe("AutotuneTab (Melodyne-style editor)", () => {
     expect(apply).not.toHaveBeenCalled();
     expect(screen.getByText(/detected: c major/i)).toBeInTheDocument();
     expect(screen.getByText(/2 notes/i)).toBeInTheDocument();
-    expect(screen.getByText(/drag a note up or down; it snaps to the song's key/i)).toBeInTheDocument();
+    expect(screen.getByText(/drag a note up or down; it snaps to the blue rows/i)).toBeInTheDocument();
   });
 
   it("shows an analyzing state while the engine works", async () => {
@@ -477,15 +484,31 @@ describe("AutotuneTab (Melodyne-style editor)", () => {
     expect(screen.getByText(/2 notes/i)).toBeInTheDocument();
   });
 
-  it("Space toggles playback and Original/Tuned switches the source", async () => {
+  it("the app transport (big Play / Space) plays these vocals, and Original/Tuned switches the source", async () => {
     const { player } = await setup();
+    const mix = vi.fn();
+    // The tab tells the transport what Play means here once a take is ready.
+    expect(nowPlaying.tabSource("autotune")).toMatchObject({ kind: "vocal", label: "Vocals" });
+    // The tab no longer handles Space itself (the app does, exactly once).
     fireEvent.keyDown(window, { key: " ", code: "Space" });
+    expect(player.play).not.toHaveBeenCalled();
+    act(() => nowPlaying.toggle("autotune", mix));
     expect(player.play).toHaveBeenCalledTimes(1);
+    expect(mix).not.toHaveBeenCalled();
+    expect(nowPlaying.getState()).toMatchObject({ kind: "vocal", label: "Vocals", isPlaying: true });
     expect(screen.getByRole("button", { name: /pause vocal/i })).toBeInTheDocument();
     fireEvent.click(within(screen.getByRole("group", { name: "Compare" })).getByRole("button", { name: "Original" }));
     expect(player.setSource).toHaveBeenCalledWith("original");
-    fireEvent.keyDown(window, { key: " ", code: "Space" });
+    act(() => nowPlaying.toggle("autotune", mix));
     expect(player.pause).toHaveBeenCalled();
+    expect(nowPlaying.getState().isPlaying).toBe(false);
+    // The tab's own play button reports to the transport too.
+    fireEvent.click(screen.getByRole("button", { name: /play vocal/i }));
+    expect(nowPlaying.getState()).toMatchObject({ kind: "vocal", isPlaying: true });
+    // Transport Stop stops the vocals and rewinds.
+    act(() => nowPlaying.stop());
+    expect(player.isPlaying()).toBe(false);
+    expect(player.seek).toHaveBeenLastCalledWith(0);
   });
 
   it("Vibrato slider edits the selected note's modulation", async () => {
@@ -495,6 +518,70 @@ describe("AutotuneTab (Melodyne-style editor)", () => {
     const slider = screen.getByRole("slider", { name: "Vibrato" });
     fireEvent.keyDown(slider, { key: "Home" });
     await waitFor(() => expect(engine.setNotes).toHaveBeenCalledWith([{ index: 0, target: 61.2, drift: 1, modulation: 0 }]));
+  });
+
+  it("Fix vocal (one take) tunes held notes gently to the key", async () => {
+    const { engine } = await setup();
+    fireEvent.click(screen.getByRole("button", { name: /fix vocal/i }));
+    await waitFor(() => expect(engine.setNotes).toHaveBeenCalledTimes(1));
+    const edits = engine.setNotes.mock.calls[0][0];
+    expect(edits.map((e) => e.target)).toEqual([62, 64]);
+    expect(edits.every((e) => e.drift > 0.5)).toBe(true);
+    expect(screen.queryByRole("checkbox", { name: "Tighten timing" })).toBeNull();
+  });
+
+  it("the vocal coach scores the singing, lists notes to practise and says where the melody likes to go", async () => {
+    const { canvas, player } = await setup();
+    // 61.2 (aim D4, 80 cents flat) and 64.3 (aim E4, 30 cents sharp): neither within 25 cents.
+    expect(screen.getByTestId("coach-accuracy")).toHaveTextContent("0%");
+    expect(screen.getByTestId("coach-steadiness")).toHaveTextContent("100%");
+    const chips = within(screen.getByTestId("vocal-coach")).getAllByRole("button", { name: /aim/i });
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).toHaveTextContent(/aim D4 \(80¢ flat\)/);
+    fireEvent.click(chips[0]);
+    expect(player.seek).toHaveBeenLastCalledWith(0);
+    expect(readout()).toHaveTextContent("C#4");
+    expect(screen.getByTestId("coach-note")).toHaveTextContent(/aim for D4/i);
+    // D is the 2nd of C major: it likes to step down home to C.
+    expect(screen.getByTestId("coach-next")).toHaveTextContent(/C4/);
+    click(canvas, geometry().at(1));
+    expect(screen.getByTestId("coach-note")).toHaveTextContent(/aim for E4/i);
+  });
+
+  it("Guide notes plays the target melody as a soft tone; Polish routes playback and downloads through the studio chain", async () => {
+    const polish = vi.fn(async (chs: Float32Array[]) => chs.map((c) => new Float32Array(c.length).fill(0.5)));
+    const save = vi.spyOn(backend, "saveExport").mockResolvedValue(null);
+    const { player, engine } = await setup({ polish });
+    fireEvent.click(screen.getByRole("button", { name: "Guide notes" }));
+    await waitFor(() => expect(player.setGuide).toHaveBeenCalledWith(expect.any(Float32Array), 44100, 0));
+    const guide = (player.setGuide.mock.calls.find((c) => c[0]) as unknown as [Float32Array])[0];
+    expect(guide.length).toBe(DURATION * 44100);
+    expect(Math.max(...guide.subarray(Math.round(0.7 * 44100), Math.round(0.72 * 44100)))).toBeGreaterThan(0.05);
+    fireEvent.click(screen.getByRole("button", { name: "Guide notes" }));
+    await waitFor(() => expect(player.setGuide).toHaveBeenLastCalledWith(null));
+
+    fireEvent.click(screen.getByRole("button", { name: "Studio polish" }));
+    expect(player.setPolish).toHaveBeenLastCalledWith(true);
+    fireEvent.click(screen.getByRole("button", { name: /download wav/i }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(engine.renderAllChannels).toHaveBeenCalledTimes(1);
+    expect(polish).toHaveBeenCalledTimes(1);
+  });
+
+  it("the timeline bar under the notes scrolls left and right", async () => {
+    await setup();
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    const bar = screen.getByRole("scrollbar", { name: /move through time/i });
+    const canvas = screen.getByTestId("autotune-editor");
+    fireEvent.keyDown(bar, { key: "Home" });
+    expect(Number(canvas.getAttribute("data-scroll-sec"))).toBe(0);
+    fireEvent.keyDown(bar, { key: "End" });
+    const end = Number(canvas.getAttribute("data-scroll-sec"));
+    expect(end).toBeGreaterThan(0);
+    expect(Number(bar.getAttribute("aria-valuenow"))).toBeCloseTo(end, 1);
+    fireEvent.keyDown(bar, { key: "ArrowLeft" });
+    expect(Number(canvas.getAttribute("data-scroll-sec"))).toBeLessThan(end);
   });
 
   it("Download WAV renders every channel of the whole vocal", async () => {
@@ -552,6 +639,7 @@ function makeRoutingEngine(takes: Take[], gate: Promise<void> | null) {
     setNotes: vi.fn((edits: NoteEdit[]) => inner!.setNotes(edits)),
     split: vi.fn((i: number, sec: number) => inner!.split(i, sec)),
     merge: vi.fn((i: number) => inner!.merge(i)),
+    setWarps: vi.fn((segs: WarpSegment[]) => inner!.setWarps(segs)),
     renderAll: vi.fn(() => inner!.renderAll()),
     renderAllChannels: vi.fn(() => inner!.renderAllChannels()),
     dispose: vi.fn(),
@@ -705,7 +793,7 @@ describe("AutotuneTab (multitrack harmonies)", () => {
 
   it("Tune all to key tunes every included track and skips excluded ones", async () => {
     const { engineFor } = await setupMulti([{ name: LEAD }, { name: HARM, notes: harmonyNotes }, { name: HARM2, notes: lowNotes }]);
-    fireEvent.click(screen.getByRole("checkbox", { name: `Include ${HARM2} in Tune all` }));
+    fireEvent.click(screen.getByRole("checkbox", { name: `Include ${HARM2} when fixing` }));
     fireEvent.click(screen.getByRole("button", { name: /tune all to key/i }));
     await waitFor(() => expect(engineFor(LEAD).setNotes).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(engineFor(HARM).setNotes).toHaveBeenCalledTimes(1));
@@ -717,20 +805,20 @@ describe("AutotuneTab (multitrack harmonies)", () => {
     }
   });
 
-  it("Align to lead moves the take by the estimated offset and refuses a low-confidence match", async () => {
+  it("Line up moves the take by the estimated offset and refuses a low-confidence match", async () => {
     const estimate = vi.fn().mockReturnValueOnce({ offsetSec: 0.25, confidence: 0.8 }).mockReturnValueOnce({ offsetSec: 1.5, confidence: 0.1 });
     const { player, trackId } = await setupMulti([{ name: LEAD }, { name: HARM, notes: harmonyNotes }, { name: HARM2, notes: lowNotes }], {
       extra: { estimateOffset: estimate },
     });
     const harm = trackId(HARM);
     const low = trackId(HARM2);
-    fireEvent.click(screen.getByRole("button", { name: `Align ${HARM} to lead` }));
+    fireEvent.click(screen.getByRole("button", { name: `Line up ${HARM} with the lead` }));
     expect(estimate).toHaveBeenCalledTimes(1);
     expect(player.setOffset).toHaveBeenCalledWith(harm, 0.25);
     expect(screen.getByTestId(`track-offset-${harm}`)).toHaveTextContent("+250 ms");
 
-    fireEvent.click(screen.getByRole("button", { name: `Align ${HARM2} to lead` }));
-    expect(screen.getByTestId(`track-align-${low}`)).toHaveTextContent(/couldn't match this take to the lead/i);
+    fireEvent.click(screen.getByRole("button", { name: `Line up ${HARM2} with the lead` }));
+    expect(screen.getByTestId(`track-align-${low}`)).toHaveTextContent(/no clear match found/i);
     expect(player.setOffset).not.toHaveBeenCalledWith(low, expect.anything());
     expect(screen.getByTestId(`track-offset-${low}`)).toHaveTextContent("0 ms");
 
@@ -743,7 +831,7 @@ describe("AutotuneTab (multitrack harmonies)", () => {
     const estimate = vi.fn(() => ({ offsetSec: 0.5, confidence: 0.9 }));
     const { trackId } = await setupMulti([{ name: LEAD }, { name: HARM, notes: harmonyNotes }], { extra: { estimateOffset: estimate } });
     const harm = trackId(HARM);
-    fireEvent.click(screen.getByRole("button", { name: `Align ${HARM} to lead` }));
+    fireEvent.click(screen.getByRole("button", { name: `Line up ${HARM} with the lead` }));
     fireEvent.click(screen.getByTestId(`track-row-${harm}`));
     expect(screen.getByTestId("autotune-editor")).toHaveAttribute("data-time-offset", "0.5");
   });
@@ -784,6 +872,72 @@ describe("AutotuneTab (multitrack harmonies)", () => {
     expect(engineFor(LEAD).dispose).not.toHaveBeenCalled();
     expect(player.removeTrack).toHaveBeenCalledWith(id);
     expect(rows()).toHaveLength(2);
+  });
+
+  it("takes the same length as the lead are marked in sync; a shorter take is lined up automatically when the match is clear", async () => {
+    const estimate = vi.fn(() => ({ offsetSec: 0.12, confidence: 0.9 }));
+    const { trackId, player } = await setupMulti([{ name: LEAD }, { name: HARM, notes: harmonyNotes }, { name: HARM2, notes: lowNotes, frames: 3 * 44100 }], {
+      extra: { estimateOffset: estimate },
+    });
+    await waitFor(() => expect(screen.getByTestId(`track-align-${trackId(HARM)}`)).toHaveTextContent(/in sync with the lead/i));
+    await waitFor(() => expect(screen.getByTestId(`track-align-${trackId(HARM2)}`)).toHaveTextContent(/lined up with the lead automatically \(\+120 ms\)/i));
+    expect(estimate).toHaveBeenCalledTimes(1);
+    expect(player.setOffset).toHaveBeenCalledWith(trackId(HARM2), 0.12);
+    expect(player.setOffset).not.toHaveBeenCalledWith(trackId(HARM), expect.anything());
+  });
+
+  it("Fix harmonies tunes the lead gently and snaps each harmony to the best note against it, in one click", async () => {
+    const { engineFor, trackId } = await setupMulti([{ name: LEAD }, { name: HARM, notes: harmonyNotes }]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Tonic" }), { target: { value: "0" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Scale mode" }), { target: { value: "major" } });
+    fireEvent.click(screen.getByRole("button", { name: /fix harmonies/i }));
+    await waitFor(() => expect(engineFor(HARM).setNotes).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(engineFor(LEAD).setNotes).toHaveBeenCalledTimes(1));
+    // Lead: C#4+20 -> D4 (nearest note of C major), E4+30 -> E4.
+    expect(engineFor(LEAD).setNotes.mock.calls[0][0].map((e: NoteEdit) => e.target)).toEqual([62, 64]);
+    // Harmony: F4 (a 3rd over the lead's D4) and C4 (a 3rd under E4); what was sung, made right.
+    const edits = engineFor(HARM).setNotes.mock.calls[0][0] as NoteEdit[];
+    expect(edits.map((e) => e.target)).toEqual([65, 60]);
+    // Natural by default: most of the wander and all of the vibrato stay.
+    expect(edits.every((e) => e.drift > 0.5 && e.modulation > 0.9)).toBe(true);
+    expect(await screen.findByTestId("fix-summary")).toHaveTextContent(/notes tuned/i);
+    expect(screen.getByTestId(`track-role-${trackId(HARM)}`)).toHaveTextContent(/harmony/i);
+    // Notes were already in time with the lead: nothing to tighten.
+    expect(engineFor(HARM).setWarps).not.toHaveBeenCalled();
+    expect(screen.getByTestId("fix-summary")).toHaveTextContent(/timing already tight/i);
+  });
+
+  it("Tighten timing moves a late harmony syllable onto the lead, and turning it off puts it back", async () => {
+    // The harmony comes in 40 ms late on both notes.
+    const late = () => mkNotes([65.1, 60.2]).map((n) => ({ ...n, startFrame: n.startFrame + 4, startSec: n.startSec + 0.04 }));
+    const { engineFor } = await setupMulti([{ name: LEAD }, { name: HARM, notes: late }]);
+    fireEvent.click(screen.getByRole("button", { name: /fix harmonies/i }));
+    await waitFor(() => expect(engineFor(HARM).setWarps).toHaveBeenCalledTimes(1));
+    const segs = engineFor(HARM).setWarps.mock.calls[0][0] as WarpSegment[];
+    expect(segs.length).toBeGreaterThan(0);
+    const anchors = segs.flatMap((s) => s.anchors);
+    // The syllable sung at 0.54 s is now heard ~0.51 s (80% of the way to the lead at 0.50 s by default).
+    const moved = anchors.find(([, input]) => Math.abs(input - 0.54) < 1e-6);
+    expect(moved).toBeDefined();
+    expect(moved![0]).toBeGreaterThan(0.5);
+    expect(moved![0]).toBeLessThan(0.515);
+    // Every segment starts and ends on the identity (exact file length, untouched edges).
+    for (const s of segs) {
+      expect(s.anchors[0][0]).toBe(s.anchors[0][1]);
+      expect(s.anchors[s.anchors.length - 1][0]).toBe(s.anchors[s.anchors.length - 1][1]);
+    }
+    expect(await screen.findByTestId("fix-summary")).toHaveTextContent(/syllables? tightened/i);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Tighten timing" }));
+    await waitFor(() => expect(engineFor(HARM).setWarps).toHaveBeenLastCalledWith([]));
+  });
+
+  it("marks where the lead sings alone and where the stack is, and flags harmony notes that clash", async () => {
+    // Second harmony note a semitone above the lead's E4: a clash.
+    const rub = () => mkNotes([65.1, 65.2]);
+    const { trackId } = await setupMulti([{ name: LEAD }, { name: HARM, notes: rub }]);
+    expect(screen.getByLabelText("Section colors")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId(`track-row-${trackId(HARM)}`));
+    expect(screen.getByTestId("autotune-editor")).toHaveAttribute("data-track", trackId(HARM));
   });
 
   it("with a single track the list collapses to an Add harmony button", async () => {

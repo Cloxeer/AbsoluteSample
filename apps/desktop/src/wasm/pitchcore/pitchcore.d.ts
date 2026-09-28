@@ -22,6 +22,10 @@ export class PitchSession {
   constructor(samples: Float32Array, sample_rate: number);
   render(start_sec: number, end_sec: number): Float32Array;
   setNote(idx: number, target: number, drift: number, modulation: number): boolean;
+  /**
+   * Timing edits, flattened: [n, out0, in0, out1, in1, ..., n2, ...] (seconds).
+   */
+  setWarps(flat: Float32Array): boolean;
 }
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -39,6 +43,7 @@ export interface InitOutput {
   readonly pitchsession_renderChannel: (a: number, b: number, c: number, d: number) => [number, number];
   readonly pitchsession_setChannels: (a: number, b: number, c: number, d: number, e: number) => number;
   readonly pitchsession_setNote: (a: number, b: number, c: number, d: number, e: number) => number;
+  readonly pitchsession_setWarps: (a: number, b: number, c: number) => number;
   readonly pitchsession_splitNote: (a: number, b: number, c: number) => number;
   readonly __wbindgen_export_0: WebAssembly.Table;
   readonly __wbindgen_free: (a: number, b: number, c: number) => void;

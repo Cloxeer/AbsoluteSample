@@ -54,6 +54,8 @@ export interface TransportProps {
   anyJobRunning?: boolean;
   /** Bumped by the caller whenever a track fetch/split/delete happens, to force an immediate storage refresh. */
   storageRefreshSignal?: number;
+  /** What Play controls right now when it isn't the mix (e.g. "Vocals" on the Autotune tab). */
+  sourceLabel?: string | null;
   onPlayPause: () => void;
   onStop: () => void;
   onToggleLoop: () => void;
@@ -63,7 +65,7 @@ export interface TransportProps {
 }
 
 const SHORTCUTS: [string, string][] = [
-  ["Space", "Play / pause mix"],
+  ["Space", "Play / pause (the vocals on Autotune)"],
   ["L", "Toggle loop"],
   ["1 - 4", "Audition stem 1-4"],
   ["M", "Mute focused track"],
@@ -102,6 +104,7 @@ export function Transport({
   currentTrackId,
   anyJobRunning = false,
   storageRefreshSignal,
+  sourceLabel = null,
   onPlayPause,
   onStop,
   onToggleLoop,
@@ -173,7 +176,7 @@ export function Transport({
           <PlayPauseButton
             playing={isPlaying}
             onToggle={onPlayPause}
-            label="mix"
+            label={sourceLabel ? sourceLabel.toLowerCase() : "mix"}
             size={18}
             className="!px-3 !py-3 h-11 w-11 flex items-center justify-center"
           />
@@ -204,7 +207,7 @@ export function Transport({
               mode === "audition" ? "text-cyan border-cyan/30 bg-cyan/5" : "text-muted border-white/10"
             )}
           >
-            {mode === "audition" && auditionLabel ? auditionLabel : "Mix"}
+            {mode === "audition" && auditionLabel ? auditionLabel : sourceLabel ?? "Mix"}
           </span>
           <div className="flex items-center gap-2 pl-2 border-l border-white/[0.06]">
             <span className="text-[10px] text-muted uppercase">Vol</span>

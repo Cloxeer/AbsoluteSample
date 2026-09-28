@@ -164,3 +164,35 @@ describe("MultiTrackPlayer", () => {
     expect(s.start.mock.calls[0][1]).toBeCloseTo(0.53, 6);
   });
 });
+
+describe("MultiTrackPlayer guide tone and studio polish", () => {
+  let ctx: FakeCtx;
+  let p: MultiTrackPlayer;
+  beforeEach(() => {
+    ctx = new FakeCtx();
+    p = createMultiTrackPlayer(() => ctx as unknown as AudioContext);
+    p.addTrack("lead", [ch(4000)], SR);
+    p.addTrack("h1", [ch(4000)], SR);
+  });
+
+  it("the guide plays with everything, ignores solo, and is not a track", () => {
+    p.setGuide(ch(9000, 0.1), SR, 0);
+    expect(p.hasGuide()).toBe(true);
+    expect(p.tracks().map((t) => t.id)).toEqual(["lead", "h1"]);
+    expect(p.duration()).toBe(4); // the longer guide does not stretch the song
+    p.setSolo("h1", true);
+    const guideGain = ctx.gains[ctx.gains.length - 1];
+    expect(guideGain.gain.value).toBeCloseTo(0.35);
+    p.play();
+    expect(ctx.sources).toHaveLength(3);
+    p.setGuide(null);
+    expect(p.hasGuide()).toBe(false);
+  });
+
+  it("polish is skipped cleanly on a context without filters (and remembers the setting)", () => {
+    p.setPolish(true);
+    expect(p.getPolish()).toBe(true);
+    p.play();
+    expect(ctx.sources).toHaveLength(2);
+  });
+});

@@ -9,6 +9,7 @@ pub mod crepe;
 pub mod notes;
 pub mod pitch;
 pub mod psola;
+pub mod warp;
 
 use notes::{Key, Note};
 use serde::Serialize;
@@ -24,6 +25,8 @@ pub struct Session {
     notes: Vec<Note>,
     runs: Vec<psola::Run>,
     key: Key,
+    /// Timing edits: non-overlapping WSOLA segments, sorted by start.
+    warps: Vec<warp::Segment>,
 }
 
 #[derive(Serialize)]
@@ -52,7 +55,7 @@ impl Session {
         let n = notes::segment(&tr.midi, &tr.db);
         let key = notes::detect_key(&n);
         let runs = psola::find_epochs(&samples, sr, &tr.midi);
-        Session { x: samples, channels: Vec::new(), sr, midi: tr.midi, db: tr.db, notes: n, runs, key }
+        Session { x: samples, channels: Vec::new(), sr, midi: tr.midi, db: tr.db, notes: n, runs, key, warps: Vec::new() }
     }
 
     pub fn analysis_json(&self) -> String {
@@ -131,6 +134,33 @@ impl Session {
         if b <= a {
             return Vec::new();
         }
+        let segs: Vec<&warp::Segment> = self.warps.iter().filter(|s| s.end > a && s.start < b).collect();
+        if segs.is_empty() {
+            return self.pitch_render(x, a, b);
+        }
+        // Warped phrases are rebuilt whole (so any sub-range renders exactly the same samples), from
+        // the pitch-edited signal plus the context their grains read.
+        let pad = warp::margin(self.sr);
+        let ea = a.min(segs[0].start).saturating_sub(pad);
+        let eb = (b.max(segs[segs.len() - 1].end) + pad).min(x.len());
+        let base = self.pitch_render(x, ea, eb);
+        let mono_base;
+        let mono: &[f32] = if std::ptr::eq(x.as_ptr(), self.x.as_ptr()) {
+            &base
+        } else {
+            mono_base = self.pitch_render(&self.x, ea, eb);
+            &mono_base
+        };
+        let mut out = base.clone();
+        for seg in segs {
+            let grains = warp::plan(mono, ea, seg, self.sr);
+            warp::apply(&base, ea, seg, &grains, self.sr, &mut out, ea);
+        }
+        out[a - ea..b - ea].to_vec()
+    }
+
+    /// Pitch edits only, samples [a, b).
+    fn pitch_render(&self, x: &[f32], a: usize, b: usize) -> Vec<f32> {
         let mut out = x[a..b].to_vec();
         let shift = notes::shift_curve(&self.midi, &self.notes);
         for run in &self.runs {
@@ -140,6 +170,30 @@ impl Session {
             psola::render_run(x, self.sr, run, &shift, &mut out, a);
         }
         out
+    }
+
+    /// Replaces the timing edits. Each segment is a list of (output sec, input sec) anchors that is
+    /// the identity at both ends. Returns false (and changes nothing) if any segment is invalid or
+    /// two overlap.
+    pub fn set_warps(&mut self, segments: &[Vec<(f32, f32)>]) -> bool {
+        let mut built = Vec::with_capacity(segments.len());
+        for s in segments {
+            match warp::Segment::new(s, self.sr, self.x.len()) {
+                Some(seg) if !seg.is_identity() => built.push(seg),
+                Some(_) => {}
+                None => return false,
+            }
+        }
+        built.sort_by_key(|s| s.start);
+        if built.windows(2).any(|w| w[1].start < w[0].end) {
+            return false;
+        }
+        self.warps = built;
+        true
+    }
+
+    pub fn warp_count(&self) -> usize {
+        self.warps.len()
     }
 
     pub fn render_all(&self) -> Vec<f32> {
@@ -231,6 +285,21 @@ mod wasm {
         #[wasm_bindgen(js_name = renderChannel)]
         pub fn render_channel(&self, ch: usize, start_sec: f32, end_sec: f32) -> Vec<f32> {
             self.0.render_channel(ch, start_sec, end_sec)
+        }
+        /// Timing edits, flattened: [n, out0, in0, out1, in1, ..., n2, ...] (seconds).
+        #[wasm_bindgen(js_name = setWarps)]
+        pub fn set_warps(&mut self, flat: Vec<f32>) -> bool {
+            let mut segs = Vec::new();
+            let mut i = 0;
+            while i < flat.len() {
+                let n = flat[i] as usize;
+                if n < 2 || i + 1 + 2 * n > flat.len() {
+                    return false;
+                }
+                segs.push((0..n).map(|k| (flat[i + 1 + 2 * k], flat[i + 2 + 2 * k])).collect());
+                i += 1 + 2 * n;
+            }
+            self.0.set_warps(&segs)
         }
         #[wasm_bindgen(js_name = renderAll)]
         pub fn render_all(&self) -> Vec<f32> {

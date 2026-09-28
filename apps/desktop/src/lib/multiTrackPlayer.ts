@@ -5,6 +5,8 @@
  * switches and edit patches are short crossfades, so the player itself never clicks.
  */
 
+import { buildPolish, supportsPolish, type PolishChain } from "./vocalPolish";
+
 export type PlaySource = "original" | "tuned";
 
 export interface TrackMix {
@@ -52,6 +54,15 @@ export interface MultiTrackPlayer {
   audition(id: string, startSec: number, endSec: number): void;
   /** Timeline length: the end of the latest-ending track. */
   duration(): number;
+  /**
+   * A soft guide tone (the target melody) played with everything, at `offsetSec` on the timeline.
+   * It ignores mute/solo, is not a track and does not change the duration. null removes it.
+   */
+  setGuide(samples: Float32Array | null, sampleRate?: number, offsetSec?: number): void;
+  hasGuide(): boolean;
+  /** Routes the whole mix through the studio polish chain (EQ, compression, plate). */
+  setPolish(on: boolean): void;
+  getPolish(): boolean;
   subscribe(cb: () => void): () => void;
   dispose(): void;
 }
@@ -67,7 +78,12 @@ interface Track extends TrackInfo {
   gain: GainNode;
   voice: Voice | null;
   restartQueued: boolean;
+  /** The guide tone: not a track (no mute/solo, not in tracks() or duration()). */
+  guide?: boolean;
 }
+
+export const GUIDE_ID = "__guide__";
+export const GUIDE_VOLUME = 0.35;
 
 type CtxFactory = () => AudioContext;
 
@@ -78,6 +94,8 @@ export function createMultiTrackPlayer(ctxFactory?: CtxFactory): MultiTrackPlaye
       : undefined;
   let ctx: AudioContext | null = null;
   let master: GainNode | null = null;
+  let polishOn = false;
+  let polish: PolishChain | null = null;
   const tracks = new Map<string, Track>();
   let source: PlaySource = "tuned";
   let playing = false;
@@ -95,13 +113,25 @@ export function createMultiTrackPlayer(ctxFactory?: CtxFactory): MultiTrackPlaye
       if (!make) return null;
       ctx = make();
       master = ctx.createGain();
-      master.connect(ctx.destination);
+      route();
     }
     if (ctx.state === "suspended") void ctx.resume();
     return ctx;
   };
 
-  const anySolo = () => [...tracks.values()].some((t) => t.solo);
+  /** master -> (polish ->) destination. */
+  const route = () => {
+    if (!ctx || !master) return;
+    master.disconnect();
+    if (polishOn && supportsPolish(ctx)) {
+      polish ??= buildPolish(ctx);
+      master.connect(polish.input);
+      polish.output.disconnect();
+      polish.output.connect(ctx.destination);
+    } else master.connect(ctx.destination);
+  };
+  const realTracks = () => [...tracks.values()].filter((t) => !t.guide);
+  const anySolo = () => realTracks().some((t) => t.solo);
   const glide = (param: AudioParam, value: number) => {
     const c = ctx!;
     const now = c.currentTime;
@@ -112,11 +142,11 @@ export function createMultiTrackPlayer(ctxFactory?: CtxFactory): MultiTrackPlaye
   const applyGains = () => {
     if (!ctx) return;
     const solo = anySolo();
-    for (const t of tracks.values()) glide(t.gain.gain, effectiveGain(t, solo));
+    for (const t of tracks.values()) glide(t.gain.gain, t.guide ? t.volume : effectiveGain(t, solo));
   };
 
   const livePos = () => (playing && ctx ? startPos + (ctx.currentTime - startCtxTime) : pos);
-  const durationSec = () => Math.max(0, ...[...tracks.values()].map((t) => t.offsetSec + t.durationSec));
+  const durationSec = () => Math.max(0, ...realTracks().map((t) => t.offsetSec + t.durationSec));
 
   const stopVoice = (v: Voice | null) => {
     if (!v || !ctx) return;
@@ -223,7 +253,7 @@ export function createMultiTrackPlayer(ctxFactory?: CtxFactory): MultiTrackPlaye
       applyGains();
       emit();
     },
-    tracks: () => [...tracks.values()].map(({ id, offsetSec, durationSec, volume, muted, solo }) => ({ id, offsetSec, durationSec, volume, muted, solo })),
+    tracks: () => realTracks().map(({ id, offsetSec, durationSec, volume, muted, solo }) => ({ id, offsetSec, durationSec, volume, muted, solo })),
     setOffset(id, sec) {
       const t = tracks.get(id);
       if (!t) return;
@@ -319,6 +349,25 @@ export function createMultiTrackPlayer(ctxFactory?: CtxFactory): MultiTrackPlaye
       audition = { src, env };
     },
     duration: durationSec,
+    setGuide(samples, sampleRate = 44100, offsetSec = 0) {
+      this.removeTrack(GUIDE_ID);
+      if (!samples || samples.length === 0) return;
+      this.addTrack(GUIDE_ID, [samples], sampleRate, { offsetSec, volume: GUIDE_VOLUME });
+      const g = tracks.get(GUIDE_ID);
+      if (g) {
+        g.guide = true;
+        applyGains();
+      }
+      emit();
+    },
+    hasGuide: () => tracks.has(GUIDE_ID),
+    setPolish(on) {
+      if (on === polishOn) return;
+      polishOn = on;
+      route();
+      emit();
+    },
+    getPolish: () => polishOn,
     subscribe(cb) {
       listeners.add(cb);
       return () => {

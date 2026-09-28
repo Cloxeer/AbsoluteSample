@@ -2,17 +2,13 @@ import clsx from "clsx";
 import { Loader2, Plus, Star, X } from "lucide-react";
 import { Button } from "@/components/neumorphic/Button";
 import { Slider } from "@/components/neumorphic/Slider";
-import type { MixPatch, TuneTrack } from "@/hooks/useAutotuneTracks";
+import type { AlignNote, MixPatch, TuneTrack } from "@/hooks/useAutotuneTracks";
 
-export interface AlignNote {
-  ok: boolean;
-  message: string;
-}
+export type { AlignNote };
 
 export interface TrackListProps {
   tracks: readonly TuneTrack[];
   activeId: string | null;
-  alignNotes: Readonly<Record<string, AlignNote>>;
   onSelect(id: string): void;
   onMakeLead(id: string): void;
   onMix(id: string, patch: MixPatch): void;
@@ -43,7 +39,7 @@ const small = "!px-2 !py-1 !rounded-lg text-[11px] leading-none";
  * time and choose which tracks "Tune all to key" touches. With one track it collapses to a single
  * "Add harmony" button so the simple case looks like a plain vocal editor.
  */
-export function TrackList({ tracks, activeId, alignNotes, onSelect, onMakeLead, onMix, onNudge, onAlign, onInclude, onRemove, onAdd }: TrackListProps) {
+export function TrackList({ tracks, activeId, onSelect, onMakeLead, onMix, onNudge, onAlign, onInclude, onRemove, onAdd }: TrackListProps) {
   if (tracks.length <= 1) {
     return (
       <div className="flex items-center gap-2 px-1" data-testid="autotune-tracks">
@@ -60,7 +56,7 @@ export function TrackList({ tracks, activeId, alignNotes, onSelect, onMakeLead, 
       {tracks.map((t) => {
         const active = t.id === activeId;
         const status = statusText(t);
-        const note = alignNotes[t.id];
+        const note = t.alignNote;
         return (
           <div
             key={t.id}
@@ -96,6 +92,11 @@ export function TrackList({ tracks, activeId, alignNotes, onSelect, onMakeLead, 
               >
                 <Star size={13} fill={t.isLead ? "currentColor" : "none"} />
               </button>
+              {t.role && !t.isLead && (
+                <span className="text-[10px] text-cyan/80 truncate max-w-[200px]" data-testid={`track-role-${t.id}`} title="Found by Fix harmonies">
+                  {t.role.label}
+                </span>
+              )}
               {status && (
                 <span className="inline-flex items-center gap-1 text-[10px] text-muted uppercase tracking-wide" data-testid={`track-status-${t.id}`}>
                   <Loader2 size={11} className="animate-spin" /> {status}
@@ -153,25 +154,29 @@ export function TrackList({ tracks, activeId, alignNotes, onSelect, onMakeLead, 
                     </Button>
                     <Button
                       type="button"
-                      aria-label={`Align ${t.name} to lead`}
-                      title={t.status === "ready" && leadReady ? "Line this take up with the lead by its syllables" : "Available once this take and the lead are analyzed"}
+                      aria-label={`Line up ${t.name} with the lead`}
+                      title={
+                        t.status === "ready" && leadReady
+                          ? "Slide this whole take so it starts in time with the lead (timing only; Fix harmonies fixes the notes)"
+                          : "Available once this take and the lead are analyzed"
+                      }
                       disabled={t.status !== "ready" || !leadReady}
                       onClick={() => onAlign(t.id)}
                       className={small}
                     >
-                      Align to lead
+                      Line up
                     </Button>
                   </>
                 )}
-                <label className="flex items-center gap-1 text-[10px] text-muted uppercase tracking-wide cursor-pointer" title="Include in Tune all to key">
+                <label className="flex items-center gap-1 text-[10px] text-muted uppercase tracking-wide cursor-pointer" title="Include in Fix harmonies and Tune all to key">
                   <input
                     type="checkbox"
                     checked={t.includeInTuneAll}
                     onChange={(e) => onInclude(t.id, e.target.checked)}
-                    aria-label={`Include ${t.name} in Tune all`}
+                    aria-label={`Include ${t.name} when fixing`}
                     className="accent-[#F0A04B]"
                   />
-                  Tune all
+                  Fix
                 </label>
                 <button
                   type="button"

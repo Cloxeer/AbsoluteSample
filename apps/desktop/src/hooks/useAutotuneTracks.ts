@@ -21,6 +21,9 @@ import {
 } from "@/lib/melodyneEditor";
 import type { EditResult, PitchEngine } from "@/lib/pitchEngine";
 import type { MultiTrackPlayer } from "@/lib/multiTrackPlayer";
+import { warpAnalysis, type WarpSegment } from "@/lib/timeWarp";
+import type { HarmonyRole } from "@/lib/harmonizer";
+import { renderPolished } from "@/lib/vocalPolish";
 
 /** Injectable dependencies (tests pass in-process fakes; jsdom has no Worker, wasm or Web Audio). */
 export interface AutotuneDeps {
@@ -28,14 +31,23 @@ export interface AutotuneDeps {
   createPlayer: () => MultiTrackPlayer;
   decode: (source: AutotuneSourceValue) => Promise<DecodedTrack>;
   estimateOffset: (lead: Float32Array, other: Float32Array, sampleRate: number) => AlignResult;
+  /** Studio polish for exports (EQ, compression, plate); same channels and exact length. */
+  polish?: (channels: Float32Array[], sampleRate: number) => Promise<Float32Array[]>;
 }
 
 /** Distinct track colors; the first (lead) keeps the editor's classic orange. */
 export const TRACK_COLORS = ["#F0A04B", "#4FC3F7", "#B388FF", "#7BD88F", "#FF7AB6", "#FFD54F", "#4DD0C4", "#FF8A65"];
 export const MAX_CONCURRENT_ANALYSES = 2;
-/** Below this, "Align to lead" refuses to move the take. */
+/** Below this, "Line up" refuses to move the take. */
 export const MIN_ALIGN_CONFIDENCE = 0.3;
-export const ALIGN_FAILED_MESSAGE = "Couldn't match this take to the lead — nudge it by hand";
+/** Takes are lined up automatically on load only when the match is this clear. */
+export const AUTO_ALIGN_CONFIDENCE = 0.5;
+export const ALIGN_FAILED_MESSAGE = "No clear match found, so it was left where it is (it may already be in time). Use − / + to nudge by ear.";
+
+export interface AlignNote {
+  ok: boolean;
+  message: string;
+}
 
 export type TrackStatus = "queued" | "decoding" | "analyzing" | "ready" | "error";
 
@@ -45,6 +57,8 @@ export interface SavedExport {
   path: string | null;
   /** The exact tuning that was saved (the button stays "Saved" until it changes). */
   forAnalysis: Analysis | null;
+  polished?: boolean;
+  warps?: WarpSegment[];
 }
 
 export interface TuneTrack {
@@ -74,6 +88,17 @@ export interface TuneTrack {
   peaksVersion: number;
   saved: SavedExport | null;
   undoVersion: number;
+  /** Timing edits ("Tighten timing"), in the take's own time. */
+  warps: WarpSegment[];
+  /** Harmony role found by the last "Fix harmonies" (e.g. "High harmony (3rd above)"). */
+  role: HarmonyRole | null;
+  /** Result of the last line-up (automatic or by button). */
+  alignNote: AlignNote | null;
+}
+
+/** The track's notes and curves as they will be HEARD (timing edits applied). */
+export function heardAnalysis(t: Pick<TuneTrack, "analysis" | "warps">): Analysis | null {
+  return t.analysis ? warpAnalysis(t.analysis, t.warps) : null;
 }
 
 interface Runtime {
@@ -196,6 +221,7 @@ export function useAutotuneTracks(deps: AutotuneDeps) {
         peaksVersion: tr.peaksVersion + 1,
         analyzeSec: (performance.now() - t0) / 1000,
       }));
+      autoAlignAround(id);
     } catch (err) {
       if (rt.disposed) return;
       player.removeTrack(id);
@@ -250,6 +276,9 @@ export function useAutotuneTracks(deps: AutotuneDeps) {
         peaksVersion: 0,
         saved: null,
         undoVersion: 0,
+        warps: [],
+        role: null,
+        alignNote: null,
       };
     });
     commit([...existing, ...added]);
@@ -293,19 +322,43 @@ export function useAutotuneTracks(deps: AutotuneDeps) {
   const setIncluded = (id: string, include: boolean) => update(id, { includeInTuneAll: include });
 
   /** Lines a take up with the lead by its syllable onsets. Refuses (and leaves it) when unsure. */
-  const alignToLead = (id: string): { ok: boolean; message: string } => {
+  const alignToLead = (id: string, auto = false): AlignNote | null => {
     const lead = tracksRef.current.find((t) => t.isLead);
     const t = getTrack(id);
     const leadMono = lead ? runtimes.current.get(lead.id)?.mono : null;
     const mono = runtimes.current.get(id)?.mono;
-    if (!lead || !t || lead.id === id || !leadMono || !mono) return { ok: false, message: "Wait until both takes are analyzed." };
-    const other = resampleLinear(mono, t.sampleRate, lead.sampleRate);
-    const r = depsRef.current.estimateOffset(leadMono, other, lead.sampleRate);
-    if (!(r.confidence >= MIN_ALIGN_CONFIDENCE)) return { ok: false, message: ALIGN_FAILED_MESSAGE };
-    const offset = lead.offsetSec + r.offsetSec;
-    setOffset(id, offset);
-    return { ok: true, message: `Aligned (${offset >= 0 ? "+" : ""}${Math.round(offset * 1000)} ms)` };
+    if (!lead || !t || lead.id === id || !leadMono || !mono) return auto ? null : { ok: false, message: "Wait until both takes are analyzed." };
+    let note: AlignNote | null;
+    if (auto && t.frames === lead.frames && t.sampleRate === lead.sampleRate) {
+      // Same length as the lead: exported from the same session, so already in time.
+      note = { ok: true, message: "In sync with the lead (same start and length)" };
+    } else {
+      const other = resampleLinear(mono, t.sampleRate, lead.sampleRate);
+      const r = depsRef.current.estimateOffset(leadMono, other, lead.sampleRate);
+      const need = auto ? AUTO_ALIGN_CONFIDENCE : MIN_ALIGN_CONFIDENCE;
+      if (!(r.confidence >= need)) note = auto ? null : { ok: false, message: ALIGN_FAILED_MESSAGE };
+      else {
+        const offset = lead.offsetSec + r.offsetSec;
+        setOffset(id, offset);
+        const ms = `${offset >= 0 ? "+" : ""}${Math.round(offset * 1000)} ms`;
+        note = { ok: true, message: auto ? `Lined up with the lead automatically (${ms})` : `Lined up with the lead (${ms})` };
+      }
+    }
+    if (note) update(id, { alignNote: note });
+    return note;
   };
+
+  /** After a take finishes analysing: line it (or, for the lead, every waiting take) up automatically. */
+  const autoAlignAround = (id: string) => {
+    const t = getTrack(id);
+    if (!t) return;
+    const lead = tracksRef.current.find((x) => x.isLead);
+    if (!lead || lead.status !== "ready") return;
+    const targets = t.isLead ? tracksRef.current.filter((x) => !x.isLead && x.status === "ready") : [t];
+    for (const x of targets) if (x.alignNote === null && x.offsetSec === 0) alignToLead(x.id, true);
+  };
+
+  const clearAlignNote = (id: string) => update(id, { alignNote: null });
 
   // ---- Engine operations (strictly serialised per track) ----
   function enqueue<T>(id: string, fn: (engine: PitchEngine) => Promise<T>): Promise<T> {
@@ -359,22 +412,37 @@ export function useAutotuneTracks(deps: AutotuneDeps) {
       });
   };
 
+  /** Replaces a take's timing edits; resolves false if the engine refused them. */
+  const setWarps = async (id: string, segments: WarpSegment[]): Promise<boolean> => {
+    let ok = false;
+    await runOp(id, (e) => e.setWarps(segments), {
+      after: (r) => {
+        ok = r.ok;
+        if (r.ok) update(id, { warps: segments });
+      },
+    });
+    return ok;
+  };
+
+  const setRole = (id: string, role: HarmonyRole | null) => update(id, { role });
+
   const setLocalNotes = (id: string, notes: EngineNote[]) => update(id, (t) => (t.analysis ? { analysis: { ...t.analysis, notes } } : {}));
 
   const undoOf = (id: string): UndoStack<NoteSnapshot[]> | null => runtimes.current.get(id)?.undo ?? null;
   const bumpUndo = (id: string) => update(id, (t) => ({ undoVersion: t.undoVersion + 1 }));
 
   /** Renders a track with every channel at its exact source length and saves "<name>-autotuned.wav". */
-  const exportTrack = async (id: string): Promise<SavedExport> => {
+  const exportTrack = async (id: string, opts: { polish?: boolean } = {}): Promise<SavedExport> => {
     const t = getTrack(id);
     if (!t || t.status !== "ready") throw new Error("That track is not ready.");
     const forAnalysis = t.analysis;
     const rendered = await enqueue(id, (e) => e.renderAllChannels());
-    const channels = fitFrames(rendered, t.frames);
+    let channels = fitFrames(rendered, t.frames);
+    if (opts.polish) channels = fitFrames(await (depsRef.current.polish ?? renderPolished)(channels, t.sampleRate), t.frames);
     const wav = encodeWav(channels, exportSpec(t.format ?? FALLBACK_FORMAT, t.sampleRate));
     const fileName = autotunedName(t.name);
     const path = await backend.saveExport(fileName, new Uint8Array(wav));
-    const saved: SavedExport = { name: path ? basename(path) : fileName, path, forAnalysis };
+    const saved: SavedExport = { name: path ? basename(path) : fileName, path, forAnalysis, polished: !!opts.polish, warps: t.warps };
     update(id, { saved });
     return saved;
   };
@@ -397,6 +465,9 @@ export function useAutotuneTracks(deps: AutotuneDeps) {
     setOffset,
     setIncluded,
     alignToLead,
+    clearAlignNote,
+    setWarps,
+    setRole,
     enqueue,
     runOp,
     setLocalNotes,

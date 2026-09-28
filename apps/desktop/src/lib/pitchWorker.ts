@@ -6,6 +6,7 @@
 import init, { PitchSession } from "../wasm/pitchcore/pitchcore.js";
 import { mergeSpans, type Analysis, type AudioPatch } from "./melodyneEditor";
 import type { PitchWorkerRequest, PitchWorkerResponse } from "./pitchEngine";
+import { expandSpans, flattenWarps, segmentBounds, type WarpSegment } from "./timeWarp";
 
 /** Minimal typing of the dedicated worker global (the project compiles against the DOM lib). */
 interface WorkerScope {
@@ -17,6 +18,8 @@ const scope = self as unknown as WorkerScope;
 let ready: Promise<unknown> | null = null;
 let session: PitchSession | null = null;
 let analysis: Analysis | null = null;
+/** Timing edits currently applied in the session. */
+let warps: WarpSegment[] = [];
 
 function readAnalysis(s: PitchSession): Analysis {
   analysis = JSON.parse(s.analysisJson()) as Analysis;
@@ -35,7 +38,8 @@ function noteMid(i: number): number | null {
 
 function renderSpans(s: PitchSession, spans: [number, number][]): AudioPatch[] {
   const nch = s.channelCount();
-  return mergeSpans(spans).map(([a, b]) => ({
+  // A warped phrase is rebuilt whole, so an edit inside it re-renders the whole segment.
+  return mergeSpans(expandSpans(mergeSpans(spans), warps)).map(([a, b]) => ({
     startSec: a,
     samples: s.render(a, b),
     // The original channels (e.g. stereo), rendered with the same shift map as the mono analysis.
@@ -54,6 +58,7 @@ async function handle(req: PitchWorkerRequest): Promise<{ result: unknown; trans
     session?.free();
     session = null;
     session = new PitchSession(req.samples, req.sampleRate);
+    warps = [];
     if (req.channels && req.channels.length > 0 && !session.setChannels(req.channels[0], req.channels[1] ?? null)) {
       throw new Error("Channel lengths do not match the audio");
     }
@@ -87,6 +92,13 @@ async function handle(req: PitchWorkerRequest): Promise<{ result: unknown; trans
       }
       const ok = s.mergeWithNext(req.index);
       const patches = renderSpans(s, spans);
+      return { result: { ok, analysis: readAnalysis(s), patches }, transfer: transfers(patches) };
+    }
+    case "setWarps": {
+      const spans: [number, number][] = [...warps, ...req.segments].map(segmentBounds);
+      const ok = s.setWarps(flattenWarps(req.segments));
+      if (ok) warps = req.segments.map((w) => ({ anchors: w.anchors.map(([o, i]) => [o, i] as [number, number]) }));
+      const patches = ok ? renderSpans(s, spans) : [];
       return { result: { ok, analysis: readAnalysis(s), patches }, transfer: transfers(patches) };
     }
     case "renderAll": {

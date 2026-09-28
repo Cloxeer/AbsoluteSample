@@ -10,6 +10,7 @@ import {
   type NoteEdit,
   type NoteSnapshot,
 } from "./melodyneEditor";
+import type { WarpSegment } from "./timeWarp";
 
 export interface EditResult {
   ok: boolean;
@@ -25,6 +26,9 @@ export interface PitchEngine {
   setNotes(edits: NoteEdit[]): Promise<EditResult>;
   split(index: number, sec: number): Promise<EditResult>;
   merge(index: number): Promise<EditResult>;
+  /** Replaces the timing edits (identity-ended WSOLA segments, see ./timeWarp). `ok` is false and
+   * nothing changes if the engine refuses them. */
+  setWarps(segments: WarpSegment[]): Promise<EditResult>;
   renderAll(): Promise<Float32Array>;
   /** Every original channel with the current edits (the mono mix if none were attached). */
   renderAllChannels(): Promise<Float32Array[]>;
@@ -36,6 +40,7 @@ export type PitchWorkerRequest =
   | { id: number; type: "setNotes"; edits: NoteEdit[] }
   | { id: number; type: "split"; index: number; sec: number }
   | { id: number; type: "merge"; index: number }
+  | { id: number; type: "setWarps"; segments: WarpSegment[] }
   | { id: number; type: "renderAll" }
   | { id: number; type: "renderAllChannels" };
 
@@ -81,6 +86,7 @@ export function createWorkerPitchEngine(): PitchEngine {
     setNotes: (edits) => call<EditResult>({ type: "setNotes", edits }),
     split: (index, sec) => call<EditResult>({ type: "split", index, sec }),
     merge: (index) => call<EditResult>({ type: "merge", index }),
+    setWarps: (segments) => call<EditResult>({ type: "setWarps", segments }),
     renderAll: () => call<Float32Array>({ type: "renderAll" }),
     renderAllChannels: () => call<Float32Array[]>({ type: "renderAllChannels" }),
     dispose() {

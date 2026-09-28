@@ -447,6 +447,28 @@ export function followPlayhead(vp: Viewport, sec: number, durationSec: number, l
   return Math.abs(next.scrollSec - vp.scrollSec) < 1e-9 ? vp : next;
 }
 
+/** Smallest scrollbar thumb, so it stays grabbable on long songs. */
+export const MIN_THUMB_PX = 28;
+
+/** Horizontal scrollbar geometry for a track `trackPx` wide: thumb position and size in px. */
+export function scrollbarThumb(vp: Viewport, durationSec: number, layout: EditorLayout, trackPx: number): { left: number; width: number; visibleSec: number } {
+  const visibleSec = layout.gridWidth / vp.pxPerSec;
+  const dur = Math.max(visibleSec, durationSec, 1e-6);
+  const width = Math.min(trackPx, Math.max(MIN_THUMB_PX, (visibleSec / dur) * trackPx));
+  const maxScroll = Math.max(1e-9, dur - visibleSec);
+  const left = maxScroll <= 1e-6 ? 0 : (Math.max(0, Math.min(maxScroll, vp.scrollSec)) / maxScroll) * (trackPx - width);
+  return { left, width, visibleSec };
+}
+
+/** Scroll position (s) for a thumb whose left edge is at `left` px (clamped). */
+export function scrollFromThumb(left: number, vp: Viewport, durationSec: number, layout: EditorLayout, trackPx: number): number {
+  const { width, visibleSec } = scrollbarThumb(vp, durationSec, layout, trackPx);
+  const room = trackPx - width;
+  const maxScroll = Math.max(0, durationSec - visibleSec);
+  if (room <= 0 || maxScroll <= 0) return 0;
+  return (Math.max(0, Math.min(room, left)) / room) * maxScroll;
+}
+
 /** Time-ruler tick spacing (s) giving at least `minPx` between labels. */
 export function rulerStep(pxPerSec: number, minPx = 64): number {
   const steps = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];

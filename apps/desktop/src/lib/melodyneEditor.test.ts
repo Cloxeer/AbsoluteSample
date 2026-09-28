@@ -590,3 +590,24 @@ describe("playhead helpers", () => {
     expect(edgeScrollPx(layout.gridLeft + layout.gridWidth + 500, layout)).toBe(EDGE_MAX_PX_PER_FRAME);
   });
 });
+
+describe("timeline scrollbar geometry", () => {
+  it("thumb size shows the visible share; dragging it maps back to scroll time", async () => {
+    const { computeLayout, scrollbarThumb, scrollFromThumb, MIN_THUMB_PX } = await import("./melodyneEditor");
+    const layout = computeLayout(1056); // 1000 px of grid
+    const vp = { scrollSec: 0, pxPerSec: 100, topMidi: 72, rowPx: 14 }; // 10 s visible
+    const t0 = scrollbarThumb(vp, 40, layout, 1000);
+    expect(t0.width).toBeCloseTo(250);
+    expect(t0.left).toBe(0);
+    const end = scrollbarThumb({ ...vp, scrollSec: 30 }, 40, layout, 1000);
+    expect(end.left).toBeCloseTo(750);
+    expect(scrollFromThumb(375, vp, 40, layout, 1000)).toBeCloseTo(15);
+    expect(scrollFromThumb(-50, vp, 40, layout, 1000)).toBe(0);
+    expect(scrollFromThumb(5000, vp, 40, layout, 1000)).toBeCloseTo(30);
+    // Long song: the thumb never gets smaller than a grabbable size.
+    expect(scrollbarThumb(vp, 3600, layout, 1000).width).toBe(MIN_THUMB_PX);
+    // Everything visible: full-width thumb, nothing to scroll.
+    expect(scrollbarThumb(vp, 5, layout, 1000)).toMatchObject({ left: 0, width: 1000 });
+    expect(scrollFromThumb(100, vp, 5, layout, 1000)).toBe(0);
+  });
+});

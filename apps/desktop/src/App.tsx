@@ -176,17 +176,26 @@ export default function App() {
 
   const currentStep = activeTab === "inspector" ? "matrix" : !engine.track ? "source" : !engine.loop ? "loop" : "stems";
 
+  // One switch: pause what plays, else resume/start what belongs to this tab (the vocals on
+  // Autotune), else the stem mix.
   const handlePlayPause = useCallback(() => {
-    if (npState.isPlaying) {
-      nowPlaying.pause();
-    } else if (npState.kind !== null) {
-      nowPlaying.resume();
-    } else {
-      void sync.playMix();
-    }
-  }, [sync, npState.isPlaying, npState.kind]);
+    nowPlaying.toggle(activeTab, () => void sync.playMix());
+  }, [sync, activeTab]);
+  const handleStop = useCallback(() => {
+    nowPlaying.stop();
+    sync.stopAll();
+    samplePlayer.stop();
+  }, [sync]);
+  // Autotune keeps its takes when you visit another tab (it is mounted on first visit, then hidden).
+  const [autotuneOpened, setAutotuneOpened] = useState(false);
+  useEffect(() => {
+    if (activeTab === "autotune") setAutotuneOpened(true);
+  }, [activeTab]);
+  const tabSource = nowPlaying.tabSource(activeTab);
+  const sourceLabel = npState.kind !== null && npState.kind !== "mix" ? npState.label || null : tabSource && npState.kind === null ? tabSource.label : null;
 
-  const transportMode: "mix" | "audition" = npState.kind === null || npState.kind === "mix" ? "mix" : "audition";
+  // The Autotune vocals are a full source of their own (not a stem audition), so no "press Play mix" hint.
+  const transportMode: "mix" | "audition" = npState.kind === null || npState.kind === "mix" || npState.kind === "vocal" ? "mix" : "audition";
   const auditionLabel = useMemo(() => {
     if (transportMode !== "audition") return null;
     if (npState.kind === "audition" && sync.auditionId) {
@@ -197,14 +206,19 @@ export default function App() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      if (e.code === "Space") {
+      const t = e.target;
+      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || (t instanceof HTMLElement && t.isContentEditable)) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.code === "Space" || e.key === " ") {
         e.preventDefault();
-        handlePlayPause();
+        if (!e.repeat) handlePlayPause();
+      } else if (e.key === "Escape") {
+        handleStop();
+      } else if (activeTab === "autotune") {
+        // Autotune has its own M / S / arrow keys; the stem shortcuts below belong to the mixer.
+        return;
       } else if (e.key.toLowerCase() === "l") {
         sync.toggleLoop();
-      } else if (e.key === "Escape") {
-        sync.stopAll();
       } else if (["1", "2", "3", "4"].includes(e.key)) {
         const idx = Number(e.key) - 1;
         const stemKey = stemOrder[idx];
@@ -221,7 +235,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [sync, stemOrder, engine.stems, handlePlayPause]);
+  }, [sync, stemOrder, engine.stems, handlePlayPause, handleStop, activeTab]);
 
   // Per-song jobs: when a job for another song finishes, refresh only the library listing.
   const prevJobIdsRef = useRef<Set<string>>(new Set());
@@ -278,12 +292,9 @@ export default function App() {
         currentTrackId={engine.track?.id ?? null}
         anyJobRunning={anyJobRunning}
         storageRefreshSignal={storageRefreshSignal}
+        sourceLabel={sourceLabel}
         onPlayPause={handlePlayPause}
-        onStop={() => {
-          nowPlaying.stop();
-          sync.stopAll();
-          samplePlayer.stop();
-        }}
+        onStop={handleStop}
         onToggleLoop={sync.toggleLoop}
         onMasterVolumeChange={(v) => {
           setMasterVolume(v);
@@ -347,12 +358,10 @@ export default function App() {
             samples={samples}
           />
         )}
-        {activeTab === "autotune" && (
-          <AutotuneTab
-            track={engine.track}
-            instruments={engine.instruments}
-            samples={samples}
-          />
+        {(autotuneOpened || activeTab === "autotune") && (
+          <div hidden={activeTab !== "autotune"}>
+            <AutotuneTab track={engine.track} instruments={engine.instruments} samples={samples} active={activeTab === "autotune"} />
+          </div>
         )}
       </main>
     </div>

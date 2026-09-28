@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
-import { Check, Download, Maximize2, Merge, Redo2, RotateCcw, Undo2, Wand2, ZoomIn, ZoomOut } from "lucide-react";
+import { Check, Download, GraduationCap, Headphones, Maximize2, Merge, Redo2, RotateCcw, Sparkles, Undo2, Wand2, ZoomIn, ZoomOut } from "lucide-react";
 import { Surface } from "@/components/neumorphic/Surface";
 import { Button } from "@/components/neumorphic/Button";
 import { InfoTip } from "@/components/neumorphic/InfoTip";
@@ -8,8 +8,13 @@ import { PlayPauseButton } from "@/components/neumorphic/PlayPauseButton";
 import { Slider } from "@/components/neumorphic/Slider";
 import { AutotuneSource, type AutotuneSourceHandle, type AutotuneSourceValue } from "@/components/layout/AutotuneSource";
 import { NoteCanvas, profilesFor, type NoteCanvasHandle } from "@/components/autotune/NoteCanvas";
-import { TrackList, type AlignNote } from "@/components/autotune/TrackList";
-import { useAutotuneTracks, type AutotuneDeps, type SavedExport, type TuneTrack } from "@/hooks/useAutotuneTracks";
+import { TrackList } from "@/components/autotune/TrackList";
+import { heardAnalysis, useAutotuneTracks, type AutotuneDeps, type SavedExport, type TuneTrack } from "@/hooks/useAutotuneTracks";
+import { nowPlaying, type NowPlayingController } from "@/lib/nowPlaying";
+import { findSections, isClash, MIN_NOTE_SEC, planFixHarmonies, type StackTrack } from "@/lib/harmonizer";
+import { planTightTiming } from "@/lib/harmonyTiming";
+import { outToIn, warpAnalysis, type WarpSegment } from "@/lib/timeWarp";
+import { coachNote, coachSummary, nextNoteHints, renderGuide } from "@/lib/vocalCoach";
 import { backend } from "@/lib/backend";
 import { isTauri } from "@/lib/mediaUrl";
 import { samplePlayer } from "@/lib/samplePlayer";
@@ -24,6 +29,7 @@ import {
   applyNoteParams,
   correctPitch,
   formatCents,
+  formatTime,
   keyLabel,
   nearestAllowed,
   parseMode,
@@ -52,7 +58,12 @@ export interface AutotuneTabProps {
   instruments: InstrumentStem[] | null;
   samples: Sample[];
   deps?: Partial<AutotuneDeps>;
+  /** False while another tab is shown (the editor stays mounted so your takes are kept). */
+  active?: boolean;
 }
+
+/** The transport's name for this tab's audio. */
+export const AUTOTUNE_TAB = "autotune";
 
 const URLISH = /^(\/|\.\/|https?:|blob:|data:|asset:)/i;
 
@@ -171,7 +182,7 @@ function SliderField({
  * Web Worker), so it behaves the same in the desktop app and on the web. The active track's notes are
  * editable; the other tracks are drawn behind it as ghosts in their colors.
  */
-export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }: AutotuneTabProps) {
+export function AutotuneTab({ track, instruments, samples = [], deps: depsProp, active: tabActive = true }: AutotuneTabProps) {
   const deps = useMemo<AutotuneDeps>(() => ({ ...DEFAULT_DEPS, ...depsProp }), [depsProp]);
   const T = useAutotuneTracks(deps);
   const { player, tracks } = T;
@@ -179,7 +190,8 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
   TRef.current = T;
 
   const active = tracks.find((t) => t.id === T.activeId) ?? null;
-  const analysis = active?.status === "ready" ? active.analysis : null;
+  // What you HEAR (timing edits applied); edits address the engine's notes by index, so this is safe.
+  const analysis = active?.status === "ready" ? heardAnalysis(active) : null;
   const lead = tracks.find((t) => t.isLead) ?? null;
   const multi = tracks.length > 1;
 
@@ -194,6 +206,12 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
   const [detected, setDetected] = useState<string | null>(null);
   const [centerPct, setCenterPct] = useState(90);
   const [driftPct, setDriftPct] = useState(70);
+  /** Fix harmonies: 0 natural .. 100 tight. */
+  const [tightPct, setTightPct] = useState(25);
+  const [tightenTiming, setTightenTiming] = useState(true);
+  const [fixSummary, setFixSummary] = useState<string | null>(null);
+  const [guideOn, setGuideOn] = useState(false);
+  const [polishOn, setPolishOn] = useState(false);
 
   const [playing, setPlaying] = useState(false);
   const [playheadSec, setPlayheadSec] = useState(0);
@@ -203,7 +221,6 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
   const [exporting, setExporting] = useState<"track" | "all" | null>(null);
   /** Files written by the last export (shown as a confirmation). */
   const [lastSaved, setLastSaved] = useState<SavedExport[] | null>(null);
-  const [alignNotes, setAlignNotes] = useState<Record<string, AlignNote>>({});
   const [now, setNow] = useState(() => performance.now());
 
   const liveRef = useRef<{ running: boolean; pending: NoteEdit[] | null; onDone?: (r: EditResult) => void; epoch: number; trackId: string | null }>({
@@ -226,24 +243,72 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
     const t = TRef.current.getTrack(id);
     return t?.status === "ready" ? t.analysis : null;
   };
+  /** The same, as heard (note times after timing edits). */
+  const curHeard = (id = aid()): Analysis | null => {
+    const t = TRef.current.getTrack(id);
+    return t?.status === "ready" ? heardAnalysis(t) : null;
+  };
+  const tabActiveRef = useRef(tabActive);
+  tabActiveRef.current = tabActive;
+
+  // ---- Transport link: the big Play/Stop at the top drives these vocals like any other source ----
+  const controllerRef = useRef<NowPlayingController | null>(null);
+  controllerRef.current ??= {
+    pause: () => player.pause(),
+    resume: () => startPlayback(),
+    stop: () => {
+      player.pause();
+      player.seek(0);
+    },
+  };
+  const startPlayback = () => {
+    if (!TRef.current.tracksRef.current.some((t) => t.status === "ready")) return;
+    if (samplePlayer.getState().id) samplePlayer.stop();
+    if (mixEngine.isPlaying) mixEngine.pause();
+    player.play();
+  };
 
   // ---- Lifecycle ----
   useEffect(() => {
+    let was = player.isPlaying();
+    const ctl = controllerRef.current as NowPlayingController;
     const sync = () => {
-      setPlaying(player.isPlaying());
+      const now = player.isPlaying();
+      setPlaying(now);
       setAbSource(player.getSource());
       setPlayheadSec(player.currentTime());
+      if (now && !was) nowPlaying.start("vocal", "Vocals", player.duration(), ctl);
+      else if (!now && was && nowPlaying.isCurrent(ctl)) nowPlaying.setPlaying(false);
+      if (nowPlaying.isCurrent(ctl)) nowPlaying.tick(player.currentTime());
+      was = now;
     };
     sync();
-    return player.subscribe(sync);
+    const off = player.subscribe(sync);
+    return () => {
+      off();
+      if (nowPlaying.isCurrent(ctl)) nowPlaying.stop();
+    };
   }, [player]);
 
-  // While playing, keep the info panel on the note being heard (10x per second is plenty).
+  // While playing, keep the info panel (and the transport clock) on the note being heard.
   useEffect(() => {
     if (!playing) return;
-    const id = window.setInterval(() => setPlayheadSec(player.currentTime()), 100);
+    const ctl = controllerRef.current as NowPlayingController;
+    const id = window.setInterval(() => {
+      const t = player.currentTime();
+      setPlayheadSec(t);
+      if (nowPlaying.isCurrent(ctl)) nowPlaying.tick(t);
+    }, 100);
     return () => window.clearInterval(id);
   }, [playing, player]);
+
+  // What "Play" means on this tab once a take is ready.
+  const anyReady = tracks.some((t) => t.status === "ready");
+  useEffect(() => {
+    nowPlaying.setTabSource(AUTOTUNE_TAB, anyReady ? { kind: "vocal", label: "Vocals", start: () => startPlayback() } : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anyReady]);
+  useEffect(() => () => nowPlaying.setTabSource(AUTOTUNE_TAB, null), []);
 
   // Progress bars of tracks still loading.
   const anyLoading = tracks.some((t) => t.status === "queued" || t.status === "decoding" || t.status === "analyzing");
@@ -319,9 +384,10 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
       });
   };
 
-  const audition = (id: string, index: number, a: Analysis | null = curAnalysis(id)) => {
-    const n = a?.notes[index];
+  const audition = (id: string, index: number, raw: Analysis | null = curAnalysis(id)) => {
     const t = TRef.current.getTrack(id);
+    const a = raw && t ? warpAnalysis(raw, t.warps) : null;
+    const n = a?.notes[index];
     if (!n || !t || player.isPlaying()) return;
     player.audition(id, n.startSec + t.offsetSec, Math.min(n.endSec, n.startSec + 1.6) + t.offsetSec);
   };
@@ -354,14 +420,8 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
 
   // ---- Transport ----
   const togglePlay = () => {
-    if (!TRef.current.tracksRef.current.some((t) => t.status === "ready")) return;
-    if (player.isPlaying()) {
-      player.pause();
-      return;
-    }
-    if (samplePlayer.getState().id) samplePlayer.stop();
-    mixEngine.pause();
-    player.play();
+    if (player.isPlaying()) player.pause();
+    else startPlayback();
   };
 
   // ---- Note actions (active track) ----
@@ -419,7 +479,12 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
     void T0.runOp(id, task);
   };
 
-  const handleSplit = (i: number, sec: number) => structural((e) => e.split(i, sec), i);
+  // The canvas speaks heard time; the engine splits in the take's own time.
+  const handleSplit = (i: number, sec: number) => {
+    const warps = TRef.current.getTrack(aid())?.warps ?? [];
+    const at = outToIn(warps, sec);
+    structural((e) => e.split(i, at), i);
+  };
 
   const handleMerge = () => {
     const cur = curAnalysis();
@@ -438,6 +503,9 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
   const handleReset = () => {
     const cur = curAnalysis();
     if (!cur) return;
+    const id = aid();
+    const t = id ? TRef.current.getTrack(id) : null;
+    if (t && selectedRef.current.size === 0 && t.warps.length > 0) void TRef.current.setWarps(t.id, []);
     const edits = targetIndices()
       .map((i) => noteEdit(i, { target: cur.notes[i].center, drift: 1, modulation: 1 }))
       .filter((e): e is NoteEdit => e !== null);
@@ -458,6 +526,72 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
       const edits = t.analysis.notes.map((n, i) => ({ index: i, ...correctPitch(n, 1, 0.5, scalePcs) }));
       commitEdits(edits, { trackId: t.id });
     }
+  };
+
+  /**
+   * Fix harmonies: tighten each harmony's timing to the lead (optional), then give every held note the
+   * best note of the key for the stack, gently. One undo step per track; the lead is the reference.
+   */
+  const handleFixHarmonies = async () => {
+    const T0 = TRef.current;
+    const ready = T0.tracksRef.current.filter((t) => t.status === "ready" && t.analysis);
+    if (ready.length === 0) return;
+    const lead = ready.find((t) => t.isLead) ?? ready[0];
+    const tight = tightPct / 100;
+    const include = new Set(ready.filter((t) => t.includeInTuneAll).map((t) => t.id));
+    const leadHeard = heardAnalysis(lead) as Analysis;
+    const leadTimeline = leadHeard.notes.map((n) => ({ startSec: n.startSec + lead.offsetSec, endSec: n.endSec + lead.offsetSec }));
+
+    // 1. Timing (harmonies only).
+    const warpsById = new Map<string, WarpSegment[]>();
+    let syllables = 0;
+    for (const t of ready) {
+      if (t.id === lead.id || !include.has(t.id)) continue;
+      if (!tightenTiming) {
+        if (t.warps.length > 0) warpsById.set(t.id, []);
+        continue;
+      }
+      const a = t.analysis as Analysis;
+      const plan = planTightTiming({ lead: leadTimeline, notes: a.notes, offsetSec: t.offsetSec, durationSec: a.durationSec, tight });
+      warpsById.set(t.id, plan.segments);
+      syllables += plan.moved;
+    }
+
+    // 2. Notes, planned on the timing as it will be heard.
+    const stack: StackTrack[] = ready.map((t) => ({
+      id: t.id,
+      notes: warpAnalysis(t.analysis as Analysis, warpsById.get(t.id) ?? t.warps).notes,
+      offsetSec: t.offsetSec,
+      isLead: t.id === lead.id,
+    }));
+    const plan = planFixHarmonies(stack, include, { scalePcs, tight });
+    let fixed = 0;
+    let clashesFixed = 0;
+    for (const f of plan.tracks) {
+      fixed += f.fixed;
+      clashesFixed += Math.max(0, f.clashesBefore - f.clashesAfter);
+      if (f.id !== lead.id) T0.setRole(f.id, f.role);
+      if (f.edits.length > 0) commitEdits(f.edits, { trackId: f.id });
+    }
+    const pending: Promise<boolean>[] = [];
+    for (const [id, segs] of warpsById) {
+      const cur = T0.getTrack(id)?.warps ?? [];
+      if (cur.length === 0 && segs.length === 0) continue;
+      pending.push(T0.setWarps(id, segs));
+    }
+    const multiTrack = ready.length > 1;
+    const parts = [`${fixed} note${fixed === 1 ? "" : "s"} tuned`];
+    if (clashesFixed > 0) parts.push(`${clashesFixed} clash${clashesFixed === 1 ? "" : "es"} smoothed`);
+    if (multiTrack && tightenTiming) parts.push(syllables > 0 ? `${syllables} syllable${syllables === 1 ? "" : "s"} tightened to the lead` : "timing already tight");
+    setFixSummary(parts.join(" · "));
+    await Promise.all(pending);
+  };
+
+  const handleTightenTiming = (on: boolean) => {
+    setTightenTiming(on);
+    if (on) return;
+    // Off: put every take's timing back as it was sung.
+    for (const t of TRef.current.tracksRef.current) if (t.warps.length > 0) void TRef.current.setWarps(t.id, []);
   };
 
   const handleParamSlider = (param: "modulation" | "drift") => (pct: number) => {
@@ -492,19 +626,13 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
 
   // ---- Tracks ----
   const handleAlign = (id: string) => {
-    const r = TRef.current.alignToLead(id);
-    setAlignNotes((m) => ({ ...m, [id]: r }));
+    TRef.current.alignToLead(id);
   };
   const handleNudge = (id: string, delta: number) => {
     const t = TRef.current.getTrack(id);
     if (!t) return;
     TRef.current.setOffset(id, t.offsetSec + delta);
-    setAlignNotes((m) => {
-      if (!(id in m)) return m;
-      const next = { ...m };
-      delete next[id];
-      return next;
-    });
+    if (t.alignNote) TRef.current.clearAlignNote(id);
   };
   const toggleMix = (which: "muted" | "solo") => {
     const t = TRef.current.getTrack(aid());
@@ -512,10 +640,12 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
   };
 
   // ---- Keyboard ----
-  const keyHandlersRef = useRef({ togglePlay, handleUndo, stepSelected, toggleMix });
-  keyHandlersRef.current = { togglePlay, handleUndo, stepSelected, toggleMix };
+  const keyHandlersRef = useRef({ handleUndo, stepSelected, toggleMix });
+  keyHandlersRef.current = { handleUndo, stepSelected, toggleMix };
   useEffect(() => {
+    // Space is handled once, by the app transport (it plays these vocals on this tab).
     const onKey = (e: KeyboardEvent) => {
+      if (!tabActiveRef.current) return;
       if (!TRef.current.tracksRef.current.some((t) => t.status === "ready")) return;
       const t = e.target instanceof HTMLElement ? e.target : null;
       const tag = t?.tagName;
@@ -523,10 +653,7 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
       const h = keyHandlersRef.current;
       const mod = e.ctrlKey || e.metaKey;
       const key = e.key.toLowerCase();
-      if (e.code === "Space" || e.key === " ") {
-        e.preventDefault();
-        h.togglePlay();
-      } else if (mod && key === "z") {
+      if (mod && key === "z") {
         e.preventDefault();
         h.handleUndo(e.shiftKey);
       } else if (mod && key === "y") {
@@ -547,7 +674,7 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
   }, []);
 
   // ---- Export ----
-  const isSaved = (t: TuneTrack) => t.saved !== null && t.saved.forAnalysis === t.analysis;
+  const isSaved = (t: TuneTrack) => t.saved !== null && t.saved.forAnalysis === t.analysis && !!t.saved.polished === polishOn;
   const readyTracks = tracks.filter((t) => t.status === "ready");
   const unsaved = readyTracks.filter((t) => !isSaved(t));
   const activeSaved = active !== null && isSaved(active);
@@ -558,7 +685,7 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
     setExporting(kind);
     const done: SavedExport[] = [];
     try {
-      for (const id of ids) done.push(await TRef.current.exportTrack(id));
+      for (const id of ids) done.push(await TRef.current.exportTrack(id, { polish: polishOn }));
     } catch (err) {
       TRef.current.setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -586,7 +713,7 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
     const next: GhostTrack[] = tracks
       .filter((t) => t.id !== active?.id && t.status === "ready" && t.analysis)
       .map((t) => {
-        const a = t.analysis as Analysis;
+        const a = heardAnalysis(t) as Analysis;
         return { id: t.id, color: t.color, notes: a.notes, profiles: profilesFor(a), hopSec: a.hopSec, offsetSec: t.offsetSec, dim: t.muted || (anySolo && !t.solo) };
       });
     // Keep the same array when nothing a ghost draws has changed (avoids needless scene redraws).
@@ -618,11 +745,57 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
 
   // Harmony help: interval of the edited harmony note to the lead note sounding at the same time.
   let interval: { label: string; clash: boolean } | null = null;
-  if (active && lead && lead.id !== active.id && lead.status === "ready" && lead.analysis && shownNote && primaryPitch !== null && (hasSelection || dragged)) {
+  const leadHeard = lead && lead.status === "ready" ? heardAnalysis(lead) : null;
+  if (active && lead && lead.id !== active.id && leadHeard && shownNote && primaryPitch !== null && (hasSelection || dragged)) {
     const mid = (shownNote.startSec + shownNote.endSec) / 2 + active.offsetSec;
-    const ln = leadNoteAt(lead.analysis.notes, lead.offsetSec, mid);
+    const ln = leadNoteAt(leadHeard.notes, lead.offsetSec, mid);
     interval = ln ? intervalTo(ln.target, primaryPitch) : { label: "Lead is silent here", clash: false };
   }
+
+  // Where the lead sings alone and where the stack is (only with harmonies loaded).
+  const sections = useMemo(() => {
+    const ready = tracks.filter((t) => t.status === "ready" && t.analysis);
+    if (ready.length < 2) return undefined;
+    return findSections(ready.map((t) => ({ id: t.id, notes: (heardAnalysis(t) as Analysis).notes, offsetSec: t.offsetSec, isLead: t.isLead })));
+  }, [tracks]);
+  // Harmony notes that rub against the lead get a red edge.
+  const clashes = useMemo(() => {
+    if (!analysis || !active || !leadHeard || !lead || lead.id === active.id) return undefined;
+    const out = new Set<number>();
+    analysis.notes.forEach((n, i) => {
+      if (n.endSec - n.startSec < MIN_NOTE_SEC) return;
+      const ln = leadNoteAt(leadHeard.notes, lead.offsetSec, (n.startSec + n.endSec) / 2 + active.offsetSec);
+      if (ln && ln.endSec - ln.startSec >= MIN_NOTE_SEC && isClash(Math.round(n.target) - Math.round(ln.target))) out.add(i);
+    });
+    return out;
+  }, [analysis, active, leadHeard, lead]);
+
+  // Coach: judged on what was SUNG (the detected centers), so it tells you how to sing it next time.
+  const coach = useMemo(() => (analysis ? coachSummary(analysis, scalePcs) : null), [analysis, scalePcs]);
+  const noteTip = shownNote && analysis ? coachNote(shownNote, analysis.pitch, scalePcs) : null;
+  const hints = primaryPitch !== null ? nextNoteHints(primaryPitch, tonicPc, scalePcs) : [];
+
+  // Guide tone: the tuned melody of the edited track, quietly, so you can sing along to the right notes.
+  const guideSig = guideOn && analysis && active ? `${active.id}:${active.offsetSec}` : null;
+  useEffect(() => {
+    if (!guideSig || !analysis || !active) {
+      player.setGuide(null);
+      return;
+    }
+    const tmr = window.setTimeout(() => player.setGuide(renderGuide(analysis.notes, active.sampleRate, analysis.durationSec), active.sampleRate, active.offsetSec), 150);
+    return () => window.clearTimeout(tmr);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [guideSig, analysis, player]);
+  useEffect(() => player.setPolish(polishOn), [polishOn, player]);
+
+  const jumpTo = (index: number) => {
+    const n = analysis?.notes[index];
+    if (!n || !active) return;
+    setSelected(new Set([index]));
+    const at = n.startSec + active.offsetSec;
+    player.seek(Math.max(0, at - 0.5));
+    canvasRef.current?.reveal(at);
+  };
 
   const loadingTrack = active && active.status !== "ready" && active.status !== "error" ? active : null;
   const elapsed = loadingTrack ? Math.max(0, (now - loadingTrack.startedAt) / 1000) : 0;
@@ -683,7 +856,6 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
           <TrackList
             tracks={tracks}
             activeId={T.activeId}
-            alignNotes={alignNotes}
             onSelect={T.setActiveId}
             onMakeLead={T.setLead}
             onMix={T.setMix}
@@ -746,6 +918,28 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
                   { value: "tuned", label: "Tuned" },
                 ]}
               />
+              <Button
+                type="button"
+                pressed={polishOn}
+                tone="cyan"
+                aria-label="Studio polish"
+                title="Studio polish: the finishing chain engineers use (rumble cut, less mud, presence and air, gentle compression, a short plate reverb). Also applied to downloads while on."
+                onClick={() => setPolishOn((v) => !v)}
+                className="!px-3 !py-1.5 inline-flex items-center gap-1.5 text-xs"
+              >
+                <Sparkles size={13} /> Polish
+              </Button>
+              <Button
+                type="button"
+                pressed={guideOn}
+                tone="cyan"
+                aria-label="Guide notes"
+                title="Plays the right notes of this track as a soft tone under your voice, so you can learn to hit them"
+                onClick={() => setGuideOn((v) => !v)}
+                className="!px-3 !py-1.5 inline-flex items-center gap-1.5 text-xs"
+              >
+                <Headphones size={13} /> Guide notes
+              </Button>
               <div className="w-px h-7 bg-white/5" />
               <Button type="button" aria-label="Undo" title="Undo (Ctrl+Z)" onClick={() => handleUndo(false)} disabled={!undoStack?.canUndo} className="!px-2.5">
                 <Undo2 size={15} />
@@ -773,7 +967,7 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
                 />
               </div>
               <div className="flex items-center gap-2">
-                <Label tip={{ term: "Key", text: "The song's key, found from every take. Light rows are notes in the key; notes snap to them." }}>Key</Label>
+                <Label tip={{ term: "Key", text: "The song's key, found from every take. Blue rows are the notes in the key: stay on them and it sounds right. Notes snap to them." }}>Key</Label>
                 <select
                   value={tonicPc}
                   onChange={(e) => {
@@ -907,6 +1101,50 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
               </div>
             </div>
 
+            {/* Fix harmonies / Fix vocal */}
+            <div className="flex flex-wrap items-end gap-4 px-1 pt-2 border-t border-white/5" data-testid="fix-harmonies">
+              <Button
+                type="button"
+                variant="primary"
+                onClick={() => void handleFixHarmonies()}
+                title={
+                  multi
+                    ? "Finds what each harmony is going for and snaps it to the best note of the key against the lead, gently (your voice, just in tune and in time)"
+                    : "Tunes every held note gently to the key and keeps your natural slides and vibrato"
+                }
+                className="inline-flex items-center gap-1.5 !text-[#06202b] !bg-[#4FC3F7] !shadow-[0_0_16px_rgba(79,195,247,0.35)]"
+              >
+                <Sparkles size={14} /> {multi ? "Fix harmonies" : "Fix vocal"}
+              </Button>
+              <div className="flex flex-col gap-1.5">
+                <Label tip={{ term: "Natural / Tight", text: "Natural keeps most of your voice's movement. Tight holds notes steadier for a polished, stacked sound." }}>
+                  Natural ↔ Tight
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Slider value={tightPct} min={0} max={100} step={1} orientation="horizontal" onChange={setTightPct} label="Natural to tight" className="w-32" />
+                  <span className="text-xs text-text w-10 tabular-nums font-mono">{Math.round(tightPct)}%</span>
+                </div>
+              </div>
+              {multi && (
+                <label className="flex items-center gap-1.5 text-xs text-muted cursor-pointer pb-1" title="Moves harmony syllables that start or end a little early/late onto the lead's timing (the lead never moves)">
+                  <input type="checkbox" checked={tightenTiming} onChange={(e) => handleTightenTiming(e.target.checked)} aria-label="Tighten timing" className="accent-[#4FC3F7]" />
+                  Tighten timing
+                </label>
+              )}
+              {fixSummary && (
+                <span role="status" data-testid="fix-summary" className="text-[11px] text-cyan pb-1">
+                  {fixSummary}
+                </span>
+              )}
+              {sections && (
+                <span className="ml-auto flex items-center gap-3 text-[10px] text-muted pb-1" aria-label="Section colors">
+                  <span className="inline-flex items-center gap-1"><span className="w-3 h-1 rounded bg-[#F0A04B]/70" /> Lead alone</span>
+                  <span className="inline-flex items-center gap-1"><span className="w-3 h-1 rounded bg-[#4FC3F7]" /> Lead + harmonies</span>
+                  <span className="inline-flex items-center gap-1"><span className="w-3 h-1 rounded bg-[#B388FF]/80" /> Harmonies alone</span>
+                </span>
+              )}
+            </div>
+
             <div className="rounded-xl overflow-hidden neu-surface-inset">
               <NoteCanvas
                 ref={canvasRef}
@@ -929,6 +1167,8 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
                 ghosts={ghosts}
                 color={active.color}
                 trackId={active.id}
+                sections={sections}
+                clashes={clashes}
                 onSelect={handleSelect}
                 onSeek={(sec) => player.seek(sec)}
                 onDragStart={handleDragStart}
@@ -999,11 +1239,76 @@ export function AutotuneTab({ track, instruments, samples = [], deps: depsProp }
             </div>
           </Surface>
 
-          <Surface variant="raised" className="p-4 text-sm leading-relaxed text-text">
-            <div className="text-[10px] text-muted uppercase tracking-wider mb-1.5">In plain words</div>
-            Drag a note up or down; it snaps to the song&apos;s key. Double-click a note to snap it; double-click its top to
-            split it. Space plays. Click the time ruler to move the playhead, and flip Original / Tuned to compare.
-            {multi && " Click a track to edit it; the others show as outlines so you can see the harmony against the lead."}
+          <Surface variant="raised" className="p-4 flex flex-col gap-3 text-sm leading-relaxed text-text" data-testid="vocal-coach">
+            <div className="flex items-center gap-2 text-[10px] text-muted uppercase tracking-wider">
+              <GraduationCap size={13} className="text-cyan" /> Vocal coach{multi && <span className="normal-case tracking-normal">: {active.name}</span>}
+            </div>
+            {coach && coach.heldNotes > 0 ? (
+              <div className="flex flex-wrap items-start gap-6">
+                <div className="flex flex-col">
+                  <span className="text-2xl font-bold font-mono tabular-nums" data-testid="coach-accuracy">
+                    {Math.round((coach.accuracy ?? 0) * 100)}%
+                  </span>
+                  <span className="text-[11px] text-muted">notes sung on pitch</span>
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-2xl font-bold font-mono tabular-nums" data-testid="coach-steadiness">
+                    {coach.steadiness === null ? "–" : `${Math.round(coach.steadiness * 100)}%`}
+                  </span>
+                  <span className="text-[11px] text-muted">held steady</span>
+                </div>
+                <div className="flex flex-col gap-1.5 min-w-[220px]">
+                  <span className="text-[11px] text-muted">{coach.practice.length > 0 ? "Practise these (click to hear where):" : "Every held note was close. Nice."}</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {coach.practice.map((p) => (
+                      <button
+                        key={p.index}
+                        type="button"
+                        onClick={() => jumpTo(p.index)}
+                        className="px-2 py-1 rounded-lg neu-surface-inset bg-surface text-[11px] hover:text-cyan"
+                        title="Select this note and move the playhead there"
+                      >
+                        {formatTime(p.startSec + active.offsetSec, 0.1)} · aim {p.aimName} ({p.cents > 0 ? `${p.cents}¢ sharp` : `${-p.cents}¢ flat`})
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1 min-w-[240px] flex-1" data-testid="coach-note">
+                  {noteTip ? (
+                    <>
+                      <span className="text-[11px] text-muted">This note ({hasSelection ? "selected" : "at the playhead"})</span>
+                      <span>
+                        Aim for <b className="font-mono">{noteTip.aimName}</b>
+                        {Math.abs(noteTip.cents) > 5 && (
+                          <span className="text-muted"> · you sang {Math.abs(noteTip.cents)}¢ {noteTip.cents < 0 ? "flat" : "sharp"}</span>
+                        )}
+                        {" · "}
+                        <span className={clsx(noteTip.verdict.startsWith("On pitch") ? "text-cyan" : "text-[#F0C04B]")}>{noteTip.verdict}</span>
+                      </span>
+                      {hints.length > 0 && (
+                        <span className="text-[12px] text-muted" data-testid="coach-next">
+                          Where it likes to go next: {hints.map((h, i) => (
+                            <span key={h.midi} title={h.why}>
+                              {i > 0 && ", "}
+                              <b className="text-text font-mono">{h.name}</b> <span className="text-[11px]">({h.why.toLowerCase()})</span>
+                            </span>
+                          ))}
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-[12px] text-muted">Select a note (or press Play) to see which note to aim for and where the melody likes to go next.</span>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <span className="text-[12px] text-muted">Sing some held notes and the coach will show how close you were.</span>
+            )}
+            <div className="text-[12px] text-muted leading-relaxed border-t border-white/5 pt-2">
+              Drag a note up or down; it snaps to the blue rows (the notes of the key). Double-click a note to snap it;
+              double-click its top to split it. Space plays. Drag the bar under the notes to move through the song.
+              {multi && " Click a track to edit it; the others show as outlines. Fix harmonies finds what each harmony is going for and locks it to the best note against the lead."}
+            </div>
           </Surface>
         </>
       )}

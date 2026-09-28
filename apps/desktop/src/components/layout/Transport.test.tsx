@@ -88,7 +88,7 @@ describe("Transport", () => {
   it("opens the shortcuts popover", () => {
     render(<Transport {...baseProps} />);
     fireEvent.click(screen.getByLabelText("Keyboard shortcuts"));
-    expect(screen.getByText("Play / pause mix")).toBeInTheDocument();
+    expect(screen.getByText("Play / pause (the vocals on Autotune)")).toBeInTheDocument();
   });
 
   describe("storage and GPU chips", () => {

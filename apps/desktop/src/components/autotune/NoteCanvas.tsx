@@ -10,6 +10,8 @@ import {
   notesInRect,
   referenceDb,
   regionAt,
+  scrollbarThumb,
+  scrollFromThumb,
   snapPitch,
   xToTime,
   zoomHorizontal,
@@ -53,7 +55,12 @@ export const DRAG_THRESHOLD_PX = 3;
 export interface NoteCanvasHandle {
   fit(): void;
   zoom(factor: number): void;
+  /** Scrolls so timeline second `sec` is in view (no-op if it already is). */
+  reveal(sec: number): void;
 }
+
+/** After the user scrolls by hand, playback stops pulling the view back for this long. */
+export const MANUAL_SCROLL_HOLD_MS = 2500;
 
 export interface NoteCanvasProps {
   analysis: Analysis;
@@ -81,6 +88,10 @@ export interface NoteCanvasProps {
   color?: string;
   /** Id of the edited track (exposed as a data attribute). */
   trackId?: string;
+  /** Lead-alone / stack / harmony-alone strip under the time ruler (timeline seconds). */
+  sections?: readonly { startSec: number; endSec: number; kind: string }[];
+  /** Indices of edited-track notes that clash with the lead. */
+  clashes?: ReadonlySet<number>;
   onSelect(next: Set<number>): void;
   onSeek(sec: number): void;
   onDragStart(indices: number[]): void;
@@ -129,6 +140,8 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
     ghosts,
     color,
     trackId,
+    sections,
+    clashes,
   } = props;
   const wrapRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<HTMLCanvasElement>(null);
@@ -188,6 +201,13 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
       zoom(factor: number) {
         setVp((v) => zoomHorizontal(v, factor, layout.gridLeft + layout.gridWidth / 2, durOf(), layout));
       },
+      reveal(sec: number) {
+        setVp((v) => {
+          const visible = layout.gridWidth / v.pxPerSec;
+          if (sec >= v.scrollSec && sec <= v.scrollSec + visible * 0.9) return v;
+          return clampScroll({ ...v, scrollSec: sec - visible * 0.2 }, durOf(), layout);
+        });
+      },
     }),
     [fit, layout]
   );
@@ -232,9 +252,11 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
       timeOffsetSec,
       color,
       ghosts,
+      sections,
+      clashes,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layout, vp, analysis, profiles, scalePcs, tonicPc, selected, overrides, peaks, peaksVersion, peakBlock, peakMax, sampleRate, timeOffsetSec, color, ghosts]);
+  }, [layout, vp, analysis, profiles, scalePcs, tonicPc, selected, overrides, peaks, peaksVersion, peakBlock, peakMax, sampleRate, timeOffsetSec, color, ghosts, sections, clashes]);
 
   const drawOverlayNow = useCallback(() => {
     const ctx = setupCanvas(overlayRef.current);
@@ -248,13 +270,20 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
     return player.subscribe(drawOverlayNow);
   }, [drawOverlayNow, player]);
 
+  // Manual scrolling (scrollbar / wheel) pauses the playback follow for a moment.
+  const manualUntil = useRef(0);
+  const scrollDrag = useRef<{ pointerId: number; startX: number; startLeft: number } | null>(null);
+  const markManual = () => {
+    manualUntil.current = performance.now() + MANUAL_SCROLL_HOLD_MS;
+  };
+
   // Playback: redraw the playhead every frame and follow it (unless a note is being dragged).
   useEffect(() => {
     if (!playing || typeof requestAnimationFrame === "undefined") return;
     let raf = 0;
     const tick = () => {
       const g = gestureRef.current;
-      if (!g || g.kind !== "note") {
+      if ((!g || g.kind !== "note") && !scrollDrag.current && performance.now() >= manualUntil.current) {
         const next = followPlayhead(vpRef.current, player.currentTime(), durOf(), layout);
         if (next !== vpRef.current) setVp(next);
       }
@@ -279,6 +308,7 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
         setVp((v) => zoomHorizontal(v, factor, Math.max(layout.gridLeft, x), dur, layout));
       } else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
         const d = e.shiftKey ? e.deltaY || e.deltaX : e.deltaX;
+        manualUntil.current = performance.now() + MANUAL_SCROLL_HOLD_MS;
         setVp((v) => clampScroll({ ...v, scrollSec: v.scrollSec + d / v.pxPerSec }, dur, layout));
       } else {
         setVp((v) => ({ ...v, topMidi: clampTopMidi(v.topMidi - e.deltaY / v.rowPx / 3, v.rowPx, layout) }));
@@ -447,7 +477,52 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
     else propsRef.current.onSnapNote(hit.index);
   };
 
+  // ---- Timeline scrollbar ----
+  const trackPx = layout.gridWidth;
+  const thumb = scrollbarThumb(vp, durOf(), layout, trackPx);
+  const scrollTo = (sec: number) => {
+    markManual();
+    setVp((v) => clampScroll({ ...v, scrollSec: sec }, durOf(), layout));
+  };
+  const onBarPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const onThumb = x >= thumb.left && x <= thumb.left + thumb.width;
+    // Clicking the empty track jumps there (centred); either way the thumb then follows the pointer.
+    const startLeft = onThumb ? thumb.left : x - thumb.width / 2;
+    if (!onThumb) scrollTo(scrollFromThumb(startLeft, vpRef.current, durOf(), layout, trackPx));
+    scrollDrag.current = { pointerId: e.pointerId, startX: e.clientX, startLeft };
+    try {
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+    } catch {
+      /* jsdom */
+    }
+  };
+  const onBarPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = scrollDrag.current;
+    if (!d || d.pointerId !== e.pointerId) return;
+    scrollTo(scrollFromThumb(d.startLeft + (e.clientX - d.startX), vpRef.current, durOf(), layout, trackPx));
+  };
+  const onBarPointerUp = () => {
+    scrollDrag.current = null;
+  };
+  const onBarKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const steps: Record<string, number> = { ArrowLeft: -0.1, ArrowRight: 0.1, PageUp: -0.9, PageDown: 0.9 };
+    const step = steps[e.key];
+    if (step !== undefined) {
+      e.preventDefault();
+      e.stopPropagation();
+      scrollTo(vpRef.current.scrollSec + step * thumb.visibleSec);
+    } else if (e.key === "Home" || e.key === "End") {
+      e.preventDefault();
+      e.stopPropagation();
+      scrollTo(e.key === "Home" ? 0 : durOf());
+    }
+  };
+
   return (
+    <div className="w-full">
     <div ref={wrapRef} className="relative w-full select-none" style={{ height: layout.height }}>
       <canvas
         ref={sceneRef}
@@ -470,6 +545,33 @@ export const NoteCanvas = forwardRef<NoteCanvasHandle, NoteCanvasProps>(function
         onPointerCancel={endGesture}
         onDoubleClick={handleDoubleClick}
       />
+    </div>
+    <div className="py-1.5 pr-1.5" style={{ paddingLeft: layout.gridLeft }}>
+      <div
+        data-testid="autotune-scrollbar"
+        role="scrollbar"
+        aria-label="Move through time"
+        aria-orientation="horizontal"
+        aria-valuemin={0}
+        aria-valuemax={Math.round(Math.max(0, durOf() - thumb.visibleSec) * 10) / 10}
+        aria-valuenow={Math.round(vp.scrollSec * 10) / 10}
+        tabIndex={0}
+        title="Drag to move left and right through the song"
+        onPointerDown={onBarPointerDown}
+        onPointerMove={onBarPointerMove}
+        onPointerUp={onBarPointerUp}
+        onPointerCancel={onBarPointerUp}
+        onKeyDown={onBarKey}
+        className="relative h-4 rounded-full neu-surface-inset bg-surface cursor-pointer touch-none select-none outline-none focus-visible:ring-1 focus-visible:ring-[#4FC3F7]/60"
+        style={{ width: trackPx }}
+      >
+        <div
+          data-testid="autotune-scrollbar-thumb"
+          className="absolute top-[3px] bottom-[3px] rounded-full bg-[#4FC3F7]/45 hover:bg-[#4FC3F7]/65 active:bg-[#4FC3F7]/80 cursor-grab active:cursor-grabbing transition-colors"
+          style={{ left: thumb.left, width: thumb.width }}
+        />
+      </div>
+    </div>
     </div>
   );
 });

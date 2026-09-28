@@ -28,8 +28,9 @@ import {
 
 export const COLORS = {
   bg: "#141519",
-  beam: "#25272d",
-  beamTonic: "#2c2d33",
+  /** Rows of notes in the key: a light blue hue (the home note a little stronger). */
+  beam: "#1d2635",
+  beamTonic: "#243248",
   offScale: "#17181c",
   rowLine: "rgba(0,0,0,0.38)",
   cLine: "rgba(255,255,255,0.13)",
@@ -37,7 +38,11 @@ export const COLORS = {
   ruler: "#1c1d22",
   rulerText: "#9A9EA8",
   rulerTextDim: "#5f636c",
-  rulerTextIn: "#d9dbe0",
+  rulerTextIn: "#b9d7ff",
+  rulerBeam: "rgba(110,165,255,0.13)",
+  rulerBeamTonic: "rgba(110,165,255,0.22)",
+  clash: "#FF5A5A",
+  section: { lead: "rgba(240,160,75,0.55)", stack: "rgba(79,195,247,0.8)", harmony: "rgba(179,136,255,0.7)" } as Record<string, string>,
   waveBg: "#17181c",
   wave: "rgba(240,160,75,0.55)",
   blob: "#F0A04B",
@@ -78,6 +83,10 @@ export interface SceneState {
   color?: string;
   /** Other tracks, drawn as faint outlines behind the edited notes. */
   ghosts?: readonly GhostTrack[];
+  /** Timeline sections (lead alone / lead + harmonies / harmonies alone), drawn as a strip. */
+  sections?: readonly { startSec: number; endSec: number; kind: string }[];
+  /** Edited-track notes that rub against the lead (drawn with a red edge). */
+  clashes?: ReadonlySet<number>;
 }
 
 /** A non-edited track shown for reference (e.g. the lead behind a harmony). Geometry is precomputed. */
@@ -138,6 +147,7 @@ export function drawScene(ctx: CanvasRenderingContext2D, s: SceneState): void {
 
   drawWaveLane(ctx, s, local);
   drawTimeRuler(ctx, s);
+  drawSections(ctx, s);
   drawPitchRuler(ctx, s);
 
   // Corner and lane labels
@@ -233,8 +243,9 @@ function drawNotes(ctx: CanvasRenderingContext2D, s: SceneState): void {
     grad.addColorStop(1, sel ? COLORS.blobSel : bc.fill);
     ctx.fillStyle = grad;
     ctx.fill();
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = sel ? COLORS.blobSelEdge : bc.edge;
+    const clash = !sel && (s.clashes?.has(i) ?? false);
+    ctx.lineWidth = clash ? 2 : 1;
+    ctx.strokeStyle = sel ? COLORS.blobSelEdge : clash ? COLORS.clash : bc.edge;
     ctx.stroke();
   }
 
@@ -475,7 +486,7 @@ function drawPitchRuler(ctx: CanvasRenderingContext2D, s: SceneState): void {
     const inScale = isInScale(m, s.scalePcs);
     const isC = pitchClass(m) === 0;
     if (inScale) {
-      ctx.fillStyle = "rgba(255,255,255,0.04)";
+      ctx.fillStyle = pitchClass(m) === s.tonicPc ? COLORS.rulerBeamTonic : COLORS.rulerBeam;
       ctx.fillRect(0, y0, layout.gridLeft, vp.rowPx);
     }
     ctx.fillStyle = isC ? COLORS.cLine : "rgba(0,0,0,0.3)";
@@ -486,6 +497,25 @@ function drawPitchRuler(ctx: CanvasRenderingContext2D, s: SceneState): void {
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
     ctx.fillText(noteName(m), layout.gridLeft - 8, y0 + vp.rowPx / 2);
+  }
+  ctx.restore();
+}
+
+/** Thin colored strip under the time ruler: where the lead sings alone and where the stack is. */
+function drawSections(ctx: CanvasRenderingContext2D, s: SceneState): void {
+  if (!s.sections || s.sections.length === 0) return;
+  const { layout, vp } = s;
+  const y = layout.waveTop - 4;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(layout.gridLeft, 0, layout.gridWidth, layout.waveTop);
+  ctx.clip();
+  for (const sec of s.sections) {
+    const x0 = timeToX(sec.startSec, vp, layout);
+    const x1 = timeToX(sec.endSec, vp, layout);
+    if (x1 < layout.gridLeft || x0 > layout.width) continue;
+    ctx.fillStyle = COLORS.section[sec.kind] ?? COLORS.rulerTextDim;
+    ctx.fillRect(Math.max(layout.gridLeft, x0), y, Math.max(1, Math.min(layout.width, x1) - Math.max(layout.gridLeft, x0)), 3);
   }
   ctx.restore();
 }
